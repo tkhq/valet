@@ -6,7 +6,7 @@ import type {
   TeamSummary,
 } from "@valet/api/wire";
 import { Section } from "~/components/settings/section";
-import { Badge, Checkbox, RadioCard, Spinner } from "~/components/primitives";
+import { Badge, Checkbox, EmptyRow, ErrorRow, LoadingRow, RadioCard } from "~/components/primitives";
 import { useOrg, useOrgPlugins, usePatchOrgPlugin, useTeams } from "~/api/settings";
 
 /**
@@ -44,19 +44,10 @@ export function OrganizationPluginsPage() {
       title="Plugins"
       description="Choose who in your organization can use each plugin."
     >
-      {pluginsQ.isLoading && (
-        <div className="flex items-center gap-2 py-4 text-sm text-muted">
-          <Spinner size={14} /> Loading…
-        </div>
-      )}
-      {pluginsQ.error && (
-        <div className="py-4 text-sm text-danger-500">Failed to load plugins.</div>
-      )}
-
+      {pluginsQ.isLoading && <LoadingRow />}
+      {pluginsQ.error && <ErrorRow>Failed to load plugins. Reload the page to try again.</ErrorRow>}
       {pluginsQ.data && pluginsQ.data.plugins.length === 0 && (
-        <div className="py-4 text-sm text-muted">
-          No gateable plugins are loaded on this deployment.
-        </div>
+        <EmptyRow>No gateable plugins are loaded on this deployment.</EmptyRow>
       )}
 
       {pluginsQ.data?.plugins.map((plugin) => (

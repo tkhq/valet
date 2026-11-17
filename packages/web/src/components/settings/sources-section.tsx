@@ -1,7 +1,7 @@
 import { Fragment, useState } from "react";
 import { ArrowDownUp, ChevronDown, ChevronRight, Search, Trash2 } from "lucide-react";
 import type { BakeSummary, SourceSummary } from "~/api/sources";
-import { Badge, Button, Dialog, DialogContent, DialogFooter, Input, Label, SelectMenu, Spinner, Switch, StatusDot } from "~/components/primitives";
+import { Badge, Button, Dialog, DialogContent, DialogFooter, ErrorRow, Input, Label, LoadingRow, SelectMenu, Spinner, Switch, StatusDot } from "~/components/primitives";
 import { BakeQueuePanel } from "~/components/settings/bake-queue-panel";
 import { SourceChangesPanel } from "~/components/settings/source-changes-panel";
 import { Section } from "~/components/settings/section";
@@ -61,14 +61,8 @@ export function SourcesSection() {
         title="Base image"
         description="Commands that install tools every sandbox needs. The base image is built once and shared across runtimes."
       >
-        {sourcesQ.isLoading && (
-          <div className="flex items-center gap-2 py-4 text-sm text-muted">
-            <Spinner size={14} /> Loading…
-          </div>
-        )}
-        {sourcesQ.error && (
-          <p className="py-4 text-sm text-danger-500">Failed to load image sources. Reload the page.</p>
-        )}
+        {sourcesQ.isLoading && <LoadingRow />}
+        {sourcesQ.error && <ErrorRow>Failed to load image sources. Reload the page to try again.</ErrorRow>}
         {sourcesQ.data && (
           <BaseImageCard source={baseSource} builderAvailable={builderAvailable} />
         )}
@@ -131,11 +125,7 @@ export function SourcesSection() {
             )}
           </div>
         )}
-        {sourcesQ.isLoading && (
-          <div className="flex items-center gap-2 py-4 text-sm text-muted">
-            <Spinner size={14} /> Loading…
-          </div>
-        )}
+        {sourcesQ.isLoading && <LoadingRow />}
       </Section>
 
       {/* ── External images ─────────────────────────────────────────────── */}
@@ -151,11 +141,7 @@ export function SourcesSection() {
             <CreateExternalSourceRow />
           </div>
         )}
-        {sourcesQ.isLoading && (
-          <div className="flex items-center gap-2 py-4 text-sm text-muted">
-            <Spinner size={14} /> Loading…
-          </div>
-        )}
+        {sourcesQ.isLoading && <LoadingRow />}
       </Section>
     </div>
   );

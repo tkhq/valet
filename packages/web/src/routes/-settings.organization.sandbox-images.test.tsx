@@ -31,10 +31,4 @@ describe("anonymous image bake setting", () => {
     fireEvent.click(toggle);
     expect(state.mutate).toHaveBeenLastCalledWith({ allowAnonymousImageBakes: false });
   });
-
-  it("disables the switch for members", () => {
-    state.data.callerRole = "member";
-    render(<OrganizationSandboxSettingsPage />);
-    expect(screen.getByRole("switch", { name: "Allow anonymous image bakes" }).hasAttribute("disabled")).toBe(true);
-  });
 });

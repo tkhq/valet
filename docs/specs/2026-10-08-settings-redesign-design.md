@@ -42,21 +42,16 @@ on these pages, not the switcher's.
 | Group | Items | Scope |
 |---|---|---|
 | Account | Profile, Preferences, Notifications | you |
-| Personal workspace | API keys and proxy, Agent access, Policies | your personal workspace |
+| Personal | Integrations, Usage, API keys and proxy, Secrets, Agent access, Policies, Model comparison | your personal workspace |
 | Your teams | one item per team you belong to | that team |
 | Organization | General, Models and usage, Apps and plugins, Security and audit | the organization (admins) |
 
 - **Preferences** joins Appearance and Thread defaults on one page.
-  `/settings/appearance` and `/settings/threads` redirect to it.
 - **API keys and proxy** joins the two pages for the personal workspace.
-  `/settings/proxy` redirects to it.
 - **A team** opens `/settings/teams/$teamId`, a page with tabs: General (the
   team panel: members, defaults, Slack home channel, connections), API keys and
-  proxy, and Policies. `/settings/team` redirects to the team selected in the
-  switcher, or to Profile when the switcher is on the personal workspace or
-  holds a team the caller is no longer on. It waits for the teams and org
-  queries before it decides, because the switcher keeps a stored team while
-  they load. A draft on one team's tab does not carry to another team's page.
+  proxy, and Policies. A draft on one team's tab does not carry to another
+  team's page.
   Deleting the team, or removing yourself from it, on this page opens Profile.
 - **Organization** keeps every existing route. The rail shows four items, and
   each item's page shows a tab bar over the routes it groups:
@@ -68,13 +63,29 @@ on these pages, not the switcher's.
 
   A plain member still sees only Teams and 1Password, as two rail items, and
   no tab bar.
-- While organizations are off, Personal workspace also lists Models
+- While organizations are off, Personal also lists Models
   (`/settings/models`). For an org admin it also lists MCP servers
   (`/settings/mcp-servers`), because `GET /api/org/mcp-servers` refuses a
   plain member. Each opens the same page as its Organization tab, outside
   the organization route guard. A plain member who opens
   `/settings/mcp-servers` sees a notice to ask an organization admin.
 - Below `sm`, the rail becomes one menu with the same groups.
+
+**Cleanup (2026-11-16).** The rail group for the personal scope is named
+"Personal", the name the workspace switcher uses. The rail has no Plugins
+group: the top bar's Plugins menu opens Valet Security and Code review. The
+Organization Models and usage section drops its Compare tab, and
+`/settings/model-comparison` under Personal is the one comparison page. The
+redirect-only routes `/settings/appearance`, `/settings/threads`,
+`/settings/proxy`, and `/settings/team` are deleted, because no link opens
+them. `/settings/connected-accounts` stays for OAuth returns. A page's first
+heading matches its rail label, for example "API keys and proxy" and
+"Policies". A layout heading that repeats one of its tabs, such as General
+over a General tab, stays for screen readers only. Organization General
+saves the name with an inline Save beside the field, and the turn-off control
+uses the danger button. Organization Security kill switches show service
+display names. The Secrets empty state names `VALET_SECRET_STORE` only to an
+admin.
 
 ### 3. Visual language
 
@@ -96,7 +107,7 @@ Settings matches the thread UI:
 - Each space has one settings home (2026-11-04, Linear's team settings). A
   team's Integrations and Usage are tabs on `/settings/teams/$teamId`, beside
   General, API keys and proxy, and Policies. Your own are
-  `/settings/integrations` and `/settings/usage` under Personal workspace. The
+  `/settings/integrations` and `/settings/usage` under Personal. The
   sidebar's Settings row under each space is one link to that home, and Skills
   and Memory are ordinary space rows. The team General tab no longer repeats
   the team's connections.
@@ -281,16 +292,17 @@ Restart replay publishes the same completion event after it saves the result.
   organizations are off, the phone menu, and a rail that does not change
   with the switcher.
 - `-settings.routes.test.tsx` (real router, real layout and scope provider):
-  the redirects from `/settings/appearance`, `/settings/threads`, and
-  `/settings/proxy`; Preferences with both parts; personal Policies pinned while
+  Preferences with both parts; personal Policies pinned while
   the switcher holds a team; a team's API keys and proxy and Policies tabs;
   the Organization tabs for an admin but not a member; and, while
   organizations are off, MCP servers outside the organization route guard
   for an admin and the ask-an-admin notice for a member.
 - `-settings.team.test.tsx`: the team page pins its team, marks its tab,
   refuses a team the caller is not on, and drops a draft when another of the
-  caller's teams opens; `/settings/team` redirects; the personal API keys and
-  proxy page pins personal scope.
+  caller's teams opens; the personal API keys and proxy page pins personal
+  scope.
+- `-settings.navigation.test.tsx`: rail links leave Organization Teams, and
+  primary links leave Settings.
 - `workspace-scope-pinned.test.tsx`: a pinned scope and the tab title.
 - `-integrations.test.tsx` and `-integrations.router.test.tsx`: the three
   groups, the row states and offers, the panel as a URL (Back, `?q=`, an

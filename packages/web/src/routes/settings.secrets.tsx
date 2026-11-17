@@ -1,17 +1,17 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useId, useState, type FormEvent } from "react";
 import type { SecretSummary } from "@valet/api/wire";
-import { Button, Input, Spinner, TabBar, Textarea, tabPanelId, type TabDef } from "~/components/primitives";
+import { Button, EmptyRow, ErrorRow, Input, LoadingRow, TabBar, Textarea, tabPanelId, type TabDef } from "~/components/primitives";
 import { Section } from "~/components/settings/section";
 import { useDeleteSecret, useSaveSecret, useSecrets, type SecretTarget } from "~/api/secrets";
-import { useTeams } from "~/api/settings";
+import { useMe, useTeams } from "~/api/settings";
 import { errorText } from "~/lib/error-text";
 import { formatDateOr } from "~/lib/format-when";
 import { useCopyToClipboard } from "~/lib/use-copy";
 
 /**
  * `/settings/secrets` — secrets in the deployment's secret store, by scope:
- * the caller's own, each team they belong to, and the company's. A saved
+ * the caller's own, each team they belong to, and the organization's. A saved
  * value is never shown again. A session reads one with
  * `valet-secrets run --env NAME=<reference> -- <command>`.
  */
@@ -31,7 +31,7 @@ export function SecretsPage() {
   const tabs: TabDef<string>[] = [
     { id: "personal", label: "Personal" },
     ...myTeams.map((t) => ({ id: `team:${t.id}`, label: t.name })),
-    { id: "company", label: "Company" },
+    { id: "company", label: "Organization" },
   ];
   const [active, setActive] = useState("personal");
   const label = useId();
@@ -51,21 +51,19 @@ export function SecretsPage() {
 
 function ScopePanel({ target }: { target: SecretTarget }) {
   const secretsQ = useSecrets(target);
+  const meQ = useMe();
   const data = secretsQ.data;
-  if (secretsQ.isLoading) {
-    return (
-      <div className="flex items-center gap-2 py-4 text-sm text-muted">
-        <Spinner size={14} /> Loading…
-      </div>
-    );
-  }
-  if (secretsQ.error) return <p role="alert" className="py-4 text-sm text-danger-500">{errorText(secretsQ.error)}</p>;
+  if (secretsQ.isLoading) return <LoadingRow />;
+  if (secretsQ.error) return <ErrorRow>{errorText(secretsQ.error)}</ErrorRow>;
   if (!data) return null;
   if (!data.enabled) {
+    // Only an admin can act on the operator setting, so only an admin sees it.
     return (
-      <p className="py-4 text-sm text-muted">
-        The secret store is not set up on this Valet. An operator sets VALET_SECRET_STORE to turn it on.
-      </p>
+      <EmptyRow>
+        {meQ.data?.orgRole === "admin"
+          ? "Secrets are not set up on this Valet. Set VALET_SECRET_STORE on the server to turn them on."
+          : "Secrets are not set up on this Valet. Ask an admin to turn them on."}
+      </EmptyRow>
     );
   }
   return (

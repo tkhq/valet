@@ -148,7 +148,7 @@ function NotConfiguredCard({ webhookMode }: { webhookMode: "public" | "manual" }
   }
 
   return (
-    <div className="max-w-2xl space-y-4">
+    <div className="space-y-4">
       <div className="-mx-4">
         {/* Header */}
         <div className="flex items-start gap-3 border-b border-line px-6 py-5">

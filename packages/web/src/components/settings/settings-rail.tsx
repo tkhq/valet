@@ -6,7 +6,6 @@ import {
   Building2,
   ChevronDown,
   Cpu,
-  GitPullRequest,
   KeyRound,
   LockKeyhole,
   Plug,
@@ -18,8 +17,7 @@ import {
   type LucideIcon,
   BarChart3,
 } from "lucide-react";
-import { pluginEnabledForCaller, pluginLoaded, useOrg, useTeams } from "~/api/settings";
-import { REVIEW_PLUGIN } from "~/components/code-review/review-lines";
+import { useOrg, useTeams } from "~/api/settings";
 import { Button, DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger, type AppPath } from "~/components/primitives";
 import { eligibleTeams } from "~/components/session/assistant-rail";
 import { useResponsiveOverlay } from "~/hooks/use-responsive-overlay";
@@ -31,13 +29,10 @@ import { cn } from "~/lib/cn";
  * workspace switcher:
  *
  * - **Account**: you.
- * - **Personal workspace**: your own workspace's integrations, usage, keys,
- *   proxy, agent access, and policies.
+ * - **Personal**: the personal scope's integrations, usage, keys, proxy,
+ *   secrets, agent access, policies, and model comparison.
  * - **Your teams**: one item per team you belong to, each opening its own
  *   `/settings/teams/$teamId` pages.
- * - **Plugins**: Valet Security, for a caller with the plugin, and Code
- *   review, when the deployment loads the PR review plugin. Each opens its
- *   page in the active space; the sidebar's space rows leave them out.
  * - **Organization**: shown once `useOrg()` resolves with the gate on (never
  *   flashes). An admin sees four grouped sections, each a tab bar over its
  *   existing routes (`ORG_SECTIONS`). A plain member sees Teams and 1Password.
@@ -75,7 +70,6 @@ export const ORG_SECTIONS: ReadonlyArray<{ label: string; icon: LucideIcon; rout
     icon: Cpu,
     routes: [
       { to: "/settings/organization/models", label: "Models" },
-      { to: "/settings/organization/model-comparison", label: "Compare" },
       { to: "/settings/organization/proxy", label: "Proxy" },
     ],
   },
@@ -187,9 +181,6 @@ const MCP_SERVERS_ITEM: RailItem = {
   active: exact("/settings/mcp-servers"),
 };
 
-const SECURITY_ITEM: RailItem = { to: "/security", label: "Valet Security", icon: ShieldCheck, active: (p) => onRoute(p, "/security") };
-const CODE_REVIEW_ITEM: RailItem = { to: "/code-review", label: "Code review", icon: GitPullRequest, active: (p) => onRoute(p, "/code-review") };
-
 const MEMBER_ORG_ITEMS: RailItem[] = [
   { to: ORG_TEAMS_PATH, label: "Teams", icon: Users, active: (p) => onRoute(p, ORG_TEAMS_PATH) },
   { to: ORG_ONEPASSWORD_PATH, label: "1Password", icon: KeyRound, active: exact(ORG_ONEPASSWORD_PATH) },
@@ -225,15 +216,10 @@ export function SettingsRail() {
     active: (p) => onRoute(p, `/settings/teams/${team.id}`),
   }));
 
-  const pluginItems = [
-    ...(pluginEnabledForCaller(orgQ.data, "security") === true ? [SECURITY_ITEM] : []),
-    ...(pluginLoaded(orgQ.data, REVIEW_PLUGIN) === true ? [CODE_REVIEW_ITEM] : []),
-  ];
   const groups: RailGroupSpec[] = [
     { label: "Account", items: ACCOUNT_ITEMS },
-    { label: "Personal workspace", items: personalItems },
+    { label: "Personal", items: personalItems },
     ...(teamItems.length > 0 ? [{ label: "Your teams", items: teamItems }] : []),
-    ...(pluginItems.length > 0 ? [{ label: "Plugins", items: pluginItems }] : []),
     ...(organizationsOn ? [{ label: "Organization", items: orgAdmin ? ADMIN_ORG_ITEMS : MEMBER_ORG_ITEMS }] : []),
   ];
   const currentGroup = groups.find((group) => group.items.some((item) => item.active(pathname)));

@@ -1,6 +1,7 @@
 import { useProxySettings } from "~/api/proxy-usage";
 import { useCreateTeamApiKey, useTeamApiKeys } from "~/api/api-keys";
 import { useOrg, useTeams } from "~/api/settings";
+import { ErrorRow, LoadingRow } from "~/components/primitives";
 import { Section } from "~/components/settings/section";
 import { ProxyGovernance } from "~/components/proxy/proxy-governance";
 import { OnboardingPanel, type OnboardingPanelProps } from "~/components/usage/OnboardingPanel";
@@ -12,13 +13,13 @@ export function TeamProxySettings({ teamId }: { teamId: string }) {
   const keysQ = useTeamApiKeys(teamId);
   const settingsQ = useProxySettings();
   if (teamsQ.error || orgQ.error || keysQ.error || settingsQ.error) {
-    return <p role="alert">Could not verify team proxy access. Reload this page to try again.</p>;
+    return <ErrorRow>Could not verify team proxy access. Reload this page to try again.</ErrorRow>;
   }
   if (!teamsQ.data || !orgQ.data || !keysQ.data || !settingsQ.data) {
-    return <p role="status">Loading team proxy settings…</p>;
+    return <LoadingRow label="Loading team proxy settings…" />;
   }
   const team = teamsQ.data.teams.find((candidate) => candidate.id === teamId);
-  if (!team) return <p role="alert">This team is unavailable. Select another workspace.</p>;
+  if (!team) return <ErrorRow>You are not a member of this team. Choose a team under Your teams.</ErrorRow>;
   const canCreate = team.callerRole === "admin" || orgQ.data.callerRole === "admin";
   return (
     <div className="min-w-0 max-w-full space-y-10">

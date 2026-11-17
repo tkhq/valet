@@ -922,7 +922,7 @@ describe("TeamsPanel selected workspace", () => {
 
   it("does not fall back to another team when the selected team is unavailable", () => {
     render(<TeamsPanel orgMembers={orgMembers} teamId="missing" />);
-    expect(screen.getByText(/This team is unavailable/)).toBeTruthy();
+    expect(screen.getByText(/not a member of this team/)).toBeTruthy();
     expect(screen.queryByText("Platform")).toBeNull();
     expect(screen.queryByText("Support")).toBeNull();
     expect(screen.queryByRole("combobox", { name: "Default model" })).toBeNull();

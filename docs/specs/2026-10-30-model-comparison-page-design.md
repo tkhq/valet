@@ -27,7 +27,7 @@ Valet now exposes dozens of models across Anthropic, OpenAI, OpenRouter and Amaz
 
 ## What the page shows
 
-One component, `ModelComparisonTable`, mounted at two routes. `/settings/model-comparison` is a personal rail item labelled "Model comparison" (bar-chart icon, placed after the existing Models or Appearance item) that every member sees in both org mode and single-user mode. `/settings/organization/model-comparison` is a "Compare" tab in the organization "Models and usage" group, between Models and Proxy, inside the existing `OrgRouteGuard`. The rail tests that enumerate items and tabs are updated with the two entries.
+One component, `ModelComparisonTable`, mounted at one route. `/settings/model-comparison` is a personal rail item labelled "Model comparison" (bar-chart icon, placed after the existing Models or Appearance item) that every member sees in both org mode and single-user mode. The organization "Compare" tab and its `/settings/organization/model-comparison` route were removed on 2026-11-16: admins open the same personal page.
 
 One table, one row per entry of `GET /api/models` (active models only, which is what pickers already show). Columns:
 
@@ -155,7 +155,7 @@ Conner's review of the first deployed page: the sticky Model column covered the 
 
 - **One Model cell.** Name on the first line with a small "reasoning" badge when the model reasons; provider and the bare id (namespace stripped, monospace, truncated with the full catalog id as the tooltip) on the second line. The Provider and Reasoning columns are gone. No sticky column; the table sits in a bordered, horizontally scrollable container that it rarely needs.
 - **Short headers.** Input, Output, Blended, Context, Intelligence, Coding, Valet eval, Quality, Value, Approved; the caption carries the unit ("$ per 1M tokens"). Value is set larger and bolder than its neighbours. First click on a price or context header sorts ascending, on a score header descending.
-- **Wide layout.** `/settings/model-comparison` and `/settings/organization/model-comparison` drop the settings column's `max-w-3xl`; other settings pages keep it (`WIDE_SETTINGS_ROUTES` in the settings layout).
+- **Wide layout.** `/settings/model-comparison` drops the settings column's `max-w-3xl`; other settings pages keep it (`WIDE_SETTINGS_ROUTES` in the settings layout). The table scrolls horizontally inside its card when it is wider than the column.
 - **Default view hides what cannot be compared.** A row shows by default only when its public score is on the newest index version or it has a Valet eval result. Older-version scores and unscored or unknown models are hidden behind "Show N hidden (older index versions or not benchmarked)". When nothing in the catalog qualifies, the table shows everything and the toggle is absent, so the page is never empty by default.
 - **Filters.** Text filter (name, id, provider); provider chips (shown when more than one provider is present); "Approved only" (shown when the org restricts models). Filters compose, and the hidden count respects the other filters.
 

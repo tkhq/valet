@@ -21,7 +21,7 @@ vi.mock("@tanstack/react-router", () => ({
   createFileRoute: () => (config: unknown) => config,
 }));
 
-import { AppearancePage } from "./settings.appearance";
+import { AppearancePage } from "./appearance-section";
 
 /** The accessible name of each card, in the order the page renders them. */
 const SMART = /Smart/;

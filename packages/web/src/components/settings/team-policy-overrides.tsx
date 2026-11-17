@@ -3,6 +3,7 @@ import { usePolicies, usePutTeamPolicyOverride, useDeletePolicy, useTeamGrants, 
 import { PolicyOverridesEditor } from "./policy-overrides-section";
 import { GrantsList } from "./grants-section";
 import { PoliciesSection } from "./policies-section";
+import { ErrorRow, LoadingRow } from "~/components/primitives";
 
 export function TeamPolicyOverrides({ teamId, canEdit }: { teamId: string; canEdit: boolean }) {
   const policies = usePolicies(teamId);
@@ -11,8 +12,8 @@ export function TeamPolicyOverrides({ teamId, canEdit }: { teamId: string; canEd
   const del = useDeletePolicy(teamId);
   const revoke = useDeleteTeamGrant(teamId);
   // Unmount drafts/errors and cached controls when either scoped read fails.
-  if (policies.error || grants.error) return <p role="alert">{apiErrorMessage(policies.error ?? grants.error)}</p>;
-  if (!policies.data || !grants.data) return <p role="status">Loading…</p>;
+  if (policies.error || grants.error) return <ErrorRow>{apiErrorMessage(policies.error ?? grants.error)}</ErrorRow>;
+  if (!policies.data || !grants.data) return <LoadingRow />;
   return <TeamPolicyContent key={`${teamId}:${canEdit}`} policies={policies.data.policies} grants={grants.data.grants}
     teamId={teamId} canEdit={canEdit} put={put} del={del} revoke={revoke} />;
 }

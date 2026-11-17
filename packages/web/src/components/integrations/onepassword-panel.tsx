@@ -1,6 +1,7 @@
+import { Link } from "@tanstack/react-router";
 import { useOnePasswordSettings } from "~/api/onepassword";
 import { useOrg } from "~/api/settings";
-import { Spinner } from "~/components/primitives";
+import { ErrorRow, LoadingRow } from "~/components/primitives";
 import { Section } from "~/components/settings/section";
 import { ServiceIcon } from "~/components/service-icon";
 import {
@@ -37,21 +38,15 @@ export function OnePasswordPanel() {
         <p className="text-sm text-muted">
           The organization token reads vaults every member's runtimes can use. Your own token
           is on{" "}
-          <a className="text-moss underline" href="/settings/integrations">
+          <Link className="text-moss underline" to="/settings/integrations">
             Integrations
-          </a>
+          </Link>
           .
         </p>
       </div>
 
-      {settingsQ.isLoading && (
-        <div className="flex items-center gap-2 py-2 text-sm text-muted">
-          <Spinner size={14} /> Loading…
-        </div>
-      )}
-      {settingsQ.error && (
-        <p className="py-2 text-sm text-danger-500">Failed to load 1Password settings.</p>
-      )}
+      {settingsQ.isLoading && <LoadingRow />}
+      {settingsQ.error && <ErrorRow>Failed to load 1Password settings. Reload the page to try again.</ErrorRow>}
 
       {settingsQ.data &&
         (isAdmin ? (

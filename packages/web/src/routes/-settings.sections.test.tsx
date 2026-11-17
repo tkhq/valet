@@ -130,8 +130,8 @@ vi.mock("~/lib/workspace-scope", async (importOriginal) => {
 
 import { PALETTE_CHOICES } from "~/lib/theme";
 import { ApiKeysPage } from "./settings.api-keys";
-import { AppearancePage } from "./settings.appearance";
-import { ThreadDefaultsPage } from "./settings.threads";
+import { AppearancePage } from "~/components/settings/appearance-section";
+import { ThreadDefaultsPage } from "~/components/settings/thread-defaults-section";
 import { NotificationsPage } from "./settings.notifications";
 import { ProfilePage } from "./settings.profile";
 
@@ -160,7 +160,7 @@ describe("ProfilePage", () => {
     expect(email.value).toBe("me@example.com");
     expect(email.readOnly).toBe(true);
     expect(
-      screen.getByText("Sign-in email — managed by your login once real auth ships."),
+      screen.getByText("Your sign-in email. Your login provider manages it."),
     ).toBeTruthy();
   });
 

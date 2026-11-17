@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { OrgDirectoryUserWire, TeamApiKeySummary } from "@valet/api/wire";
-import { Button, Input, Spinner } from "~/components/primitives";
+import { Button, ErrorRow, Input, LoadingRow } from "~/components/primitives";
 import {
   useApiKeys,
   useCreateApiKey,
@@ -33,12 +33,8 @@ function PersonalApiKeysSection() {
 
       {created && <KeyRevealBlock name={created.name ?? "New key"} secret={created.key} onDismiss={() => setCreated(null)} />}
 
-      {keysQ.isLoading && (
-        <div className="flex items-center gap-2 py-4 text-sm text-muted">
-          <Spinner size={14} /> Loading…
-        </div>
-      )}
-      {keysQ.error && <p className="py-4 text-sm text-danger-500">Failed to load API keys.</p>}
+      {keysQ.isLoading && <LoadingRow />}
+      {keysQ.error && <ErrorRow>Failed to load API keys. Reload the page to try again.</ErrorRow>}
 
       {keysQ.data && keysQ.data.length === 0 && (
         <p className="py-4 text-sm text-muted">
@@ -93,14 +89,14 @@ export function TeamApiKeysSection({ teamId }: { teamId: string }) {
   // Errors can coexist with cached admin roles and keys after a failed refetch.
   // Unmount the controls so secrets, drafts, and late callbacks lose their state.
   if (keysQ.error || teamsQ.error || orgQ.error) {
-    return <p role="alert" className="text-sm text-danger-500">Could not verify team key access. Reload this page to try again.</p>;
+    return <ErrorRow>Could not verify team key access. Reload this page to try again.</ErrorRow>;
   }
   if (!keysQ.data || !teamsQ.data || !orgQ.data) {
-    return <p role="status" className="text-sm text-muted">Loading team API keys…</p>;
+    return <LoadingRow label="Loading team API keys…" />;
   }
   const team = teamsQ.data.teams.find((candidate) => candidate.id === teamId);
   if (!team) {
-    return <p role="alert" className="text-sm text-muted">This team is unavailable. Select another workspace.</p>;
+    return <ErrorRow>You are not a member of this team. Choose a team under Your teams.</ErrorRow>;
   }
   const canMutate = team.callerRole === "admin" || orgQ.data.callerRole === "admin";
   return <TeamApiKeyControls key={`${teamId}:${canMutate}`} teamId={teamId} keys={keysQ.data} canMutate={canMutate} />;

@@ -274,6 +274,6 @@ describe("ModelComparisonTable", () => {
     unmount();
     modelsState = { isLoading: false, error: new Error("boom") };
     render(<ModelComparisonTable lookupForTests={lookup} scoringForTests={SCORING} />);
-    expect(screen.getByText("Failed to load models.")).toBeTruthy();
+    expect(screen.getByText("Failed to load models. Reload the page to try again.")).toBeTruthy();
   });
 });

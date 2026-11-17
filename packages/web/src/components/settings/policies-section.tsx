@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { serviceDisplayName } from "@valet/shared";
 import { MODE_LABELS, RISK_LABELS } from "./policy-presentation";
 import { Trash2 } from "lucide-react";
 import type {
@@ -273,18 +274,18 @@ function KillSwitches({
     <Section
       title="Kill switches"
       description={teamId === undefined
-        ? "Instantly deny every action for a service — sugar over a service-level deny policy."
+        ? "Turn on to deny every action of a service."
         : "Block this team’s actions for a service."}
     >
       {services.map((service) => {
         const row = killSwitchRow(service);
         return (
           <div key={service} className="flex flex-wrap items-center justify-between gap-3 py-3">
-            <span className="text-sm font-medium text-[--fg]">{service}</span>
+            <span className="text-sm font-medium text-[--fg]" title={service}>{serviceDisplayName(service)}</span>
             <div className="flex flex-wrap items-center gap-2">
               <span className="text-xs text-muted">{row ? "Blocked" : teamId === undefined ? "Allowed" : "No team block"}</span>
               <Switch
-                aria-label={`Kill switch for ${service}`}
+                aria-label={`Kill switch for ${serviceDisplayName(service)}`}
                 checked={row !== undefined}
                 disabled={!canEdit || create.isPending || del.isPending}
                 onCheckedChange={() => {

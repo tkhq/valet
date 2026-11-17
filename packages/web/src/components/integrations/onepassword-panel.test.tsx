@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 /**
  * Organization · 1Password. The page carries the org-wide token alone; a
- * personal token is a personal credential and lives on You · Connected
- * accounts. Mocks `~/api/onepassword`, `~/api/integrations` and
+ * personal token is a personal credential and lives on Personal ·
+ * Integrations. Mocks `~/api/onepassword`, `~/api/integrations` and
  * `~/api/settings`: these tests only care what the panel renders and which
  * mutation it fires.
  */
@@ -19,6 +19,12 @@ let settingsData: OnePasswordSettingsResponse | undefined = {
   orgTokenConnected: false,
   personalTokenConnected: false,
 };
+
+vi.mock("@tanstack/react-router", () => ({
+  Link: ({ to, children, className }: { to: string; children: React.ReactNode; className?: string }) => (
+    <a href={to} className={className}>{children}</a>
+  ),
+}));
 
 vi.mock("~/api/settings", () => ({
   useOrg: () => ({ data: orgData, isLoading: false, error: null }),

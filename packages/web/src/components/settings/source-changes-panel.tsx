@@ -1,9 +1,9 @@
 import { useState } from "react";
-import { ShieldCheck } from "lucide-react";
 import { ApiError } from "~/api/client";
 import { useMe } from "~/api/settings";
 import { useResolveSourceChange, useSourceChanges, type SourceChangeSummary } from "~/api/sources";
 import { Badge, Button } from "~/components/primitives";
+import { SectionHeading } from "~/components/settings/section";
 import { relativeTime } from "~/lib/relative-time";
 
 function decisionError(error: Error): string {
@@ -47,15 +47,11 @@ function PendingChanges({ pending }: { pending: SourceChangeSummary[] }) {
   }
 
   return (
-    <section aria-labelledby="source-changes-title" className="space-y-3">
-      <div className="space-y-1">
-        <h2 id="source-changes-title" className="flex items-center gap-2 font-display text-xl text-ink">
-          <ShieldCheck className="h-5 w-5 text-moss" aria-hidden /> Changes waiting for approval
-        </h2>
-        <p className="text-sm text-muted">
-          Image sources decide what every sandbox runs. A second org admin must approve each new source and each change to its image or setup commands.
-        </p>
-      </div>
+    <section aria-label="Changes waiting for approval" className="space-y-3">
+      <SectionHeading
+        title="Changes waiting for approval"
+        description="Image sources decide what every sandbox runs. A second org admin must approve each new source and each change to its image or setup commands."
+      />
       {error && <p role="alert" className="text-sm text-danger-500">{error}</p>}
       <ul className="divide-y divide-line overflow-hidden rounded-xl border border-line">
         {pending.map((change) => {

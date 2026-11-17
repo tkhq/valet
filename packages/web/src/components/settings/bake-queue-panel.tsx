@@ -1,8 +1,9 @@
 import { useState } from "react";
-import { ArrowDown, ArrowUp, ArrowUpToLine, Boxes, CheckCircle2, Clock3, Layers3 } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpToLine, Boxes, CheckCircle2, Clock3 } from "lucide-react";
 import { ApiError } from "~/api/client";
 import { useBakeQueue, useReorderBakeQueue, type BakeQueueItem } from "~/api/sources";
-import { Badge, Button, Spinner, StatusDot } from "~/components/primitives";
+import { Badge, Button, LoadingRow, Spinner, StatusDot } from "~/components/primitives";
+import { SectionHeading } from "~/components/settings/section";
 import { relativeTime } from "~/lib/relative-time";
 
 function bakeName(bake: BakeQueueItem) {
@@ -37,22 +38,18 @@ export function BakeQueuePanel() {
   const busy = Boolean(data && (data.running.length || data.queued.length || data.blocked.length));
 
   return (
-    <section aria-labelledby="bake-queue-title" className="space-y-4">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="space-y-1">
-          <h2 id="bake-queue-title" className="flex items-center gap-2 font-display text-xl text-ink">
-            <Layers3 className="h-5 w-5 text-moss" aria-hidden /> Bake queue
-          </h2>
-          <p className="text-sm text-muted">Follow base image builds and repository rebuilds. Choose what builds next.</p>
-        </div>
-        {data && data.builderAvailable && (
+    <section aria-label="Bake queue" className="space-y-4">
+      <SectionHeading
+        title="Bake queue"
+        description="Follow base image builds and repository rebuilds. Choose what builds next."
+        actions={data && data.builderAvailable && (
           <span className="flex items-center gap-1.5 text-xs text-muted">
             <StatusDot tone="success" size="sm" /> Refreshes every 5s
           </span>
         )}
-      </div>
+      />
 
-      {queue.isLoading && <p className="flex items-center gap-2 text-sm text-muted"><Spinner size={14} />Loading bake queue…</p>}
+      {queue.isLoading && <LoadingRow label="Loading bake queue…" />}
       {queue.error && (
         <div role="alert" className="flex flex-wrap items-center gap-3 rounded-md border border-line p-3 text-sm text-danger-500">
           Queue could not load. Retry to see the latest builds.

@@ -8,7 +8,7 @@
  */
 import { useMemo, useState } from "react";
 import { MODEL_BENCHMARKS_SNAPSHOT, type ModelBenchmark } from "@valet/shared";
-import { Badge, Checkbox, FilterChips, Input, Spinner } from "~/components/primitives";
+import { Badge, Checkbox, ErrorRow, FilterChips, Input, LoadingRow } from "~/components/primitives";
 import { useModels } from "~/api/settings";
 import { formatContext, formatRate, formatUsdPrecise } from "~/lib/format-usage";
 import {
@@ -154,12 +154,8 @@ export function ModelComparisonTable({
           </label>
         )}
       </div>
-      {modelsQ.isLoading && (
-        <div className="flex items-center gap-2 py-2 text-sm text-muted">
-          <Spinner size={14} /> Loading models…
-        </div>
-      )}
-      {modelsQ.error != null && <p className="text-xs text-danger-500">Failed to load models.</p>}
+      {modelsQ.isLoading && <LoadingRow label="Loading models…" className="py-2" />}
+      {modelsQ.error != null && <ErrorRow className="py-2">Failed to load models. Reload the page to try again.</ErrorRow>}
       {!modelsQ.isLoading && modelsQ.error == null && (
         <div className="overflow-x-auto rounded border border-line">
           <table className="w-full text-left text-xs">

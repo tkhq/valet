@@ -4,7 +4,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { Section } from "~/components/settings/section";
 import { FieldRow } from "~/components/settings/field-row";
 import { EnableOrgCard } from "~/components/settings/enable-org-card";
-import { Button, Input, Spinner } from "~/components/primitives";
+import { Button, ErrorRow, Input, LoadingRow } from "~/components/primitives";
 import { ProfilePictureUpload } from "~/components/settings/profile-picture-upload";
 import { useMe, useOrg, usePatchMe, useUploadMyAvatar } from "~/api/settings";
 import { authClient } from "~/lib/auth-client";
@@ -12,10 +12,10 @@ import { useComposerDraftStore } from "~/stores/composer-drafts";
 import { errorText } from "~/lib/error-text";
 
 /**
- * `/settings/profile` — You · Profile. Name + avatar URL, one Save enabled
+ * `/settings/profile` — Account · Profile. Name + avatar URL, one Save enabled
  * when either field is dirty; read-only email row; the enable-organizations
  * card at the bottom for org admins with the gate off (spec: "the rail's
- * You group is per-route; the card belongs to one page — profile is the
+ * Account group is per-route; the card belongs to one page — profile is the
  * landing page").
  */
 export const Route = createFileRoute("/settings/profile")({
@@ -78,14 +78,8 @@ export function ProfilePage() {
   return (
     <div className="space-y-10">
       <Section title="Profile" description="Your name, avatar, and sign-in email.">
-        {meQ.isLoading && (
-          <div className="flex items-center gap-2 py-4 text-sm text-muted">
-            <Spinner size={14} /> Loading…
-          </div>
-        )}
-        {meQ.error && (
-          <div className="py-4 text-sm text-danger-500">Failed to load your profile.</div>
-        )}
+        {meQ.isLoading && <LoadingRow />}
+        {meQ.error && <ErrorRow>Failed to load your profile. Reload the page to try again.</ErrorRow>}
         {meQ.data && (
           <>
             <FieldRow label="Name">
@@ -134,7 +128,7 @@ export function ProfilePage() {
             </FieldRow>
             <FieldRow
               label="Email"
-              hint="Sign-in email — managed by your login once real auth ships."
+              hint="Your sign-in email. Your login provider manages it."
             >
               <Input value={meQ.data.email} readOnly disabled aria-label="Email" />
             </FieldRow>

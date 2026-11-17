@@ -5,7 +5,7 @@ import {
   useOrgDirectory,
   useSuggestedTeams,
 } from "~/api/settings";
-import { Button, Spinner } from "~/components/primitives";
+import { Button, EmptyRow, ErrorRow, LoadingRow } from "~/components/primitives";
 import { Section } from "~/components/settings/section";
 import { TeamsPanel } from "~/components/settings/teams-panel";
 import { errorText } from "~/lib/error-text";
@@ -27,18 +27,12 @@ export function OrganizationTeamsPage() {
   return (
     <Section title="Teams" description="Group members for scoped thread access.">
       <SuggestedTeams />
-      {directoryQ.isLoading && (
-        <div className="flex items-center gap-2 py-4 text-sm text-muted">
-          <Spinner size={14} /> Loading…
-        </div>
-      )}
+      {directoryQ.isLoading && <LoadingRow />}
       {directoryQ.error != null &&
         (directoryQ.error instanceof ApiError && directoryQ.error.status === 404 ? (
-          <p className="py-4 text-sm text-muted">Organizations aren't enabled</p>
+          <EmptyRow>Organizations aren't enabled</EmptyRow>
         ) : (
-          <p className="py-4 text-sm text-danger-500">
-            Failed to load the member directory. Reload the page to try again.
-          </p>
+          <ErrorRow>Failed to load the member directory. Reload the page to try again.</ErrorRow>
         ))}
       {directoryQ.data && <TeamsPanel orgMembers={directoryQ.data.users} teamId={teamId} />}
     </Section>
@@ -49,19 +43,9 @@ function SuggestedTeams() {
   const suggestionsQ = useSuggestedTeams();
   const join = useJoinSuggestedTeam();
 
-  if (suggestionsQ.isLoading) {
-    return (
-      <div className="flex items-center gap-2 border-b border-line py-4 text-sm text-muted">
-        <Spinner size={14} /> Loading team suggestions…
-      </div>
-    );
-  }
+  if (suggestionsQ.isLoading) return <LoadingRow label="Loading team suggestions…" className="border-b border-line" />;
   if (suggestionsQ.error) {
-    return (
-      <p className="border-b border-line py-4 text-sm text-danger-500">
-        Failed to load team suggestions. Reload the page to try again.
-      </p>
-    );
+    return <ErrorRow className="border-b border-line">Failed to load team suggestions. Reload the page to try again.</ErrorRow>;
   }
   if (!suggestionsQ.data || suggestionsQ.data.teams.length === 0) return null;
 

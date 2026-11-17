@@ -1,5 +1,4 @@
 import { useState } from "react";
-import { Navigate, createFileRoute } from "@tanstack/react-router";
 import { Monitor, Sun, Moon } from "lucide-react";
 import { Section } from "~/components/settings/section";
 import { RadioCard } from "~/components/primitives";
@@ -19,11 +18,10 @@ import {
 } from "~/lib/theme";
 
 /**
- * `/settings/appearance` — You · Appearance. Three independent choices,
- * each a row of `RadioCard`s (moss border and wash when selected): the
- * light/dark polarity, the color palette, and the chat density.
- * `~/lib/theme.ts` owns the first two mechanisms. `~/lib/preferences.ts`
- * owns the third.
+ * Preferences · Appearance. Three independent choices, each a row of
+ * `RadioCard`s (moss border and wash when selected): the light/dark
+ * polarity, the color palette, and the chat density. `~/lib/theme.ts` owns
+ * the first two mechanisms. `~/lib/preferences.ts` owns the third.
  *
  * The polarity and the palette are deliberately not merged into one list of
  * six or more cards. Every palette has a light and a dark form, so a single
@@ -31,13 +29,9 @@ import {
  * change color.
  *
  * Chat density sits here because it is a per-browser look choice, like the
- * two above it. It writes through `setToolCardDefault`, so this page adds
+ * two above it. It writes through `setToolCardDefault`, so this section adds
  * no persistence path of its own.
  */
-/** Appearance now lives on Preferences; the old path redirects there. */
-export const Route = createFileRoute("/settings/appearance")({
-  component: () => <Navigate to="/settings/preferences" replace />,
-});
 
 const THEME_OPTIONS: { value: ThemeChoice; label: string; description: string; icon: typeof Monitor }[] = [
   { value: "system", label: "System", description: "Follows your device's setting.", icon: Monitor },

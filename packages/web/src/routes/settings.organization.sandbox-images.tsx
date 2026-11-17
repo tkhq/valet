@@ -25,7 +25,7 @@ export function OrganizationSandboxSettingsPage() {
           <Switch
             aria-label="Allow anonymous image bakes"
             checked={org.data?.allowAnonymousImageBakes ?? false}
-            disabled={!org.data || org.data.callerRole !== "admin" || patch.isPending}
+            disabled={!org.data || patch.isPending}
             onCheckedChange={(enabled) => patch.mutate({ allowAnonymousImageBakes: enabled })}
           />
         </div>

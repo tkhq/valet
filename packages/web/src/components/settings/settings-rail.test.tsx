@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 /**
  * Settings rail (settings-redesign spec, decision 2): every scope is listed
- * at once — Account, Personal workspace, Your teams, Organization — and the
+ * at once (Account, Personal, Your teams, Organization), and the
  * rail never reads the workspace switcher.
  */
 import type { ReactNode } from "react";
@@ -27,9 +27,7 @@ let pathname = "/settings/profile";
 let orgData: { callerRole: "admin" | "member"; features: { organizations: boolean }; plugins: Array<{ name: string; enabledForCaller: boolean }>; loadedPlugins?: string[] } | undefined;
 let teams: Array<{ id: string; name: string; callerRole: "admin" | "member" | null }> = [];
 
-vi.mock("~/api/settings", async (importOriginal) => ({
-  pluginEnabledForCaller: (await importOriginal<typeof import("~/api/settings")>()).pluginEnabledForCaller,
-  pluginLoaded: (await importOriginal<typeof import("~/api/settings")>()).pluginLoaded,
+vi.mock("~/api/settings", () => ({
   useOrg: () => ({ data: orgData, isLoading: false, error: null }),
   useTeams: () => ({ data: { teams }, isLoading: false, error: null }),
 }));
@@ -59,28 +57,23 @@ function groupLabels(): string[] {
 describe("SettingsRail", () => {
   it("lists every scope, with teams by name", () => {
     render(<SettingsRail />);
-    expect(groupLabels()).toEqual(["Account", "Personal workspace", "Your teams", "Organization"]);
+    expect(groupLabels()).toEqual(["Account", "Personal", "Your teams", "Organization"]);
     const yourTeams = within(rail()).getByRole("group", { name: "Your teams" });
     expect(within(yourTeams).getAllByRole("link").map((a) => a.textContent)).toEqual(["platform", "team-tvc"]);
     expect(within(yourTeams).getByRole("link", { name: "team-tvc" }).getAttribute("href")).toBe("/settings/teams/t1");
   });
 
-  it("links Valet Security under Plugins only for a caller with the plugin", () => {
-    const { unmount } = render(<SettingsRail />);
+  it("has no Plugins group and no plugin page links: the top nav lists those", () => {
+    orgData = {
+      callerRole: "admin",
+      features: { organizations: true },
+      plugins: [{ name: "security", enabledForCaller: true }],
+      loadedPlugins: ["pr-review"],
+    };
+    render(<SettingsRail />);
     expect(groupLabels()).not.toContain("Plugins");
-    unmount();
-    orgData = { callerRole: "member", features: { organizations: true }, plugins: [{ name: "security", enabledForCaller: true }] };
-    render(<SettingsRail />);
-    const plugins = within(rail()).getByRole("group", { name: "Plugins" });
-    expect(within(plugins).getByRole("link", { name: "Valet Security" }).getAttribute("href")).toBe("/security");
-  });
-
-  it("links Code review under Plugins once the deployment loads the PR review plugin", () => {
-    orgData = { callerRole: "admin", features: { organizations: true }, plugins: [], loadedPlugins: ["pr-review"] };
-    render(<SettingsRail />);
-    const plugins = within(rail()).getByRole("group", { name: "Plugins" });
-    expect(within(plugins).getByRole("link", { name: "Code review" }).getAttribute("href")).toBe("/code-review");
-    expect(within(plugins).queryByRole("link", { name: "Valet Security" })).toBeNull();
+    expect(within(rail()).queryByRole("link", { name: "Valet Security" })).toBeNull();
+    expect(within(rail()).queryByRole("link", { name: "Code review" })).toBeNull();
   });
 
   it("links each team through its typed route and params", () => {
@@ -98,14 +91,14 @@ describe("SettingsRail", () => {
     render(<PinnedWorkspaceScope teamId="t1"><SettingsRail /></PinnedWorkspaceScope>);
     expect(snapshot()).toEqual(onPersonal);
     // Personal pages stay personal, and the team keeps its own item.
-    const personalGroup = within(rail()).getByRole("group", { name: "Personal workspace" });
+    const personalGroup = within(rail()).getByRole("group", { name: "Personal" });
     expect(within(personalGroup).getByRole("link", { name: "API keys and proxy" }).getAttribute("href")).toBe("/settings/api-keys");
     expect(within(rail()).getByRole("group", { name: "Your teams" })).toBeTruthy();
   });
 
-  it("keeps API keys, Agent access, Policies and Model comparison under Personal workspace", () => {
+  it("keeps API keys, Agent access, Policies and Model comparison under Personal", () => {
     render(<SettingsRail />);
-    const personal = within(rail()).getByRole("group", { name: "Personal workspace" });
+    const personal = within(rail()).getByRole("group", { name: "Personal" });
     for (const label of ["API keys and proxy", "Agent access", "Policies", "Model comparison"]) {
       expect(within(personal).getByRole("link", { name: label })).toBeTruthy();
     }
@@ -115,15 +108,14 @@ describe("SettingsRail", () => {
   it("offers Model comparison to a plain member with organizations on", () => {
     orgData = { callerRole: "member", features: { organizations: true }, plugins: [] };
     render(<SettingsRail />);
-    const personal = within(rail()).getByRole("group", { name: "Personal workspace" });
+    const personal = within(rail()).getByRole("group", { name: "Personal" });
     expect(within(personal).getByRole("link", { name: "Model comparison" })).toBeTruthy();
     expect(within(personal).queryByRole("link", { name: "Models" })).toBeNull();
   });
 
-  it("lists Compare between Models and Proxy in the Models and usage section", () => {
+  it("lists Models and Proxy in the Models and usage section", () => {
     const section = ORG_SECTIONS.find((s) => s.label === "Models and usage");
-    expect(section?.routes.map((r) => r.label)).toEqual(["Models", "Compare", "Proxy"]);
-    expect(section?.routes[1]?.to).toBe("/settings/organization/model-comparison");
+    expect(section?.routes.map((r) => r.label)).toEqual(["Models", "Proxy"]);
   });
 
   it("marks a team active on any of its tabs", () => {
@@ -154,34 +146,34 @@ describe("SettingsRail", () => {
   it("hides Organization and Your teams before the org query resolves", () => {
     orgData = undefined;
     render(<SettingsRail />);
-    expect(groupLabels()).toEqual(["Account", "Personal workspace"]);
+    expect(groupLabels()).toEqual(["Account", "Personal"]);
   });
 
-  it("offers Models under Personal workspace only while organizations are off", () => {
+  it("offers Models under Personal only while organizations are off", () => {
     orgData = { callerRole: "admin", features: { organizations: false }, plugins: [] };
     render(<SettingsRail />);
-    const personal = within(rail()).getByRole("group", { name: "Personal workspace" });
+    const personal = within(rail()).getByRole("group", { name: "Personal" });
     expect(within(personal).getByRole("link", { name: "Models" })).toBeTruthy();
     expect(groupLabels()).not.toContain("Organization");
   });
 
-  it("offers MCP servers under Personal workspace only to an admin while organizations are off", () => {
+  it("offers MCP servers under Personal only to an admin while organizations are off", () => {
     orgData = { callerRole: "admin", features: { organizations: false }, plugins: [] };
     const gateOff = render(<SettingsRail />);
-    const personal = within(rail()).getByRole("group", { name: "Personal workspace" });
+    const personal = within(rail()).getByRole("group", { name: "Personal" });
     expect(within(personal).getByRole("link", { name: "MCP servers" }).getAttribute("href")).toBe("/settings/mcp-servers");
     gateOff.unmount();
 
     // `GET /api/org/mcp-servers` 403s a non-admin, so a member gets no link.
     orgData = { callerRole: "member", features: { organizations: false }, plugins: [] };
     const memberGateOff = render(<SettingsRail />);
-    const memberPersonal = within(rail()).getByRole("group", { name: "Personal workspace" });
+    const memberPersonal = within(rail()).getByRole("group", { name: "Personal" });
     expect(within(memberPersonal).queryByRole("link", { name: "MCP servers" })).toBeNull();
     memberGateOff.unmount();
 
     orgData = { callerRole: "admin", features: { organizations: true }, plugins: [] };
     render(<SettingsRail />);
-    const personalOn = within(rail()).getByRole("group", { name: "Personal workspace" });
+    const personalOn = within(rail()).getByRole("group", { name: "Personal" });
     expect(within(personalOn).queryByRole("link", { name: "MCP servers" })).toBeNull();
   });
 

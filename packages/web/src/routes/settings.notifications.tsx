@@ -4,7 +4,7 @@ import type { NotificationKind } from "@valet/api/wire";
 import { useNotificationPreferences, useSetNotificationPreference } from "~/api/queries";
 import { Section } from "~/components/settings/section";
 import { FieldRow } from "~/components/settings/field-row";
-import { Select, Spinner, Switch } from "~/components/primitives";
+import { ErrorRow, LoadingRow, Select, Switch } from "~/components/primitives";
 import { Sparkles } from "lucide-react";
 import { isAttentionSoundEnabled, setAttentionSoundEnabled } from "~/lib/use-attention-ping";
 import {
@@ -49,13 +49,16 @@ export function NotificationsPage() {
   // where it is — a desk, a meeting room, a laptop in a cafe — not on who
   // is signed in, so this does not belong on the account.
   const [sound, setSound] = useState(() => isAttentionSoundEnabled());
-  // Deliberately unexplained. See the sparkle button below.
+  // Visually unexplained. See the sparkle button below.
   const [navi, setNavi] = useState(() => isNaviModeEnabled());
 
   const byKind = new Map(prefsQ.data?.preferences.map((p) => [p.kind, p]));
 
   return (
-    <Section title="Notifications" description="Choose which updates reach you here.">
+    <Section
+      title="Notifications"
+      description="Choose which updates reach you. While you are active in Valet, direct messages wait for the selected delay. Valet sends no direct message for a notification you already read. Team DM copies are off by default. Turn them on for teams you can access, through your linked messaging account. Approval permissions do not change."
+    >
       <FieldRow
         label="Sound"
         hint="Play a short chime when your assistant is blocked and waiting on you. Updates stay silent. This device only."
@@ -72,13 +75,14 @@ export function NotificationsPage() {
             }}
             aria-label="Attention sound"
           />
-          {/* An easter egg, and it stays one: no label, no tooltip, no hint
-              text. Faint until hovered; softly lit while active is the only
-              clue anything changed. It swaps WHICH sound plays — the toggle
-              above still decides IF one plays. */}
+          {/* An easter egg: no visible label, tooltip, or hint text. Faint
+              until hovered, softly lit while active. A screen reader still
+              hears what it does and whether it is on. It swaps WHICH sound
+              plays; the toggle above still decides IF one plays. */}
           <button
             type="button"
-            aria-label="hey, listen"
+            aria-label="Alternate chime"
+            aria-pressed={navi}
             onClick={() => {
               const next = !navi;
               setNaviModeEnabled(next);
@@ -93,23 +97,14 @@ export function NotificationsPage() {
                 : "text-muted opacity-25 transition-opacity hover:opacity-70"
             }
           >
-            <Sparkles size={14} />
+            <Sparkles size={14} aria-hidden />
           </button>
         </div>
       </FieldRow>
 
-      <p className="py-3 text-sm text-muted">While you are active here, direct messages wait for the selected delay. Read notifications do not send a fallback. Team DM copies are off by default. Enable copies for teams you can access using your linked messaging account. Approval permissions stay unchanged.</p>
-      {setPref.error && <div role="alert" className="text-sm text-danger-500">Could not save your preference. Try again.</div>}
-      {prefsQ.isLoading && (
-        <div className="flex items-center gap-2 py-4 text-sm text-muted">
-          <Spinner size={14} /> Loading…
-        </div>
-      )}
-      {prefsQ.error && (
-        <div className="py-4 text-sm text-danger-500">
-          Failed to load notification preferences.
-        </div>
-      )}
+      {setPref.error && <ErrorRow>Could not save your preference. Try again.</ErrorRow>}
+      {prefsQ.isLoading && <LoadingRow />}
+      {prefsQ.error && <ErrorRow>Failed to load notification preferences. Reload the page to try again.</ErrorRow>}
       {!prefsQ.isLoading &&
         !prefsQ.error &&
         NOTIFICATION_KINDS.map((kind) => {
@@ -118,12 +113,14 @@ export function NotificationsPage() {
           const web = byKind.get(kind)?.web ?? true;
           return (
             <FieldRow key={kind} label={KIND_LABEL[kind]} hint={KIND_DESCRIPTION[kind]}>
+              {/* Team DM copies comes last: Team deletion requests has none,
+                  so its row drops only the last control and stays aligned. */}
               <div className="flex flex-wrap items-center gap-4"><label className="flex items-center gap-2 text-sm">Web<Switch
                 disabled={setPref.isPending}
                 checked={web}
                 onCheckedChange={(next) => setPref.mutate({ kind, web: next })}
                 aria-label={`${KIND_LABEL[kind]} web notifications`}
-              /></label>{kind !== "review" && <label className="flex items-center gap-2 text-sm">Team DM copies<Switch checked={byKind.get(kind)?.teamDm ?? false} disabled={setPref.isPending} onCheckedChange={(teamDm) => setPref.mutate({ kind, web, teamDm })} aria-label={`${KIND_LABEL[kind]} team DM copies`} /></label>}
+              /></label>
                 <label className="flex items-center gap-2 text-sm">DM delay
                   <Select size="sm" aria-label={`${KIND_LABEL[kind]} DM delay`}
                     disabled={setPref.isPending || !web}
@@ -134,6 +131,7 @@ export function NotificationsPage() {
                       <option value={byKind.get(kind)?.channelGraceSeconds}>{byKind.get(kind)?.channelGraceSeconds} sec</option>}
                   </Select>
                 </label>
+                {kind !== "review" && <label className="flex items-center gap-2 text-sm">Team DM copies<Switch checked={byKind.get(kind)?.teamDm ?? false} disabled={setPref.isPending} onCheckedChange={(teamDm) => setPref.mutate({ kind, web, teamDm })} aria-label={`${KIND_LABEL[kind]} team DM copies`} /></label>}
               </div>
             </FieldRow>
           );

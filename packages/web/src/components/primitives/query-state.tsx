@@ -6,10 +6,11 @@ import { cn } from "~/lib/cn";
  * The three states every query-backed list renders before it has rows.
  * One source for the spinner row, the failure line, and the empty-state
  * line, so panels don't each hand-roll the same three fragments.
+ * `role="status"` so a screen reader announces the wait.
  */
 export function LoadingRow({ label = "Loading…", className }: { label?: string; className?: string }) {
   return (
-    <div className={cn("flex items-center gap-2 py-4 text-sm text-muted", className)}>
+    <div role="status" className={cn("flex items-center gap-2 py-4 text-sm text-muted", className)}>
       <Spinner size={14} /> {label}
     </div>
   );

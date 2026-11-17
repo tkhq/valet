@@ -22,7 +22,7 @@ const plugin: ValetPlugin = {
   // admin can turn Valet Security off, on for everyone, or on for named teams.
   gate: {
     label: "Valet Security",
-    description: "AI security review of a repository — planned sweeps, findings, and a report.",
+    description: "AI security review of a repository: planned sweeps, findings, and a report.",
   },
   skills: [loadSkillFromMarkdown(runnerMd, "plugin", "security-engagement-runner")],
   // One RoleSpec per bundled persona. The host attaches ONLY the role whose

@@ -71,7 +71,7 @@ describe("team Policies settings parity", () => {
     expect(api.listOrgPolicies).not.toHaveBeenCalled();
     teamId = undefined; redraw();
     await screen.findByText("No overrides yet.");
-    expect(screen.getAllByRole("heading", { level: 2 }).map(x => x.textContent)).toEqual(["My policy overrides", "New override", "My active grants"]);
+    expect(screen.getAllByRole("heading", { level: 2 }).map(x => x.textContent)).toEqual(["Policies", "My policy overrides", "New override", "My active grants"]);
   });
 
   it("discards drafts and mutation errors across team, role, and personal switches", async () => {
@@ -147,12 +147,12 @@ describe("team Policies settings parity", () => {
   it("gates membership and drops late responses from the previous team", async () => {
     teamsLoading = true;
     const view = mount(); expect(api.listTeamPolicies).not.toHaveBeenCalled();
-    teamsLoading = false; teamId = "gone"; view.redraw(); expect(screen.getByRole("alert").textContent).toContain("Team unavailable");
+    teamsLoading = false; teamId = "gone"; view.redraw(); expect(screen.getByRole("alert").textContent).toContain("not a member of this team");
     teamId = "a"; teamsError = new Error("Failed"); view.redraw(); expect(screen.getByRole("alert").textContent).toContain("Could not load");
     teamsError = null;
     let finish: (value: ListOrgPoliciesResponse) => void = () => {};
     vi.mocked(api.listTeamPolicies).mockImplementation(id => id === "a" ? new Promise(resolve => { finish = resolve; }) : Promise.resolve({ policies: [policy("b")] }));
-    view.redraw(); expect(screen.getByRole("status")).toBeTruthy();
+    view.redraw(); expect(screen.getByText("Loading…")).toBeTruthy();
     teamId = "b"; view.redraw(); await screen.findByText("service: b");
     await act(async () => finish({ policies: [policy("a")] })); expect(screen.queryByText("service: a")).toBeNull();
   });
