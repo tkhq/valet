@@ -283,11 +283,13 @@ describe("ApiKeysSection — personal workspace", () => {
     expect(expirySelect().value).toBe("30");
   });
 
-  it("shows a managed note instead of the form when personal keys are off", () => {
+  it("disables the form with a managed note when personal keys are off", () => {
     org = { ...org, allowPersonalApiKeys: false };
     render(<ApiKeysSection />);
-    expect(screen.queryByLabelText("Key name")).toBeNull();
-    expect(screen.getByText(/Your organization does not allow personal API keys/)).toBeTruthy();
+    expect(screen.getByLabelText("Key name")).toHaveProperty("disabled", true);
+    expect(screen.getByRole("button", { name: "Create" })).toHaveProperty("disabled", true);
+    expect(screen.getByText(/Personal API keys are off/)).toBeTruthy();
+    expect(screen.getByText(/Managed by your organization\. Ask an admin to change it\./)).toBeTruthy();
     // Existing keys stay listed, so the person can still revoke them.
     expect(screen.getByText("Laptop script")).toBeTruthy();
   });

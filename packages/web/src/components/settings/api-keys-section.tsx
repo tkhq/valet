@@ -6,7 +6,7 @@ import {
   SECONDS_PER_DAY,
   type ApiKeyLifetimeDays,
 } from "@valet/shared";
-import { Button, ErrorRow, Input, LoadingRow, Select } from "~/components/primitives";
+import { Button, ErrorRow, Input, LoadingRow, ManagedNote, Select, type AppPath } from "~/components/primitives";
 import {
   useApiKeys,
   useCreateApiKey,
@@ -41,26 +41,21 @@ function PersonalApiKeysSection() {
 
   return (
     <div className="min-w-0 max-w-full space-y-4">
-      {keysAllowed ? (
-        <CreateKeyRow
-          maxLifetimeDays={orgQ.data?.maxApiKeyLifetimeDays ?? null}
-          onCreate={(input, onSuccess) => {
-            createKey.mutate(input, {
-              onSuccess: (resp) => {
-                onSuccess();
-                setCreated(resp);
-              },
-            });
-          }}
-          pending={createKey.isPending}
-          errorMessage={createKey.error?.message ?? null}
-        />
-      ) : (
-        <p className="text-sm leading-relaxed text-muted">
-          Your organization does not allow personal API keys. An organization admin can change this in Organization settings, under Policies.
-          Your existing keys work until they expire or you revoke them.
-        </p>
-      )}
+      <CreateKeyRow
+        maxLifetimeDays={orgQ.data?.maxApiKeyLifetimeDays ?? null}
+        locked={!keysAllowed}
+        changeAt={orgQ.data?.callerRole === "admin" ? "/settings/organization/policies" : undefined}
+        onCreate={(input, onSuccess) => {
+          createKey.mutate(input, {
+            onSuccess: (resp) => {
+              onSuccess();
+              setCreated(resp);
+            },
+          });
+        }}
+        pending={createKey.isPending}
+        errorMessage={createKey.error?.message ?? null}
+      />
 
       {created && <KeyRevealBlock name={created.name ?? "New key"} secret={created.key} onDismiss={() => setCreated(null)} />}
 
@@ -69,7 +64,7 @@ function PersonalApiKeysSection() {
 
       {keysQ.data && keysQ.data.length === 0 && (
         <p className="py-4 text-sm text-muted">
-          No API keys yet. Create one to call the API from scripts.
+          {keysAllowed ? "No API keys yet. Create one to call the API from scripts." : "No API keys yet."}
         </p>
       )}
 
@@ -236,11 +231,17 @@ function lifetimeLabel(days: LifetimeChoice): string {
  */
 function CreateKeyRow({
   maxLifetimeDays,
+  locked = false,
+  changeAt,
   onCreate,
   pending,
   errorMessage,
 }: {
   maxLifetimeDays: number | null;
+  /** The org turned personal keys off: the controls stay, disabled, with a managed note. */
+  locked?: boolean;
+  /** Where this viewer can turn them back on: the org Policies tab, for an org admin. */
+  changeAt?: AppPath;
   onCreate: (input: CreateApiKeyInput, onSuccess: () => void) => void;
   pending: boolean;
   errorMessage: string | null;
@@ -272,11 +273,13 @@ function CreateKeyRow({
           }}
           placeholder="e.g. CI pipeline"
           aria-label="Key name"
+          disabled={locked}
           className="min-w-0 flex-1"
         />
         <Select
           aria-label="Key expiry"
           className="w-auto shrink-0"
+          disabled={locked}
           value={lifetime === null ? "none" : String(lifetime)}
           onChange={(e) => {
             const next = choices.find((choice) => (choice === null ? "none" : String(choice)) === e.target.value);
@@ -289,11 +292,16 @@ function CreateKeyRow({
             </option>
           ))}
         </Select>
-        <Button type="button" onClick={submit} disabled={!name.trim() || pending}>
+        <Button type="button" onClick={submit} disabled={locked || !name.trim() || pending}>
           {pending ? "Creating…" : "Create"}
         </Button>
       </div>
-      {maxLifetimeDays !== null && (
+      {locked ? (
+        <div className="space-y-0.5">
+          <p className="text-xs text-muted">Personal API keys are off. Existing keys work until they expire or you revoke them.</p>
+          <ManagedNote scope="org" askAdmin changeAt={changeAt} />
+        </div>
+      ) : maxLifetimeDays !== null && (
         <p className="text-xs text-muted">Your organization requires keys to expire within {lifetimeLabel(choices[choices.length - 1] ?? null)}.</p>
       )}
       {errorMessage && <p role="alert" className="text-sm text-danger-500">{errorMessage}</p>}

@@ -37,14 +37,14 @@ export function ApiKeyPolicySection() {
       {orgQ.data && (
         <>
           <FieldRow
-            label="Members can create personal API keys"
-            hint="Off: members cannot create personal keys or proxy keys. Existing keys keep working. Team admins can still create team keys."
+            label="Allow personal API keys"
+            hint="Off: nobody can create personal keys or proxy keys, admins included. Existing keys keep working. Team admins can still create team keys."
           >
             <Switch
               checked={orgQ.data.allowPersonalApiKeys ?? true}
               disabled={!isAdmin || patch.isPending}
               onCheckedChange={(next) => save({ allowPersonalApiKeys: next })}
-              aria-label="Members can create personal API keys"
+              aria-label="Allow personal API keys"
             />
           </FieldRow>
           <FieldRow

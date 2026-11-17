@@ -35,7 +35,7 @@ beforeEach(() => {
 describe("ApiKeyPolicySection", () => {
   it("defaults to personal keys on and no limit", () => {
     render(<ApiKeyPolicySection />);
-    expect(screen.getByRole("switch", { name: "Members can create personal API keys" }).getAttribute("aria-checked")).toBe("true");
+    expect(screen.getByRole("switch", { name: "Allow personal API keys" }).getAttribute("aria-checked")).toBe("true");
     const select = screen.getByLabelText("Maximum key lifetime");
     expect(select).toHaveProperty("value", "none");
     expect(Array.from(select.querySelectorAll("option")).map((o) => o.textContent)).toEqual([
@@ -58,14 +58,14 @@ describe("ApiKeyPolicySection", () => {
 
   it("turns personal keys off", async () => {
     render(<ApiKeyPolicySection />);
-    await userEvent.click(screen.getByRole("switch", { name: "Members can create personal API keys" }));
+    await userEvent.click(screen.getByRole("switch", { name: "Allow personal API keys" }));
     expect(patchMutate).toHaveBeenLastCalledWith({ allowPersonalApiKeys: false }, expect.anything());
   });
 
   it("is read-only for a member", () => {
     orgData = { callerRole: "member", allowPersonalApiKeys: false, maxApiKeyLifetimeDays: 90 };
     render(<ApiKeyPolicySection />);
-    expect(screen.getByRole("switch", { name: "Members can create personal API keys" })).toHaveProperty("disabled", true);
+    expect(screen.getByRole("switch", { name: "Allow personal API keys" })).toHaveProperty("disabled", true);
     expect(screen.getByLabelText("Maximum key lifetime")).toHaveProperty("disabled", true);
     expect(screen.getByText("Only an organization admin can change these settings.")).toBeTruthy();
   });
