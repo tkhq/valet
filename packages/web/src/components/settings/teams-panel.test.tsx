@@ -49,6 +49,9 @@ vi.mock("./team-deletion-requests", () => ({
     <section aria-label="Deletion requests" data-team-id={teamId} data-can-manage={canManage} />,
 }));
 
+// The overview rows have their own suite (team-overview.test.tsx).
+vi.mock("./team-overview", () => ({ TeamOverview: () => null }));
+
 const navigate = vi.fn();
 vi.mock("@tanstack/react-router", () => ({
   Link: RouterLinkStub,

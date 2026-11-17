@@ -140,6 +140,9 @@ const ROUTES = [
   ["GET", /^\/api\/teams\/[^/]+\/members$/, () => json({ members: [{ userId: USER_ID, role: "admin" }] })],
   ["GET", /^\/api\/teams\/[^/]+\/deletion-requests$/, () => json({ requests: [], nextCursor: null })],
   ["GET", /^\/api\/teams\/[^/]+\/deletion-requests\/targets$/, () => json({ targets: [] })],
+  // The team overview counts keys and rules.
+  ["GET", /^\/api\/teams\/[^/]+\/api-keys$/, () => json({ keys: [] })],
+  ["GET", /^\/api\/teams\/[^/]+\/policies$/, () => json({ policies: [] })],
   ["GET", /^\/api\/notifications$/, () => json({ notifications: [] })],
   ["GET", /^\/api\/notifications\/decisions$/, () => json({ items: [] })],
   ["POST", /^\/api\/notifications\/presence$/, () => json({ ok: true })],

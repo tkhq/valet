@@ -15,11 +15,14 @@ export const ActiveTabLabel = createContext<string | undefined>(undefined);
  * (settings-redesign spec, "Visual language"). No boxed cards inside it.
  */
 export function Section({
+  id,
   title,
   description,
   actions,
   children,
 }: {
+  /** An anchor for a link that scrolls to this section. */
+  id?: string;
   title: ReactNode;
   description?: string;
   /** Controls for the whole section, beside the heading and not in a row. */
@@ -27,7 +30,7 @@ export function Section({
   children: ReactNode;
 }) {
   return (
-    <section className="space-y-3">
+    <section id={id} className="scroll-mt-4 space-y-3">
       <SectionHeading title={title} description={description} actions={actions} />
       {/* The group pads its own top and bottom, so a child with no padding
           of its own (a note, a form) does not touch the rounded edge. A row
