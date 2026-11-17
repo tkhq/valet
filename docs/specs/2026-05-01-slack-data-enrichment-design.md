@@ -87,6 +87,12 @@ Example output:
 }
 ```
 
+#### Block and attachment content (2026-11-17)
+
+A bot, app, or workflow post often keeps its real content in Block Kit `blocks` or legacy `attachments`, and `text` holds only a one-line summary. `slimMessage` adds a `content` field with that text: one line per header, section text and field, context, markdown block, and attachment pretext, author, title, text, `title: value` field, and footer. Buttons, images, dividers, and inputs give no lines. An attachment's `fallback` counts only when it has nothing else.
+
+`slackMessageExtraText` (`src/message-text.ts`) builds it. It drops lines that repeat `text` or an earlier line, and caps the result at 4,000 characters. A person's message carries a `rich_text` block that mirrors `text`, so `rich_text` counts only for a bot or app post or a message with no `text`. `content` is absent when it adds nothing. The read actions resolve mentions in `content` as in `text`, and the `read_history` keyword filter matches both. The inbound thread transcript (`thread-context.ts`) appends the same lines to each message.
+
 #### Message subtype filtering
 
 `read_history` gets a new optional `include_subtypes` boolean parameter (default `false`). When false, messages with housekeeping subtypes are filtered out:

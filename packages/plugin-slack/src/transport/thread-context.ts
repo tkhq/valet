@@ -8,6 +8,7 @@
 import { formatTranscriptText } from "@valet/engine";
 import type { SlackApi } from "./api.js";
 import { enrichSlackText } from "./text-enrich.js";
+import { slackMessageExtraText } from "../message-text.js";
 
 /** Above this the middle lines are dropped — a long thread would swamp the turn. */
 const MAX_TRANSCRIPT_CHARS = 6000;
@@ -18,6 +19,9 @@ interface RawReply {
   username?: unknown;
   bot_profile?: unknown;
   text?: unknown;
+  subtype?: unknown;
+  blocks?: unknown;
+  attachments?: unknown;
   files?: unknown;
   ts?: unknown;
 }
@@ -145,7 +149,10 @@ export async function fetchThreadTranscript(
 
   const formatted = await Promise.all(
     (messages as RawReply[]).map(async (raw) => {
-      const body = await enrichSlackText(api, str(raw.text) ?? "", opts.selfUserId);
+      // A bot post's blocks and attachments can hold more than its `text`.
+      const extra = slackMessageExtraText({ ...raw });
+      const full = [str(raw.text) ?? "", extra].filter(Boolean).join("\n");
+      const body = await enrichSlackText(api, full, opts.selfUserId);
       const marker = fileMarker(raw);
       // Words and files both, either alone, or neither.
       const content = body && marker ? `${body} ${marker}` : body || marker;
