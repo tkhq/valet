@@ -215,7 +215,7 @@ export function buildCurrentPolicyDynamicFacts(input: {
   const bindings = input.approvals.map((row) => [row.requestSubjectDigest, row.originalDecisionDigest, row.appliesIn, row.sessionId ?? row.workflowExecutionId!] as JsonValue[]);
   if (new Set(bindings.map(canonicalJson)).size > 1) fail("approval_binding_limit", "Current policy input supports one approval binding set.");
   return { schemaVersion: 2, organizationId: input.organizationId,
-    grants: [...input.grants].sort((a, b) => utf8Compare(a.id, b.id)).map((row) => [row.id, row.policyKey, row.service, row.actionId, row.riskLevel, row.appliesIn, row.sessionId ?? row.workflowExecutionId!, row.createdAtMs, row.expiresAtMs, row.revokedAtMs]),
+    grants: [...input.grants].sort((a, b) => utf8Compare(a.id, b.id)).map((row) => [row.id, row.policyKey, row.service, row.actionId, row.riskLevel, row.appliesIn, row.sessionId ?? row.workflowExecutionId!, row.createdAtMs, row.expiresAtMs, row.revokedAtMs, row.threadId ?? null]),
     approvalBinding: bindings[0] ?? null,
     approvals: [...input.approvals].sort((a, b) => utf8Compare(a.resolutionId, b.resolutionId)).map((row) => [row.resolutionId, row.verdict, row.resolvedAtMs, row.expiresAtMs, row.resolutionVersion]),
   };
@@ -342,6 +342,10 @@ function validateGrant(grant: CurrentRuntimeGrantSourceV1, organizationId: strin
   if (!RISKS.has(grant.riskLevel)) fail("unknown_risk", `Grant ${grant.id} has an unknown risk level.`);
   if (grant.policyKey !== grantPolicyKey(grant.service, grant.actionId)) fail("invalid_policy_key", `Grant ${grant.id} has an invalid policy key.`);
   validateScope(grant.id, grant.appliesIn, grant.sessionId, grant.workflowExecutionId);
+  if (grant.threadId !== undefined) {
+    nonEmpty(`${grant.id}.threadId`, grant.threadId);
+    if (grant.appliesIn !== "session") fail("invalid_scope", `Grant ${grant.id} scopes a thread outside a session.`);
+  }
   nonEmpty(`${grant.id}.issuerId`, grant.issuerId);
   nonEmpty(`${grant.id}.sourceApprovalId`, grant.sourceApprovalId);
   validTimestamp(`${grant.id}.createdAtMs`, grant.createdAtMs);
@@ -585,7 +589,7 @@ function emitRegexInputLimit(lines: string[], records: readonly NormalizedRule[]
 }
 function emitFactWinner(lines: string[], kind: "grant" | "approval", limit: number): void {
   const facts = kind === "grant" ? "grants" : "approvals";
-  const match = kind === "grant" ? "count(fact) == 10; fact[1] == input.action.id; fact[2] == input.action.service; fact[3] == input.action.id; fact[4] == input.action.riskLevel; scope_matches(fact); fact[9] == null; fact[7] <= input.context.evaluationTimeMs; fact[8] > input.context.evaluationTimeMs" : "input.facts.currentPolicy.approvalBinding[0] == input.context.requestSubjectDigest; input.facts.currentPolicy.approvalBinding[1] == input.context.originalDecisionDigest; approval_scope_matches; count(fact) == 5; fact[4] == 1; fact[1] == \"approved\"; fact[2] <= input.context.evaluationTimeMs; fact[3] > input.context.evaluationTimeMs";
+  const match = kind === "grant" ? "count(fact) == 11; fact[1] == input.action.id; fact[2] == input.action.service; fact[3] == input.action.id; fact[4] == input.action.riskLevel; scope_matches(fact); fact[9] == null; fact[7] <= input.context.evaluationTimeMs; fact[8] > input.context.evaluationTimeMs" : "input.facts.currentPolicy.approvalBinding[0] == input.context.requestSubjectDigest; input.facts.currentPolicy.approvalBinding[1] == input.context.originalDecisionDigest; approval_scope_matches; count(fact) == 5; fact[4] == 1; fact[1] == \"approved\"; fact[2] <= input.context.evaluationTimeMs; fact[3] > input.context.evaluationTimeMs";
   for (let i=0;i<limit;i++) lines.push(`${i ? "else" : kind+"_winner"} := fact[0] if { fact := input.facts.currentPolicy.${facts}[${i}]; ${match} }`);
   lines.push("else := null if { true }");
 }
@@ -798,7 +802,9 @@ dynamic_valid if { not current_policy_present }
 dynamic_valid if { input.facts.currentPolicy.schemaVersion == 2; input.facts.currentPolicy.organizationId == input.subject.orgId; is_array(input.facts.currentPolicy.grants); is_array(input.facts.currentPolicy.approvals); count(input.facts.currentPolicy.grants) <= 8; count(input.facts.currentPolicy.approvals) <= 8; approval_binding_valid }
 approval_binding_valid if { count(input.facts.currentPolicy.approvals) == 0; input.facts.currentPolicy.approvalBinding == null }
 approval_binding_valid if { count(input.facts.currentPolicy.approvals) > 0; is_array(input.facts.currentPolicy.approvalBinding); count(input.facts.currentPolicy.approvalBinding) == 4 }
-scope_matches(fact) if { applies_in == "session"; fact[5] == "session"; fact[6] == input.subject.sessionId }
+scope_matches(fact) if { applies_in == "session"; fact[5] == "session"; fact[6] == input.subject.sessionId; grant_thread_matches(fact) }
+grant_thread_matches(fact) if { fact[10] == null }
+grant_thread_matches(fact) if { fact[10] == input.subject.threadId }
 scope_matches(fact) if { applies_in == "workflow"; fact[5] == "workflow"; fact[6] == input.subject.workflowExecutionId }
 approval_scope_matches if { applies_in == "session"; input.facts.currentPolicy.approvalBinding[2] == "session"; input.facts.currentPolicy.approvalBinding[3] == input.subject.sessionId }
 approval_scope_matches if { applies_in == "workflow"; input.facts.currentPolicy.approvalBinding[2] == "workflow"; input.facts.currentPolicy.approvalBinding[3] == input.subject.workflowExecutionId }

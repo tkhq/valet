@@ -105,6 +105,8 @@ export interface CurrentRuntimeGrantSourceV1 {
   readonly appliesIn: "session" | "workflow";
   readonly sessionId?: string;
   readonly workflowExecutionId?: string;
+  /** A session grant scoped to one thread. It matches only a request from that thread. */
+  readonly threadId?: string;
   readonly issuerId: string;
   readonly sourceApprovalId: string;
   readonly createdAtMs: number;

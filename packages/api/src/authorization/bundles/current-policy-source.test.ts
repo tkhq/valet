@@ -262,6 +262,33 @@ describe("current policy source builder", () => {
     }
   });
 
+  it("matches a thread-scoped grant only in its own thread", async () => {
+    const grant = {
+      schemaVersion: 1 as const, id: "thread-grant", organizationId: ORG, policyKey: "gmail.send_email", service: "gmail",
+      actionId: "gmail.send_email", riskLevel: "high" as const, appliesIn: "session" as const, sessionId: "session-1",
+      threadId: "thread-1", issuerId: "approver-1", sourceApprovalId: "approval-1", createdAtMs: 1, expiresAtMs: NOW + 1,
+      revokedAtMs: null,
+    };
+    const facts = buildCurrentPolicyDynamicFacts({ organizationId: ORG, grants: [grant], approvals: [] });
+    const inThread = (threadId: string | undefined) => request({
+      subject: { ...request().subject, ...(threadId === undefined ? {} : { threadId }) },
+      facts: { currentPolicy: facts },
+    });
+    expect((await evaluate(snapshot(), inThread("thread-1"))).decision.effect).toBe("allow");
+    expect((await evaluate(snapshot(), inThread("thread-2"))).decision.effect).toBe("require_approval");
+    expect((await evaluate(snapshot(), inThread(undefined))).decision.effect).toBe("require_approval");
+
+    const unscoped = buildCurrentPolicyDynamicFacts({ organizationId: ORG, grants: [{ ...grant, id: "session-grant", threadId: undefined }], approvals: [] });
+    expect((await evaluate(snapshot(), request({
+      subject: { ...request().subject, threadId: "thread-2" },
+      facts: { currentPolicy: unscoped },
+    }))).decision.effect).toBe("allow");
+
+    expect(() => buildCurrentPolicyDynamicFacts({ organizationId: ORG, grants: [{
+      ...grant, id: "workflow-thread", appliesIn: "workflow", sessionId: undefined, workflowExecutionId: "workflow-1",
+    }], approvals: [] })).toThrow(expect.objectContaining({ code: "invalid_scope" }));
+  });
+
   it("binds approval facts to subject, decision, scope, and version", async () => {
     const approval = {
       schemaVersion: 1 as const, resolutionId: "resolution-1", approvalId: "approval-1", gateId: "gate-1",
