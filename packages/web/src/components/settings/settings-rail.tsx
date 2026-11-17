@@ -71,6 +71,7 @@ export const ORG_SECTIONS: ReadonlyArray<{ label: string; icon: LucideIcon; rout
     routes: [
       { to: "/settings/organization/models", label: "Models" },
       { to: "/settings/organization/proxy", label: "Proxy" },
+      { to: "/settings/organization/usage", label: "Usage" },
     ],
   },
   {

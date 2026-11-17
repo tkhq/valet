@@ -13,7 +13,7 @@ export const Route = createFileRoute("/settings")({
 });
 
 /** Routes whose content is a wide table or dashboard rather than a settings form. */
-const WIDE_SETTINGS_ROUTES = ["/settings/model-comparison", "/settings/usage"];
+const WIDE_SETTINGS_ROUTES = ["/settings/model-comparison", "/settings/usage", "/settings/organization/usage"];
 
 export function SettingsLayout() {
   const pathname = useRouterState({ select: (s) => s.location.pathname });

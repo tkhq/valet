@@ -85,8 +85,10 @@ Public pages keep their own titles.
    (`getTeamInOrg`) and a live `isTeamMember` check. An unknown team, a
    foreign org's team, and a team the caller is not on all answer the
    same 404 — the existence-hiding convention the sessions, teams, and
-   events routes use. The me/org toggle, the proxy request log, and
-   the key-setup callout are personal surfaces: proxy traffic is never
+   events routes use. The proxy request log and the key-setup callout
+   are personal surfaces (the me/org toggle is gone since 2026-11-17:
+   the organization's spend is its own page,
+   `/settings/organization/usage`): proxy traffic is never
    team-owned, so they render only in the personal workspace. The proxy
    drill-down returns no rows in team scope for the same reason. Team
    scope shows no per-member data — `byUser` stays an org-admin view,

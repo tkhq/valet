@@ -5,7 +5,7 @@
  *   - total cost renders from breakdown;
  *   - token/cache stats render (input/output/cache columns, cache-hit-rate);
  *   - unpriced indicator shows when unpricedTurns > 0, hidden when 0;
- *   - scope toggle appears only for org admins; switching refetches scope=org;
+ *   - personal scope has no org toggle; the org page requests scope=org;
  *   - By-member table renders in org scope;
  *   - By-use-case table has a row per bucket;
  *   - all four use-case rows are expandable (Workflows and Proxy show items);
@@ -614,63 +614,47 @@ describe("UsagePage — unpriced indicator", () => {
   });
 });
 
-describe("UsagePage — scope toggle", () => {
-  it("does not show the scope toggle for non-admin users with no teams", () => {
-    orgResult = {
-      data: { features: { organizations: false }, callerRole: "member" },
-      isLoading: false,
-    };
-    teamsResult = { data: { teams: [] }, isLoading: false };
+describe("UsagePage — personal scope", () => {
+  it.each([
+    ["a member", { features: { organizations: false }, callerRole: "member" as const }],
+    ["an org admin", { features: { organizations: true }, callerRole: "admin" as const }],
+  ])("shows %s only their own spend, with no organization toggle", (_who, data) => {
+    orgResult = { data, isLoading: false };
     render(<UsagePage />);
+    expect(screen.queryByRole("group", { name: "Whose usage" })).toBeNull();
     expect(screen.queryByText("My usage")).toBeNull();
-    expect(screen.queryByText("Organization")).toBeNull();
+    expect(breakdownCalls.at(-1)?.[1]).toBe("me");
+    expect(screen.getByText(/for your account/)).toBeTruthy();
+  });
+});
+
+describe("UsagePage — organization scope", () => {
+  it("requests org scope, names the organization, and exports org CSV", async () => {
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+    breakdownResult = { data: mockBreakdownOrgScope, isLoading: false, error: null };
+    render(<UsagePage org />);
+    expect(breakdownCalls.at(-1)?.slice(1, 3)).toEqual(["org", undefined]);
+    expect(screen.getByText(/for every member of the organization/)).toBeTruthy();
+    const csvLink = document.querySelector("a[href*='/api/usage/export.csv']") as HTMLAnchorElement;
+    expect(csvLink.href).toContain("scope=org");
+    fireEvent.click(screen.getByRole("button", { name: "Download CSV (7d, org)" }));
+    await waitFor(() => expect(usageExportValidations).toEqual([{ granularity: "day", scope: "org" }]));
+    expect(click).toHaveBeenCalledTimes(1);
   });
 
-
-
-
-
-  it("does not show scope toggle when organizations feature is off even for admin", () => {
-    orgResult = {
-      data: { features: { organizations: false }, callerRole: "admin" },
-      isLoading: false,
-    };
-    teamsResult = { data: { teams: [] }, isLoading: false };
-    render(<UsagePage />);
-    expect(screen.queryByText("My usage")).toBeNull();
+  it("keeps the date controls on org scope", () => {
+    render(<UsagePage org />);
+    fireEvent.click(screen.getByRole("button", { name: "30d" }));
+    expect(breakdownCalls.at(-1)?.slice(0, 2)).toEqual([{ kind: "lookback", window: "30d" }, "org"]);
   });
 
-  it("shows the scope toggle for org admins with organizations feature on", () => {
-    orgResult = {
-      data: { features: { organizations: true }, callerRole: "admin" },
-      isLoading: false,
-    };
-    render(<UsagePage />);
-    expect(screen.getByText("My usage")).toBeTruthy();
-    expect(screen.getByText("Organization")).toBeTruthy();
-  });
-
-  it("switching to Organization calls useUsageBreakdown with scope=org", () => {
-    orgResult = {
-      data: { features: { organizations: true }, callerRole: "admin" },
-      isLoading: false,
-    };
-    // Override the breakdown mock to track which scope is requested.
-    // The mock vi.mock("~/api/usage") returns breakdownResult — we verify
-    // the toggle renders the org data by switching breakdownResult.
-    breakdownResult = {
-      data: { ...mockBreakdownOrgScope },
-      isLoading: false,
-      error: null,
-    };
-    render(<UsagePage />);
-    // The component calls useUsageBreakdown with scope — since we already mock
-    // the data with org scope, By-member table should appear if the scope="org"
-    // button is clicked. We verify the toggle exists and the button is rendered.
-    const orgBtn = screen.getByText("Organization");
-    fireEvent.click(orgBtn);
-    // Button should now be "active" (aria-pressed=true)
-    expect(orgBtn.closest("button")?.getAttribute("aria-pressed")).toBe("true");
+  it("ignores the pinned workspace and keeps the personal proxy log out", () => {
+    workspaceTeamId = "team-x";
+    render(<UsagePage org />);
+    expect(breakdownCalls.at(-1)?.slice(1, 3)).toEqual(["org", undefined]);
+    fireEvent.click(screen.getByRole("tab", { name: "Activity" }));
+    expect(screen.getByText(/To see it, open Personal → Usage/)).toBeTruthy();
+    expect(lastProxyRequestsOpts?.enabled).toBe(false);
   });
 });
 
@@ -688,11 +672,8 @@ describe("UsagePage — By-member table (org scope)", () => {
       isLoading: false,
       error: null,
     };
-    render(<UsagePage />);
+    render(<UsagePage org />);
     fireEvent.click(screen.getByRole("tab", { name: "Breakdown" }));
-    // Switch to org scope
-    fireEvent.click(screen.getByText("Organization"));
-    // Re-render happens with org data
     expect(screen.getByText("By member")).toBeTruthy();
     expect(screen.getByText("Alice Smith")).toBeTruthy();
     expect(screen.getByText("Bob Jones")).toBeTruthy();
@@ -988,16 +969,6 @@ describe("UsagePage — team workspace scope", () => {
     expect(screen.queryByText("Avg daily active agents")).toBeNull();
   });
 
-  it("hides the me/org toggle even for org admins", () => {
-    orgResult = {
-      data: { features: { organizations: true }, callerRole: "admin" },
-      isLoading: false,
-    };
-    render(<UsagePage />);
-    expect(screen.queryByText("My usage")).toBeNull();
-    expect(screen.queryByText("Organization")).toBeNull();
-  });
-
   it("hides the personal-only proxy surfaces (request log, key setup)", () => {
     render(<UsagePage />);
     expect(screen.queryByText(/request log/)).toBeNull();
@@ -1037,24 +1008,6 @@ describe("UsagePage — workspace still resolving", () => {
     render(<UsagePage />);
     expect(screen.getByText("Loading…")).toBeTruthy();
     expect(document.querySelector("a[href*='/api/usage/export.csv']")).toBeNull();
-  });
-});
-
-describe("UsagePage — expanded drill rows across the me/org toggle", () => {
-  it("keeps a row expanded when an org admin flips me → org", async () => {
-    orgResult = {
-      data: { features: { organizations: true }, callerRole: "admin" },
-      isLoading: false,
-    };
-    render(<UsagePage />);
-    fireEvent.click(screen.getByRole("tab", { name: "Breakdown" }));
-    fireEvent.click(screen.getByRole("button", { name: /Sessions — expand items/ }));
-    await waitFor(() => {
-      expect(screen.getByText("Parent session")).toBeTruthy();
-    });
-    fireEvent.click(screen.getByText("Organization"));
-    // The container is keyed by workspace, not scope — the row stays open.
-    expect(screen.getByText("Parent session")).toBeTruthy();
   });
 });
 
@@ -1254,7 +1207,7 @@ describe("UsagePage view navigation", () => {
     expect(requestFilters).toEqual({ limit: 25, cursor: "page-two" });
     workspaceTeamId = "team-x";
     view.rerender(<UsagePage />);
-    expect(screen.getByText(/Switch to Personal to view it/)).toBeTruthy();
+    expect(screen.getByText(/To see it, open Personal → Usage/)).toBeTruthy();
     expect(lastProxyRequestsOpts?.enabled).toBe(false);
     expect(lastProxySettingsOpts?.enabled).toBe(false);
     expect(requestFilters).toEqual({ limit: 25, cursor: undefined });

@@ -143,7 +143,7 @@ async function mount(initial: string) {
         createRoute({ getParentRoute: () => team, path: "access", component: componentOf(TeamAccessRoute) }),
         createRoute({ getParentRoute: () => team, path: "policies", component: componentOf(TeamPoliciesRoute) }),
       ]),
-      org.addChildren([orgChild("/"), orgChild("members"), orgChild("teams"), orgChild("linear"), orgChild("slack")]),
+      org.addChildren([orgChild("/"), orgChild("members"), orgChild("teams"), orgChild("linear"), orgChild("slack"), orgChild("usage")]),
     ]),
   ]);
   const router = createRouter({ routeTree: tree, history: createMemoryHistory({ initialEntries: [initial] }) });
@@ -299,6 +299,22 @@ describe("Organization tabs", () => {
     const tabs = await within(content()).findByRole("navigation", { name: "General" });
     expect(within(tabs).getByRole("link", { name: "General" }).getAttribute("aria-current")).toBe("page");
     expect(within(tabs).getByRole("link", { name: "Members" }).getAttribute("aria-current")).toBeNull();
+  });
+
+  it("hold the organization's Usage under Models and usage for an admin", async () => {
+    await mount("/settings/organization/usage");
+    const tabs = await within(content()).findByRole("navigation", { name: "Models and usage" });
+    expect(within(tabs).getAllByRole("link").map((link) => link.textContent)).toEqual(["Models", "Proxy", "Usage"]);
+    expect(within(tabs).getByRole("link", { name: "Usage" }).getAttribute("aria-current")).toBe("page");
+    expect(within(content()).getByText("org page usage")).toBeTruthy();
+    expect(content().className).not.toContain("max-w-3xl");
+  });
+
+  it("refuse the organization's Usage to a member", async () => {
+    orgRole = "member";
+    await mount("/settings/organization/usage");
+    expect(await within(content()).findByText("Organization settings are managed by your org admins")).toBeTruthy();
+    expect(within(content()).queryByText("org page usage")).toBeNull();
   });
 
   it("are hidden from a member, who reaches Teams alone", async () => {

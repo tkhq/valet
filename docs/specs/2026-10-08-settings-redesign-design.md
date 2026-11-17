@@ -57,7 +57,7 @@ on these pages, not the switcher's.
 - **Organization** keeps every existing route. The rail shows four items, and
   each item's page shows a tab bar over the routes it groups:
   - General: General, Members, Teams
-  - Models and usage: Models, Proxy
+  - Models and usage: Models, Proxy, Usage (2026-11-17)
   - Apps and plugins: Plugins, MCP servers, GitHub, Slack, Linear,
     1Password, Library
   - Security and audit: Policies, Sandbox settings, Action log
@@ -103,6 +103,12 @@ scope holds only its own items.
   `/settings/agent-access` are deleted without redirects: no link outside
   web Settings opens them. CLI, consent page, and API copy say "Settings >
   Access".
+- **Usage.** Personal Usage (`/settings/usage`) shows only the viewer's
+  spend and has no "My usage / Organization" toggle. The organization's
+  spend, with the By member table, is the Usage tab under Models and usage
+  (`/settings/organization/usage`). The organization route guard admits
+  only an org admin there. Both views keep the period controls and the CSV
+  download, which names its scope. The team Usage tab does not change.
 
 ### 3. Visual language
 

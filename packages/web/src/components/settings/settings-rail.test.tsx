@@ -115,9 +115,10 @@ describe("SettingsRail", () => {
     expect(within(personal).queryByRole("link", { name: "Models" })).toBeNull();
   });
 
-  it("lists Models and Proxy in the Models and usage section", () => {
+  it("lists Models, Proxy, and the organization's Usage in the Models and usage section", () => {
     const section = ORG_SECTIONS.find((s) => s.label === "Models and usage");
-    expect(section?.routes.map((r) => r.label)).toEqual(["Models", "Proxy"]);
+    expect(section?.routes.map((r) => r.label)).toEqual(["Models", "Proxy", "Usage"]);
+    expect(section?.routes.at(-1)?.to).toBe("/settings/organization/usage");
   });
 
   it("marks a team active on any of its tabs", () => {
