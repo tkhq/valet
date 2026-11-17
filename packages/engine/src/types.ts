@@ -2937,7 +2937,10 @@ export type ThreadAccessCheck = (req: {
   owner: Principal;
   orgId: string;
   reader: { id: string; key: string };
-  target: { id: string; key: string };
+  /** `sessionId` is set for a thread of another session of the workspace
+   * (`workspaceSessions`), whose audience the host reads from the
+   * conversation that owns that session. */
+  target: { id: string; key: string; sessionId?: string };
 }) => Promise<boolean>;
 
 export interface CreateSessionOptions {

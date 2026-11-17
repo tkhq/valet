@@ -538,11 +538,14 @@ describe("eventsActionPlugin", () => {
     await db.insert(teamMembers).values({ teamId: "receipt-team", userId: "member", role: "member" });
     const decision = (id: string, ownerType: string, ownerId: string) => ({ id, ownerType, ownerId, target: "assistant", outcome: "matched" });
     await db.insert(eventReceipts).values([
-      { id: "mine", orgId: ORG, service: "slack", createdAt: now, updatedAt: now, metadata: { channelId: "C1" },
+      { id: "mine", orgId: ORG, service: "slack", createdAt: now, updatedAt: now, metadata: { channelId: "C1", actorId: "U-POSTER", messageTs: "1.2" },
         stages: [{ stage: "match", outcome: "ok", detail: "line other-line matched", at: now }],
         subscriptions: [decision("my-line", "user", "member"), decision("other-line", "user", "someone")] },
       { id: "team", orgId: ORG, service: "slack", createdAt: now - 1, updatedAt: now, subscriptions: [decision("team-line", "team", "receipt-team")] },
       { id: "others", orgId: ORG, service: "slack", createdAt: now - 2, updatedAt: now, metadata: { channelId: "CPRIVATE" }, subscriptions: [decision("x", "user", "someone")] },
+      // The member's line saw this event but its filters excluded it: outside the line, so not theirs to read.
+      { id: "excluded", orgId: ORG, service: "slack", createdAt: now - 3, updatedAt: now, metadata: { channelId: "CPRIVATE2", actorId: "U-OTHER" },
+        subscriptions: [{ ...decision("my-line", "user", "member"), outcome: "filter_excluded" }] },
     ]);
     const logs = eventsActionPlugin(db).actions.find(entry => entry.id === "events.list_event_logs")!;
     const ids = (result: { data?: unknown }) => ((result.data as { receipts?: Array<{ id: string }> })?.receipts ?? []).map(r => r.id);
@@ -551,13 +554,16 @@ describe("eventsActionPlugin", () => {
     expect(ids(personal)).toEqual(["mine"]);
     // Another workspace's decision and stage detail stay hidden.
     expect(JSON.stringify(personal)).not.toContain("other-line");
-    expect(personal).toMatchObject({ data: { receipts: [{ subscriptions: [{ id: "my-line" }], stages: [{ detail: "" }] }] } });
+    expect(personal).toMatchObject({ data: { receipts: [{ subscriptions: [{ id: "my-line" }], stages: [{ detail: "" }], metadata: { channelId: "C1" } }] } });
+    // Who posted, and when, stay with admins.
+    expect(JSON.stringify(personal)).not.toContain("U-POSTER");
+    expect(JSON.stringify(personal)).not.toContain("CPRIVATE2");
 
     expect(ids(await logs.execute({}, context("member", { owner: { type: "team", id: "receipt-team" } })))).toEqual(["team"]);
     expect(ids(await logs.execute({}, context("team:receipt-team", { owner: { type: "team", id: "receipt-team" }, sessionPurpose: "workflow" })))).toEqual(["team"]);
     // An admin in a shared or team transcript gets the same workspace view, not every receipt.
     expect(ids(await logs.execute({}, context("admin", { owner: { type: "user", id: "admin" }, sharedTranscript: true })))).toEqual([]);
-    expect(ids(await logs.execute({}, context("admin", { owner: { type: "user", id: "admin" } })))).toEqual(["mine", "team", "others"]);
+    expect(ids(await logs.execute({}, context("admin", { owner: { type: "user", id: "admin" } })))).toEqual(["mine", "team", "others", "excluded"]);
     // A person off the team cannot read its receipts.
     expect(await logs.execute({}, context("admin", { owner: { type: "team", id: "receipt-team" } }))).toMatchObject({ success: false });
   });

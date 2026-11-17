@@ -504,8 +504,12 @@ export function eventsActionPlugin(
       const read = async (tx: AppQueryable, scope?: { ownerType: "user" | "team"; ownerId: string }): Promise<PluginActionResult> => {
         const conditions = [eq(eventReceipts.orgId, orgId), gte(eventReceipts.createdAt, Date.now() - RECEIPT_RETENTION_DAYS * 86400000)];
         // A workspace reads only receipts one of its own lines decided on.
+        // A workspace reads only events one of its own lines took: matched,
+        // or held back by its once-every-N-hours limit. A line records a
+        // decision for every event of its key, and an excluded event's
+        // metadata is outside the line's filters, a privacy boundary.
         if (scope) conditions.push(sql`EXISTS (SELECT 1 FROM jsonb_array_elements(${eventReceipts.subscriptions}) d
-          WHERE d->>'ownerType' = ${scope.ownerType} AND d->>'ownerId' = ${scope.ownerId})`);
+          WHERE d->>'ownerType' = ${scope.ownerType} AND d->>'ownerId' = ${scope.ownerId} AND d->>'outcome' IN ('matched', 'rate_limited'))`);
         if (receipt_id !== undefined) conditions.push(eq(eventReceipts.id, receipt_id));
         if (event_key !== undefined) conditions.push(eq(eventReceipts.eventKey, event_key));
         if (channel !== undefined) conditions.push(sql`${eventReceipts.metadata}->>'channelId' = ${channel}`);

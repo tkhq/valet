@@ -228,6 +228,10 @@ export interface ThreadInitialSettings {
   metadata?: Record<string, unknown>;
 }
 
+/** The most threads `thread_read` and `list_threads` read from the
+ * workspace's other sessions, newest first. */
+const WORKSPACE_THREADS_MAX = 200;
+
 export class Session {
   readonly id: string;
   readonly providers: ProviderBundle;
@@ -1814,18 +1818,22 @@ export class Session {
     return this.providers.store.getEntries(other.sessionId, other.id, opts);
   }
 
-  /** Threads of the workspace's other sessions (`CreateSessionOptions.workspaceSessions`). */
+  /** Threads of the workspace's other sessions (`CreateSessionOptions.workspaceSessions`),
+   * the WORKSPACE_THREADS_MAX most recently updated. */
   private async workspaceThreads(): Promise<ThreadData[]> {
     const ids = (await this.options.workspaceSessions?.().catch(() => [] as string[])) ?? [];
     const others = ids.filter((id) => id !== this.id);
-    return others.length > 0 ? this.providers.store.listThreadsForSessions(others) : [];
+    if (others.length === 0) return [];
+    const threads = await this.providers.store.listThreadsForSessions(others);
+    return threads.sort((a, b) => b.updatedAt - a.updatedAt).slice(0, WORKSPACE_THREADS_MAX);
   }
 
   /** Whether `reader` may see `target` (`CreateSessionOptions.threadAccess`). */
-  async threadReadable(reader: { id: string; key: string }, target: { id: string; key: string }): Promise<boolean> {
+  async threadReadable(reader: { id: string; key: string }, target: { id: string; key: string; sessionId?: string }): Promise<boolean> {
     const check = this.options.threadAccess;
     if (!check || reader.id === target.id) return true;
-    return check({ owner: this.principal, orgId: this.options.orgId, reader: { id: reader.id, key: reader.key }, target: { id: target.id, key: target.key } })
+    const foreign = target.sessionId !== undefined && target.sessionId !== this.id ? { sessionId: target.sessionId } : {};
+    return check({ owner: this.principal, orgId: this.options.orgId, reader: { id: reader.id, key: reader.key }, target: { id: target.id, key: target.key, ...foreign } })
       .catch(() => false);
   }
 
