@@ -24,7 +24,7 @@ import { useChatKeybindings } from "~/hooks/use-chat-keybindings";
 import { useAttentionPing } from "~/lib/use-attention-ping";
 import { unlock } from "~/lib/notification-sound";
 import { UI_STRESS_PATH, UiStressShell, uiStressEnabled } from "~/dev/ui-stress/gate";
-import { isSettingsPath, rememberAppPath } from "~/lib/last-app-path";
+import { rememberAppPath } from "~/lib/last-app-path";
 
 interface RouterContext {
   queryClient: QueryClient;
@@ -68,7 +68,7 @@ function NotFound() {
  * (`AppDrawer`) on every page instead.
  */
 function sidebarForPath(pathname: string) {
-  if (isSettingsPath(pathname)) return null;
+  if (pathname === "/settings" || pathname.startsWith("/settings/")) return null;
   return <AssistantRail />;
 }
 
