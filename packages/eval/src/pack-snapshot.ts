@@ -50,6 +50,8 @@ export function diffSnapshots(saved: PackSnapshot, now: PackSnapshot): string[] 
   for (const d of nowDrops) if (!savedDrops.has(d)) out.push(`+ left out ${d}`);
   for (const d of savedDrops) if (!nowDrops.has(d)) out.push(`- left out ${d}`);
   if (saved.budgetChars !== now.budgetChars) out.push(`~ budget ${saved.budgetChars} -> ${now.budgetChars} chars`);
+  // A snapshot from another commit is not a baseline for this one, even when its items look alike.
+  if (saved.head !== now.head) out.push(`~ head ${saved.head.slice(0, 12)} -> ${now.head.slice(0, 12)}: the case now pins another commit`);
   return out;
 }
 

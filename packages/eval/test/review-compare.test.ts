@@ -5,14 +5,14 @@ const run = (tp: number, fp: number, fn: number, costUsd = 0.1): RunMetrics => (
 const suite = (n: number, make: (i: number) => RunMetrics[]): CaseRuns => new Map(Array.from({ length: n }, (_, i) => [`case-${i}`, make(i)]));
 
 describe("parseEvalOutput", () => {
-  it("reads per-run metrics and costs, and skips text before the JSON", () => {
+  it("reads per-run metrics and costs, and skips text before and after the JSON", () => {
     const json = JSON.stringify({
       entries: [
         { caseId: "a", costUsd: 0.4, checkResults: [{ check: { type: "review_match" }, metrics: { tp: 1, fp: 1, fn: 0 } }], sampling: { metricsPerRun: [{ tp: 1, fp: 1, fn: 0 }, { tp: 0, fp: 2, fn: 1 }], costPerRun: [0.2, 0.2] } },
         { caseId: "b", costUsd: 0.1, checkResults: [{ check: { type: "review_match" }, metrics: { tp: 0, fp: 0, fn: 1 } }] },
       ],
     });
-    const out = parseEvalOutput(`[eval] log line\n${json}`);
+    const out = parseEvalOutput(`[eval] log line\n${json}\n[eval] done in 12s`);
     expect(out.get("a")).toEqual([run(1, 1, 0, 0.2), run(0, 2, 1, 0.2)]);
     expect(out.get("b")).toEqual([run(0, 0, 1, 0.1)]);
   });

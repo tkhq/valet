@@ -80,11 +80,13 @@ interface EvalEntry {
   sampling?: { metricsPerRun?: Record<string, number>[]; costPerRun?: number[] };
 }
 
-/** The per-run review metrics of each case in an eval `--json` output. Text before the JSON (verbose logs) is skipped. */
+/** The per-run review metrics of each case in an eval `--json` output. Text before or after the JSON (logs) is skipped. */
 export function parseEvalOutput(text: string): CaseRuns {
   const start = text.search(/\{\s*"entries"/);
-  if (start < 0) throw new Error('The file is not eval --json output: no "entries" object found. Run the eval CLI with --json.');
-  const parsed = JSON.parse(text.slice(start)) as { entries?: EvalEntry[] };
+  const end = text.lastIndexOf("}");
+  if (start < 0 || end < start) throw new Error('The file is not eval --json output: no "entries" object found. Run the eval CLI with --json.');
+  // Logs can come before the JSON and a captured stderr line after it.
+  const parsed = JSON.parse(text.slice(start, end + 1)) as { entries?: EvalEntry[] };
   const out: CaseRuns = new Map();
   for (const e of parsed.entries ?? []) {
     const review = e.checkResults?.find((c) => c.check?.type === "review_match")?.metrics;

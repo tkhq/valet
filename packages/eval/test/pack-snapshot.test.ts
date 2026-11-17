@@ -32,6 +32,10 @@ describe("diffSnapshots", () => {
     ]);
   });
 
+  it("reports a snapshot taken at another commit, even when the items match", () => {
+    expect(diffSnapshots(snap(), snap({ head: "def" }))).toEqual(["~ head abc -> def: the case now pins another commit"]);
+  });
+
   it("reports a new item, a size change and a budget change", () => {
     const now = snap({
       budgetChars: 60000,
