@@ -46,6 +46,15 @@ for (const f of PGLITE_FILES) {
 }
 console.log(`copy-assets: pglite (${PGLITE_FILES.join(", ")}) -> ${pgliteOut}`);
 
+// ── Local policy engine ─────────────────────────────────────────────────────
+const policySource = resolve(apiRoot, "src/authorization/evaluators");
+const policyOut = resolve(outDir, "policy-engine");
+rmSync(policyOut, { recursive: true, force: true });
+mkdirSync(policyOut, { recursive: true });
+cpSync(resolve(policySource, "policy-worker.cjs"), resolve(policyOut, "policy-worker.cjs"));
+cpSync(resolve(policySource, "wasm"), resolve(policyOut, "wasm"), { recursive: true });
+console.log(`copy-assets: policy engine -> ${policyOut}`);
+
 // ── Sharp native runtime ────────────────────────────────────────────────────
 // The Node bundle loads Sharp from node_modules. The standalone executable
 // instead extracts its native addon and libvips beside the other assets.
