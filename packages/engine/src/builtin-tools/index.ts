@@ -627,7 +627,6 @@ const EXTERNAL_SENDER_CHILDREN = {
   text: "[child_unavailable] Only a teammate with a linked Valet account can start or message background tasks. Answer directly, or ask a teammate.",
 };
 
-/** Longest `task` batch name. It is a label the model picks, not content. */
 /** The native tools a child needs to read and change a repository. */
 const WORKSPACE_TOOLS = ["read", "write", "edit", "bash"] as const;
 
@@ -644,6 +643,7 @@ export function taskToolScopeProblem(repo: string | undefined, scope: { tools?: 
   return `[task_tool_scope] This child works in ${repo}, but toolScope.tools grants none of ${WORKSPACE_TOOLS.join(", ")}, so it could not read or change a file. toolScope.tools takes native tool names, not services. Put integrations in toolScope.actions as service.* (for example github.*), or omit toolScope so the child keeps every tool.`;
 }
 
+/** Longest `task` batch name. It is a label the model picks, not content. */
 export const TASK_BATCH_MAX_CHARS = 64;
 
 /**
