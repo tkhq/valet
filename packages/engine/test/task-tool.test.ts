@@ -203,6 +203,28 @@ describe("task tool: spawner present", () => {
     expect(seenReq?.toolScope).toEqual({ tools: ["web_fetch"] });
   });
 
+  it("refuses a repository child whose toolScope names services instead of native tools", async () => {
+    const spawner = vi.fn(async () => ({ childSessionId: "child-1", queueItemId: "queue-1" }) satisfies SpawnChildResult);
+    const ctx = makeCtx({ config: { childSpawner: spawner } });
+
+    const result = await executeTask(
+      { prompt: "edit the README", repo: "acme/widgets", toolScope: { tools: ["turnkey", "github"], actions: ["turnkey.request_signing_key"] } },
+      ctx,
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.text).toContain("[task_tool_scope]");
+    expect(result.text).toContain("github.*");
+    expect(spawner).not.toHaveBeenCalled();
+
+    // A repository child that keeps a workspace tool, or names no tools, still starts.
+    await executeTask({ prompt: "edit", repo: "acme/widgets", toolScope: { tools: ["bash"], actions: ["github.*"] } }, ctx);
+    await executeTask({ prompt: "edit", repo: "acme/widgets", toolScope: { actions: ["github.*"] } }, ctx);
+    // A child with no repository may narrow tools freely.
+    await executeTask({ prompt: "look", toolScope: { tools: ["web_fetch"] } }, ctx);
+    expect(spawner).toHaveBeenCalledTimes(3);
+  });
+
   it.each([0, 65])("rejects invalid CPU %s without calling the spawner", async (cpu) => {
     const spawner = vi.fn(async () => {
       return { childSessionId: "child-1", queueItemId: "queue-1" } satisfies SpawnChildResult;
