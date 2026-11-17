@@ -20,7 +20,8 @@
     "import:trial": "tsx src/trial-import.ts",
     "import:swr": "tsx src/swr-import.ts",
     "review-outcomes": "tsx src/review-outcomes.ts",
-    "review-compare": "tsx src/review-compare.ts"
+    "review-compare": "tsx src/review-compare.ts",
+    "pack-snapshot": "tsx src/pack-snapshot.ts"
   },
   "dependencies": {
     "@valet/api": "workspace:*",

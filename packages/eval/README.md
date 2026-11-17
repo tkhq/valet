@@ -288,6 +288,28 @@ pnpm --filter @valet/eval review-compare --base /tmp/base.json --candidate /tmp/
 - It lists the cases that changed, largest change first. Read those
   reviews before you trust a verdict.
 
+### Check the context pack
+
+`src/pack-snapshot.ts` builds the context pack of each `pull_request` case
+with no model call, the same way a review does, and compares it to a saved
+snapshot.
+
+```bash
+pnpm --filter @valet/eval pack-snapshot --cases private:<suite> --out <snapshot dir> \
+  [--memory-dir <dir> --memory-mount ""] [--update]
+```
+
+- A snapshot lists each item in the pack (section, reference, size) and each
+  item left out, with its reason.
+- The cases pin their commits, so a pack changes only when the gather code,
+  the budget or the memory changes. Each difference prints, and the command
+  exits 2.
+- Run it before a change to the pack builder ships. If every difference is
+  intended, run it again with `--update`.
+- `--memory-mount ""` reads learned lessons at `code-review/learned/`. The
+  default mount, `lib`, reads rule notes at `lib/code-review/notes/`.
+- Keep snapshots of private repositories out of the repo.
+
 ## Compare models
 
 ```bash
