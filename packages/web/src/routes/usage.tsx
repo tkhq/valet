@@ -23,7 +23,7 @@ import { SessionOutcomes } from "~/components/usage/SessionOutcomes";
 import { ToolUsage } from "~/components/usage/ToolUsage";
 import { useEffect, useRef, useState } from "react";
 import { Link, Navigate, createFileRoute, useSearch } from "@tanstack/react-router";
-import { spaceSettingsHref } from "~/lib/space-settings";
+import { spaceSettingsTarget } from "~/lib/space-settings";
 import { textParam } from "~/lib/search-params";
 import { useWorkspaceScope } from "~/lib/workspace-scope";
 import { Users } from "lucide-react";
@@ -51,7 +51,8 @@ export const Route = createFileRoute("/usage")({
 function UsageRedirect() {
   const scope = useWorkspaceScope();
   const workspace = textParam(useSearch({ strict: false }), "workspace") ?? scope.key;
-  return <Navigate to="/settings/usage" href={spaceSettingsHref(workspace, "usage")} replace />;
+  const target = spaceSettingsTarget(workspace, "usage");
+  return <Navigate to={target.to} params={target.params} replace />;
 }
 
 const WINDOWS = ["24h", "7d", "30d"] as const;

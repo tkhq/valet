@@ -134,6 +134,11 @@ scope holds only its own items.
   to `/settings/organization/onepassword`: the page held only a read-only
   status of the organization token, and a member's own token is on
   Integrations.
+- **Entry points.** The gear opens Account (Profile). A space's Settings
+  row in the sidebar opens that space's settings: Personal Integrations,
+  or the team's page. One function, `spaceSettingsTarget`
+  (`lib/space-settings.ts`), holds that rule for the sidebar row and for
+  the `/usage` and `/integrations` redirects.
 
 ### 3. Visual language
 
