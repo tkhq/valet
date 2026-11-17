@@ -556,6 +556,7 @@ function buildPolicySource(
       if (matcher.op === "exists" || matcher.op === "not_exists") {
         lines.push(`path_${index}_${matcherIndex}_found if { _ = ${regoPath(matcher.segments)} }`);
       }
+      lines.push(...matcherRules(row, matcher, index, matcherIndex));
     });
     lines.push(`${name} := ${regoRow(row)} if {`);
     for (const condition of ruleConditions(row, index)) lines.push(`  ${condition}`);
@@ -628,7 +629,26 @@ function emitDefaultCandidates(
 }
 
 function ruleConditions(row: NormalizedRule, rowIndex: number): string[] {
-  return [...ruleApplicabilityConditions(row), ...row.matchers.map((matcher, matcherIndex) => matcherCondition(matcher, rowIndex, matcherIndex))];
+  return [...ruleApplicabilityConditions(row), ...row.matchers.map((_matcher, matcherIndex) => `matcher_${rowIndex}_${matcherIndex}`)];
+}
+
+/**
+ * One rule per matcher, mirroring `matchesParams` in policies/resolution.ts.
+ * With partial parameters, a matcher is unresolved when its value is absent,
+ * an object, or an array. An unresolved matcher counts as matching for a deny
+ * or approval rule, and blocks an allow rule.
+ */
+function matcherRules(row: NormalizedRule, matcher: NormalizedRule["matchers"][number], rowIndex: number, matcherIndex: number): string[] {
+  const name = `matcher_${rowIndex}_${matcherIndex}`;
+  const resolved = `path_${rowIndex}_${matcherIndex}_resolved`;
+  const condition = matcherCondition(matcher, rowIndex, matcherIndex);
+  const rules = [`${resolved} if { value := ${regoPath(matcher.segments)}; not is_object(value); not is_array(value) }`];
+  if (row.mode === "allow") {
+    rules.push(`${name} if { not partial_params; ${condition} }`, `${name} if { partial_params; ${resolved}; ${condition} }`);
+  } else {
+    rules.push(`${name} if { ${condition} }`, `${name} if { partial_params; not ${resolved} }`);
+  }
+  return rules;
 }
 
 function ruleApplicabilityConditions(row: NormalizedRule): string[] {
@@ -782,6 +802,8 @@ policy := data.valet.authz
 supported_kind if { input.kind == "tool.action" }
 supported_kind if { input.kind == "workflow.action" }
 action_context if { supported_kind }
+
+partial_params if { input.context.partialParams == true }
 
 applies_in := "session" if { input.kind == "tool.action" }
 applies_in := "workflow" if { input.kind == "workflow.action" }

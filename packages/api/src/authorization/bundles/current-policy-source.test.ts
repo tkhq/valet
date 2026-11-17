@@ -167,6 +167,43 @@ describe("current policy source builder", () => {
     }, undefined).mode).toBe(effect);
   });
 
+  describe("partial parameters", () => {
+    const params = { to: "a@example.com", nested: { label: "x" }, list: ["a"] };
+    type Matcher = CurrentPolicySourceSnapshotV1["organizationPolicies"][number]["paramMatchers"][number];
+    const cases: ReadonlyArray<readonly [string, "allow" | "require_approval" | "deny", Matcher]> = [
+      ["deny on an absent path", "deny", { path: "prompt", op: "eq", value: "secret" }],
+      ["approval on an absent path", "require_approval", { path: "prompt", op: "regex", value: "secret" }],
+      ["deny on an object path", "deny", { path: "nested", op: "eq", value: { label: "y" } }],
+      ["deny on an array path", "deny", { path: "list", op: "in", value: [["b"]] }],
+      ["deny on a present scalar that does not match", "deny", { path: "to", op: "eq", value: "b@example.com" }],
+      ["allow on an absent path", "allow", { path: "prompt", op: "not_exists" }],
+      ["allow on an object path", "allow", { path: "nested", op: "eq", value: { label: "x" } }],
+      ["allow on a present scalar that matches", "allow", { path: "to", op: "eq", value: "a@example.com" }],
+    ];
+
+    it.each(cases.flatMap(([name, mode, matcher]) => [true, false].map((partial) => [`${name}${partial ? " with partial parameters" : ""}`, mode, matcher, partial] as const)))(
+      "matches the resolver for %s",
+      async (_name, mode, matcher, partial) => {
+        const rule = orgRule({ id: "partial-rule", mode, paramMatchers: [matcher] });
+        // A broader rule with a different mode, so a skipped rule changes the result.
+        const fallback = orgRule({ id: "service-fallback", actionId: undefined, service: "gmail", mode: mode === "allow" ? "require_approval" : "allow" });
+        const result = await evaluate(snapshot({ organizationPolicies: [rule, fallback] }), request({
+          action: { ...request().action, parameters: params },
+          context: { evaluationTimeMs: NOW, ...(partial ? { partialParams: true } : {}) },
+        }));
+        const legacy = resolvePolicyDecision({ policies: [rule, fallback].map((row) => ({
+          id: row.id, principalType: "org", service: row.service ?? null, actionId: row.actionId ?? null, riskLevel: null,
+          mode: row.mode, paramMatchers: [...row.paramMatchers], appliesIn: row.appliesIn, expiresAt: null, revokedAt: null,
+          updatedAt: 1,
+        })), grants: [], overrides: [] }, {
+          service: "gmail", actionId: "gmail.send_email", riskLevel: "high", params, appliesIn: "session",
+          sessionId: "session-1", now: NOW, ...(partial ? { partialParams: true } : {}),
+        }, undefined);
+        expect(result.decision.effect).toBe(legacy.mode);
+      },
+    );
+  });
+
   it("encodes all matcher operators with AND semantics", async () => {
     const paramMatchers = [
       { path: "to", op: "eq" as const, value: "a@example.com" },
