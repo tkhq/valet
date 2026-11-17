@@ -74,6 +74,7 @@ export { buildContextPack, definitionBody, definitionScore, type ContextPack, ty
 export { rankPatch, type DroppedFile, type RankedPatch } from "./context/rank.js";
 export { fetchLines, fillContext, scanRepo, type Hit, type LineStore, type ScanResult } from "./context/scan.js";
 export { gitFileAt, localRunner, type RepoRunner } from "./context/repo.js";
+export { assertCheckout, CHECKOUT_COMMAND, checkoutSection } from "./checkout.js";
 export { diffSymbols, parseDiff, type DiffSymbols } from "./context/symbols.js";
 export { noteMatch, parseNote, type DomainNote } from "./context/notes.js";
 export { directoryMemory } from "./context/memory-dir.js";

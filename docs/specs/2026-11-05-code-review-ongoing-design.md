@@ -95,9 +95,30 @@ the plugin keeps them apart.
 - **Failures are visible.** A failed memory list, search or read, or a failed
   merge-base read, appears in the pack's drop log or in the "not built"
   notice. It never reads as "nothing found".
+- **No checkout, no review.** The reviewer and verifier prompts say the
+  repository is checked out at the PR head, and a defect in a helper the diff
+  never names is found only by reading it. Each reviewer and verifier child's
+  `prepare` step first runs `git rev-parse --show-toplevel HEAD`. If the
+  command fails, or the commit is not the head, the child does not start and
+  the delivery fails with the git error. Before this check, a child whose
+  clone failed reviewed the diff alone and still posted a confident review.
+- **The prompt names the checkout path.** The host clones into a directory
+  under the sandbox's working directory, so a child's commands do not start
+  in the checkout. The first prompt opens with the checkout's absolute path
+  and tells the child to `cd` there in each `bash` command. Before this, the
+  prompt said "checked out in the working directory". In three days of
+  reviews, 70% of verifiers and 42% of reviewers that used tools ran a
+  command on a path that did not exist, and about a quarter of their file
+  reads failed.
 - **Selection is not trust.** Changed paths, the PR title and added lines
   choose which trusted notes and playbooks go into the pack. They never supply
   rule text.
+- **A playbook matches on its topic.** Words that any PR title or file name
+  can hold ("new", "create", "update" and similar) never match. A match on a
+  playbook directory's name brings the whole directory. A match on one file
+  name brings that file and the directory's README only. On 2026-11-16 a PR
+  titled "new ..." pulled in ten unrelated database runbooks, about 40,000
+  characters, through one file named `create_a_new_user.md`.
 
 ## Focused reviewer passes
 

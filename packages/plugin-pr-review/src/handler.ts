@@ -36,6 +36,7 @@ import { buildVerifierPrompt, claimDiff, decideFinding, refutationCitesRules, re
 import { packRules } from "./context/pack.js";
 import type { ReviewRound } from "./state.js";
 import { buildLearnerPrompt, collectFeedback, existingLessons, runLearner, writeLessons, type LearnOutcome } from "./learn.js";
+import { checkedOut } from "./checkout.js";
 
 export const REVIEWER_ROLE = "pr-reviewer";
 
@@ -737,7 +738,7 @@ async function runVerifier(
 ): Promise<Verdict | undefined> {
   const child: PluginChild = await ctx.threads.spawnChild(
     thread,
-    { prompt: req.prompt, title: req.title, role: VERIFIER_ROLE, model: req.model, repo: req.repo, ref: req.head, gitAccess: "read" },
+    { prompt: req.prompt, prepare: checkedOut(req.head), title: req.title, role: VERIFIER_ROLE, model: req.model, repo: req.repo, ref: req.head, gitAccess: "read" },
     { dispatchId: req.dispatchId },
   );
   const result = await ctx.threads.awaitChild(child, { resultSchema: VerdictSchema });
@@ -838,10 +839,9 @@ async function runReviewerChild(
     {
       // With a prepare step, the host sends the prompt that step returns; this one is only its input.
       prompt: gathers ? promptWith(undefined, "") : await fallback(),
-      // Gather in the child's sandbox, on the checkout it already has. The pack goes into the first prompt, so compaction never drops it.
-      ...(context && gathers
-        ? {
-            prepare: async (runner) => {
+      // Check the checkout first. Then gather in the child's sandbox, on that checkout. The pack goes into the first prompt, so compaction never drops it.
+      prepare: checkedOut(input.head, context && gathers
+        ? async (runner) => {
               const pack = await gatherForReview(ctx, {
                 runner,
                 readTrusted: context.readTrusted,
@@ -858,9 +858,8 @@ async function runReviewerChild(
               if (pack) input.onRules?.(pack.manifest.items.filter((i) => i.section === "notes" || i.section === "learned").map((i) => i.ref));
               input.onPack?.(pack?.text);
               return pack ? promptWith(pack.text, "") : fallback();
-            },
-          }
-        : {}),
+            }
+        : undefined),
       title: input.focus ? `Review ${input.head.slice(0, 7)} (${input.focus})` : `Review ${input.head.slice(0, 7)}`,
       role: input.focus ? focusRole(input.focus) : REVIEWER_ROLE,
       model: input.settings.model,

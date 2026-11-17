@@ -127,21 +127,28 @@ export async function gatherContext(input: GatherInput): Promise<ContextPack> {
     conventions.push({ path, text, why: dir ? `applies to ${dir}/` : "repo root" });
   }
   const changeTokens = tokens([...touchedSource, input.title].join(" "));
-  const playbookDirs = new Map<string, { score: number; files: string[]; hits: string[] }>();
+  // A playbook directory matches on its own name or on a file name. A name match brings the whole
+  // directory; a file match brings that file and the directory's README, not the other files.
+  const playbookDirs = new Map<string, { score: number; dirMatch: boolean; files: { path: string; matched: boolean }[]; hits: string[] }>();
   for (const path of candidates.filter((p) => PLAYBOOK.test(p))) {
     const rel = path.slice(path.search(/playbooks\//i) + "playbooks/".length);
     const dir = rel.includes("/") ? rel.slice(0, rel.indexOf("/")) : rel.replace(/\.md$/i, "");
-    const hits = [...tokens(rel)].filter((t) => changeTokens.has(t));
-    const entry = playbookDirs.get(dir) ?? { score: 0, files: [], hits: [] };
-    entry.files.push(path);
+    const dirHits = [...tokens(dir)].filter((t) => changeTokens.has(t));
+    const fileHits = [...tokens(rel.slice(dir.length))].filter((t) => changeTokens.has(t));
+    const hits = [...new Set([...dirHits, ...fileHits])];
+    const entry = playbookDirs.get(dir) ?? { score: 0, dirMatch: false, files: [], hits: [] };
+    entry.files.push({ path, matched: fileHits.length > 0 });
+    entry.dirMatch ||= dirHits.length > 0;
     entry.score = Math.max(entry.score, hits.length);
     entry.hits = [...new Set([...entry.hits, ...hits])];
     playbookDirs.set(dir, entry);
   }
   const matchedDirs = [...playbookDirs.entries()].filter(([, e]) => e.score > 0).sort((a, b) => b[1].score - a[1].score);
   for (const [dir, e] of matchedDirs.slice(0, PLAYBOOK_DIRS)) {
+    const isReadme = (p: string): boolean => /readme\.md$/i.test(p);
+    const files = e.files.filter((f) => e.dirMatch || f.matched || isReadme(f.path)).map((f) => f.path);
     // README first, then the rest by name.
-    for (const path of e.files.sort((a, b) => Number(!/readme\.md$/i.test(a)) - Number(!/readme\.md$/i.test(b)) || a.localeCompare(b))) {
+    for (const path of files.sort((a, b) => Number(!isReadme(a)) - Number(!isReadme(b)) || a.localeCompare(b))) {
       const text = await trusted(path);
       if (text !== undefined) conventions.push({ path, text, why: `playbook ${dir} matches ${e.hits.join(", ")}` });
     }
@@ -308,7 +315,12 @@ function onlySource(patch: string): string {
 }
 
 function tokens(text: string): Set<string> {
-  const stop = new Set(["playbooks", "readme", "docs", "the", "and", "for", "with", "src", "lib", "pkg", "internal", "main", "index", "fix", "feat", "add", "update", "chore", "yaml", "json"]);
+  // Path filler, and words any PR title or playbook name can hold: a match on them says nothing about the topic.
+  const stop = new Set([
+    "playbooks", "readme", "docs", "the", "and", "for", "with", "from", "into", "src", "lib", "pkg", "internal", "main", "index", "yaml", "json",
+    "fix", "feat", "add", "update", "chore", "new", "create", "remove", "delete", "change", "use", "make", "set", "get", "move", "rename",
+    "support", "allow", "handle", "improve", "refactor", "bump", "more", "all", "how",
+  ]);
   return new Set(
     text
       .replace(/([a-z])([A-Z])/g, "$1 $2")

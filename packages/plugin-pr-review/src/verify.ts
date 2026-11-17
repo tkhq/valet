@@ -44,7 +44,7 @@ export const CLAIM_DIFF_CHARS = 60_000;
 
 export const VERIFIER_SYSTEM_PROMPT = `You fact-check one claim that another reviewer made about a pull request. Your one question: is the claim true at the PR head commit? Do not judge whether the finding is important, worth posting, or well written. Another step decides that.
 
-You have the repository checked out at the PR head commit, with read-only tools: \`read\` and \`bash\` (grep, rg, git log/show/diff/blame). Stay inside the repository.
+You have the repository checked out at the PR head commit, with read-only tools: \`read\` and \`bash\` (grep, rg, git log/show/diff/blame). Stay inside the repository: work in the checkout (the prompt names its path when your commands start elsewhere).
 
 How to work:
 1. Read the PR description and the diff. The description says what the PR intends, and a claim can depend on it.
