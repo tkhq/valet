@@ -57,7 +57,9 @@ the vault or item id instead, so every reference `find` prints resolves.
 `saved	secret://...` lines. It lists only scopes the session may read, with the
 `mayRead` rule `/resolve` applies: a team session sees its team and the
 company, and a personal session sees its owner's personal secrets, the
-owner's teams, and the company. `find '*'` lists every saved secret the
+owner's teams, and the company. A name matches when it contains every word
+of the query, in any order, so "test key" finds `VALET_TEST_KEY`. `find '*'`
+lists every saved secret the
 session may read. It never lists 1Password, so vault and item titles still
 need a search term. Without this, an agent in a team session could not learn
 that a saved secret existed, and read each guessed name's failure as no access.

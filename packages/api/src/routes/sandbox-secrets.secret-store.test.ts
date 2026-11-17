@@ -335,6 +335,14 @@ describe("finding saved secrets", () => {
     ]);
   });
 
+  it("matches every word of a loose description in any order", async () => {
+    await seed();
+    const token = await session("sess-f7", { type: "team", id: "team-1" }, "user-a");
+    expect((await (await find("team key", token)).text()).trim()).toBe("saved\tsecret://team/team-1/TEAM_KEY");
+    expect((await (await find("key team", token)).text()).trim()).toBe("saved\tsecret://team/team-1/TEAM_KEY");
+    expect((await (await find("team password", token)).text()).trim()).toBe("");
+  });
+
   it("matches a name case-insensitively and prints no value", async () => {
     await seed();
     const token = await userSession("sess-f3", "user-a");

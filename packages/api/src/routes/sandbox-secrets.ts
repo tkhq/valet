@@ -422,12 +422,15 @@ async function findSavedSecrets(
     scopes.push({ kind: "personal" });
     for (const teamId of memberTeamIds) scopes.push({ kind: "team", teamId });
   }
-  const needle = query?.trim().toLowerCase() ?? null;
+  // Words, not one string: a person says "test key" for VALET_TEST_KEY, so
+  // every word of the query must appear in the name, in any order.
+  const words = query === null ? null : query.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
   const lines: string[] = [];
   for (const scope of scopes) {
     if (!(await store.mayRead(ctx, scope))) continue;
     for (const row of await store.list(ctx, scope)) {
-      if (needle === null || row.name.toLowerCase().includes(needle)) {
+      const name = row.name.toLowerCase();
+      if (words === null || words.every((word) => name.includes(word))) {
         lines.push(`saved\t${row.reference}`);
       }
     }
