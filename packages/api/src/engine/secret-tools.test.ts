@@ -1,10 +1,11 @@
 // @vitest-environment node
 import { describe, expect, it, vi } from "vitest";
 import type { DecisionGateRequest, DecisionResolution, Sandbox, ToolContext } from "@valet/engine";
-import { buildSecretTools, secretRequestAnswerRefusal, secretRequestOf } from "./secret-tools.js";
+import { buildSecretTools, deleteScopeOf, secretRequestAnswerRefusal, secretRequestOf } from "./secret-tools.js";
+import { SecretStoreError } from "../services/secret-store/provider.js";
 import type { SecretStoreService } from "../services/secret-store/service.js";
 
-function fakeStore(saved: Set<string> = new Set()): SecretStoreService {
+function fakeStore(saved: Set<string> = new Set(), removed: Array<{ userId: string; key: string }> = []): SecretStoreService {
   const refuse = async (): Promise<never> => {
     throw new Error("not used");
   };
@@ -15,7 +16,14 @@ function fakeStore(saved: Set<string> = new Set()): SecretStoreService {
     beginSave: refuse,
     finishSave: refuse,
     saveValue: refuse,
-    remove: refuse,
+    remove: async (actor, scope, name) => {
+      const key = `${scope.kind}:${name}`;
+      if (scope.kind === "company" && actor.userId !== "admin") {
+        throw new SecretStoreError("Only an organization admin can change company secrets.", "forbidden");
+      }
+      saved.delete(key);
+      removed.push({ userId: actor.userId, key });
+    },
     mayRead: refuse,
     read: refuse,
     exists: async (_actor, scope, name) => saved.has(`${scope.kind}:${name}`),
@@ -123,6 +131,71 @@ describe("request_secret", () => {
       resolve: () => ({ actionId: "saved", value: "secret://personal/OPENAI_API_KEY", resolvedBy: "user-a", resolvedAt: 0 }),
     });
     expect(await run(fakeStore(), ctx)).toContain("is not saved");
+  });
+});
+
+describe("delete_secret", () => {
+  async function del(store: SecretStoreService, ctx: ToolContext, args: { name: string; scope?: "personal" | "team" | "company" }) {
+    const tool = buildSecretTools({ secretStore: store }).find((t) => t.name === "delete_secret");
+    return (await tool!.execute(args, ctx)).text ?? "";
+  }
+  const approveAs = (userId: string) => () => ({ actionId: "approve", resolvedBy: userId, resolvedAt: 0 });
+
+  it("deletes a personal secret only after the person approves a card that names it", async () => {
+    const saved = new Set(["personal:TEST_KEY"]);
+    const removed: Array<{ userId: string; key: string }> = [];
+    const { ctx, gates } = context({ owner: { type: "user", id: "user-a" }, resolve: approveAs("user-a") });
+    const text = await del(fakeStore(saved, removed), ctx, { name: "TEST_KEY" });
+    expect(gates).toHaveLength(1);
+    expect(gates[0]).toMatchObject({ type: "approval", title: "Delete TEST_KEY?", resumeKey: "delete_secret:secret://personal/TEST_KEY" });
+    expect(gates[0]!.body).toContain("You cannot undo this.");
+    expect(removed).toEqual([{ userId: "user-a", key: "personal:TEST_KEY" }]);
+    expect(text).toBe("Deleted secret://personal/TEST_KEY. Commands that reference it now fail.");
+  });
+
+  it("keeps the secret when the person does not approve", async () => {
+    const removed: Array<{ userId: string; key: string }> = [];
+    const { ctx } = context({ owner: { type: "user", id: "user-a" }, resolve: () => ({ actionId: "deny", resolvedBy: "user-a", resolvedAt: 0 }) });
+    const text = await del(fakeStore(new Set(["personal:TEST_KEY"]), removed), ctx, { name: "TEST_KEY" });
+    expect(removed).toEqual([]);
+    expect(text).toContain("It is still saved. Do not delete it another way.");
+  });
+
+  it("deletes a team secret as the member who approved", async () => {
+    const removed: Array<{ userId: string; key: string }> = [];
+    const { ctx } = context({ owner: { type: "team", id: "team-1" }, resolve: approveAs("member-b") });
+    await del(fakeStore(new Set(["team:VALET_TEST_KEY"]), removed), ctx, { name: "VALET_TEST_KEY" });
+    expect(removed).toEqual([{ userId: "member-b", key: "team:VALET_TEST_KEY" }]);
+  });
+
+  it("reports the store's refusal when a non-admin approves a company delete", async () => {
+    const { ctx } = context({ owner: { type: "user", id: "user-a" }, resolve: approveAs("user-a") });
+    const text = await del(fakeStore(new Set(["company:SHARED"])), ctx, { name: "SHARED", scope: "company" });
+    expect(text).toBe("SHARED was not deleted: Only an organization admin can change company secrets.");
+  });
+
+  it("opens no card for a missing name, a workflow run, or a scope the session cannot reach", async () => {
+    const cases: Array<[Parameters<typeof context>[0], Parameters<typeof del>[2], RegExp]> = [
+      [{ owner: { type: "user", id: "user-a" } }, { name: "MISSING" }, /No secret named MISSING in your personal secrets/],
+      [{ owner: { type: "user", id: "user-a" }, unattendedWorkflow: true }, { name: "TEST_KEY" }, /workflow run cannot delete/],
+      [{ owner: { type: "team", id: "team-1" } }, { name: "TEST_KEY", scope: "personal" }, /team session cannot delete a personal secret/],
+      [{ owner: { type: "user", id: "user-a" } }, { name: "secret://personal/TEST_KEY" }, /Pass the saved name/],
+    ];
+    for (const [opts, args, expected] of cases) {
+      const { ctx, gates } = context(opts);
+      expect(await del(fakeStore(new Set(["personal:TEST_KEY"])), ctx, args)).toMatch(expected);
+      expect(gates).toHaveLength(0);
+    }
+  });
+});
+
+describe("deleteScopeOf", () => {
+  it("maps a session to its own scope and allows company from any session", () => {
+    expect(deleteScopeOf(undefined, { type: "user", id: "u" })).toEqual({ kind: "personal" });
+    expect(deleteScopeOf(undefined, { type: "team", id: "t" })).toEqual({ kind: "team", teamId: "t" });
+    expect(deleteScopeOf("company", { type: "team", id: "t" })).toEqual({ kind: "company" });
+    expect(deleteScopeOf("team", { type: "user", id: "u" })).toMatch(/personal session cannot delete a team secret/);
+    expect(deleteScopeOf(undefined, { type: "org", id: "o" })).toMatch(/only company secrets/);
   });
 });
 

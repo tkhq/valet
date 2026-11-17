@@ -171,7 +171,7 @@ import { publicUrlFromEnv } from "../channels/host.js";
 import { buildFileAttachTool, generatedFileStore } from "../services/generated-files.js";
 import { buildDiagramRenderTool } from "../services/diagram-render.js";
 import { artifactPublishTool, buildMemoryTools, buildReadOnlyMemoryTools } from "../orchestrator/memory-tools.js";
-import { REQUEST_SECRET_TOOL } from "./secret-tools.js";
+import { DELETE_SECRET_TOOL, REQUEST_SECRET_TOOL } from "./secret-tools.js";
 import { buildSecurityPersonaTools, buildSecurityRunnerTools } from "./security-tools.js";
 import { securityCompactionHook } from "./security-compaction.js";
 import {
@@ -413,7 +413,7 @@ export interface EngineHostOpts {
   homeTools?: () => ToolDef[];
   /** Tools for messaging the threads a branch links to this one (`home/thread-link-tools.ts`). */
   threadLinkTools?: () => ToolDef[];
-  /** `request_secret` (`engine/secret-tools.ts`), set when a secret store is configured. Every session gets it. */
+  /** `request_secret` and `delete_secret` (`engine/secret-tools.ts`), set when a secret store is configured. Every session gets them. */
   secretTools?: () => ToolDef[];
   /**
    * Assembled plugin set (plugin-system-v2 Task 4's `assemblePlugins`
@@ -1734,7 +1734,7 @@ export class EngineHost {
     };
     const serviceAvailability = await resolveServiceAvailability();
     const catalogOptions = {
-      nativeToolNames: [...builtinTools.map((tool) => tool.name), "skill", "skill_script", "focus_tools", ...(this.opts.blobs && this.opts.db ? ["file_attach", "render_diagram"] : []), ...(this.opts.secretTools ? [REQUEST_SECRET_TOOL] : []), ...appendedNativeToolNames],
+      nativeToolNames: [...builtinTools.map((tool) => tool.name), "skill", "skill_script", "focus_tools", ...(this.opts.blobs && this.opts.db ? ["file_attach", "render_diagram"] : []), ...(this.opts.secretTools ? [REQUEST_SECRET_TOOL, DELETE_SECRET_TOOL] : []), ...appendedNativeToolNames],
       serviceAvailability,
       resolveServiceAvailability,
     };

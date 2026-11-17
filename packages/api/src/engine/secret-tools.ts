@@ -12,10 +12,17 @@
  * The scope follows the session's owner: a personal session saves a
  * personal secret, a team session a team secret. Company secrets are set by
  * admins in Settings, never requested by an agent.
+ *
+ * `delete_secret` — the agent deletes a saved secret after the person
+ * approves a card that names it. The delete runs as the person who approved,
+ * with the same permission rules as Settings (`assertMayWrite`). It is an
+ * assistant tool, not a `valet-secrets` command: a sandbox token can read a
+ * secret but never change one.
  */
 import { Type } from "typebox";
 import type { TSchema } from "typebox";
 import type { ToolDef } from "@valet/engine";
+import { SecretStoreError } from "../services/secret-store/provider.js";
 import {
   parseSecretReference,
   secretReference,
@@ -30,6 +37,7 @@ function defineTool<T extends TSchema>(def: ToolDef<T>): ToolDef<T> {
 }
 
 export const REQUEST_SECRET_TOOL = "request_secret";
+export const DELETE_SECRET_TOOL = "delete_secret";
 export const SECRET_SAVED_ACTION = "saved";
 export const SECRET_DECLINE_ACTION = "decline";
 
@@ -150,7 +158,76 @@ export function buildSecretTools(deps: { secretStore: SecretStoreService }): Too
       };
     },
   });
-  return [requestSecret];
+  const deleteSecret = defineTool({
+    name: DELETE_SECRET_TOOL,
+    description:
+      "Delete a saved secret from the secret store after the user approves a card that names it. Use it only when the user " +
+      "asks to remove a credential, for example after a test or a rotation. The scope defaults to this session's owner: " +
+      "personal in a personal session, the team in a team session. Pass scope \"company\" only for a company secret; " +
+      "only an organization admin can approve that. Run `valet-secrets find` first if you do not know the exact name.",
+    parameters: Type.Object({
+      name: Type.String({ description: "The saved name, for example OPENAI_API_KEY. Not the value and not the secret:// reference." }),
+      scope: Type.Optional(Type.Union([Type.Literal("personal"), Type.Literal("team"), Type.Literal("company")], {
+        description: "Which secrets to delete from. Omit it for this session's own scope.",
+      })),
+    }),
+    execute: async (args, ctx) => {
+      const name = args.name.trim();
+      if (!validSecretName(name)) {
+        return { text: "Pass the saved name, for example OPENAI_API_KEY. Run valet-secrets find to list the saved names." };
+      }
+      if (ctx.unattendedWorkflow) {
+        return { text: "A workflow run cannot delete a secret. Ask the user to delete it in Settings, Secrets." };
+      }
+      const scope = deleteScopeOf(args.scope, ctx.owner);
+      if (typeof scope === "string") return { text: scope };
+      const reference = secretReference(scope, name);
+      const where = scope.kind === "company" ? "the company's secrets" : scope.kind === "team" ? "this team's secrets" : "your personal secrets";
+      const asker = { orgId: ctx.orgId, userId: ctx.userId };
+      if (!(await deps.secretStore.exists(asker, scope, name).catch(() => false))) {
+        return { text: `No secret named ${name} in ${where}. Run valet-secrets find to list the saved names.` };
+      }
+      // The card shows the agent's stated reason on its own (`agentReason`).
+      const resolution = await ctx.requestDecision({
+        type: "approval",
+        title: `Delete ${name}?`,
+        body: `This deletes ${reference} from ${where}. Commands that use it stop working. You cannot undo this.`,
+        resumeKey: `${DELETE_SECRET_TOOL}:${reference}`,
+      });
+      if (resolution.actionId !== "approve") {
+        return { text: `The user did not approve deleting ${name}. It is still saved. Do not delete it another way.` };
+      }
+      try {
+        await deps.secretStore.remove({ orgId: ctx.orgId, userId: resolution.resolvedBy }, scope, name);
+      } catch (err) {
+        if (err instanceof SecretStoreError) return { text: `${name} was not deleted: ${err.message}` };
+        throw err;
+      }
+      return { text: `Deleted ${reference}. Commands that reference it now fail.` };
+    },
+  });
+  return [requestSecret, deleteSecret];
+}
+
+/**
+ * The scope a delete targets. A session reaches its own owner's secrets and
+ * the company's: a team session never names a person's personal secrets,
+ * and a personal session never names a team's.
+ */
+export function deleteScopeOf(
+  requested: "personal" | "team" | "company" | undefined,
+  owner: { type: "user" | "team" | "org"; id: string } | undefined,
+): SecretScope | string {
+  if (requested === "company") return { kind: "company" };
+  if (!owner || owner.type === "org") {
+    return "This session belongs to the whole organization. It can delete only company secrets: pass scope \"company\".";
+  }
+  if (owner.type === "team") {
+    if (requested === "personal") return "A team session cannot delete a personal secret. Ask the user to delete it from a personal thread or in Settings, Secrets.";
+    return { kind: "team", teamId: owner.id };
+  }
+  if (requested === "team") return "A personal session cannot delete a team secret. Delete it from a thread in that team, or in Settings, Secrets.";
+  return { kind: "personal" };
 }
 
 /** The env var the reference goes into: the last segment, as a shell name. */
