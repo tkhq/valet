@@ -330,6 +330,10 @@ pnpm --filter @valet/eval review-misses --repo owner/name --since 2026-11-10 \
 - `addressed` is a weak label. Read each case, fix its golden text,
   category and severity, and delete cases that are not defects before the
   suite gates a change.
+- `--with-ours` also writes our reviewer's own `addressed` comments as
+  `kept-` cases. They form a regression suite: a reviewer change that stops
+  finding them loses recall that authors already valued. Pair it with
+  `review-compare` before a change ships.
 - Cases quote review comments. The command refuses an output directory
   inside the repo. Run the suite as a private suite (see "Private suites").
 

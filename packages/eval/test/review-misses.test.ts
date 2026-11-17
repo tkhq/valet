@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { findMisses, goldenText, groupMisses, insideRepo, missCase, missCaseId, reviewedBy } from "../src/review-misses.js";
+import { findMisses, goldenText, groupMisses, insideRepo, keptFindings, missCase, missCaseId, reviewedBy } from "../src/review-misses.js";
 import type { OutcomeRow, PullNode } from "../src/review-outcomes.js";
 
 const row = (over: Partial<OutcomeRow>): OutcomeRow => ({
@@ -55,6 +55,18 @@ describe("review misses", () => {
     });
     const rated = missCase(groupMisses([row({ severity: "medium", category: "security" })])[0] ?? first, "a", false);
     expect(rated).toMatchObject({ checks: [{ golden: [{ severity: "Medium", category: "security" }] }] });
+  });
+
+  it("keeps our own addressed comments as kept cases, apart from misses", () => {
+    const rows = [
+      row({ bot: "acme-review[bot]", commentId: 2 }),
+      row({ bot: "acme-review[bot]", commentId: 3, outcome: "ignored" }),
+      row({ bot: "acme-review[bot]", commentId: 4, side: "LEFT" }),
+      row({ commentId: 5 }),
+    ];
+    expect(keptFindings(rows, "acme-review").map((r) => r.commentId)).toEqual([2]);
+    const [g] = groupMisses(keptFindings(rows, "acme-review"));
+    expect(missCase(g, "b".repeat(40), true, "kept")).toMatchObject({ id: "kept-shop-7-ccccccc", description: expect.stringContaining("our reviewer commented on") });
   });
 
   it("refuses an output directory inside the repository", () => {
