@@ -1,12 +1,12 @@
 // @vitest-environment jsdom
 /**
- * Organization · Proxy settings page. Mocks `~/api/proxy-usage` and
- * `~/api/settings` to assert:
+ * Organization · Proxy settings page. Mocks `~/api/proxy-usage` to assert:
  *   - the enable switch reflects the `enabled` value from settings;
  *   - toggling the switch calls `setEnabled.mutate`;
  *   - the mode control reflects `mode`;
- *   - clicking a mode button calls `setMode.mutate`;
- *   - non-admin callers see read-only values, not interactive controls.
+ *   - clicking a mode button calls `setMode.mutate`.
+ * The organization layout's guard admits only admins, so the page has no
+ * read-only branch of its own.
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
@@ -44,28 +44,11 @@ vi.mock("~/api/proxy-usage", () => ({
   }),
 }));
 
-let orgData: {
-  data: { callerRole: "admin" | "member"; features: { organizations: boolean } } | undefined;
-  isLoading: boolean;
-} = {
-  data: { callerRole: "admin", features: { organizations: true } },
-  isLoading: false,
-};
-
-vi.mock("~/api/settings", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("~/api/settings")>();
-  return { ...actual, useOrg: () => orgData };
-});
-
 import { OrganizationProxyPage } from "./settings.organization.proxy";
 
 beforeEach(() => {
   vi.clearAllMocks();
   settingsResult = { data: { enabled: false, mode: "centralized" }, isLoading: false };
-  orgData = {
-    data: { callerRole: "admin", features: { organizations: true } },
-    isLoading: false,
-  };
   setEnabledMutate.mockReset();
   setModeMutate.mockReset();
 });
@@ -133,40 +116,6 @@ describe("OrganizationProxyPage — credential mode", () => {
     render(<OrganizationProxyPage />);
     fireEvent.click(screen.getByRole("button", { name: "Pass-through" }));
     expect(setModeMutate).toHaveBeenCalledWith("passthrough");
-  });
-});
-
-// ── non-admin read-only view ──────────────────────────────────────────────
-
-describe("OrganizationProxyPage — non-admin read-only", () => {
-  it("member does not see the switch", () => {
-    orgData = {
-      data: { callerRole: "member", features: { organizations: true } },
-      isLoading: false,
-    };
-    settingsResult = { data: { enabled: true, mode: "centralized" }, isLoading: false };
-    render(<OrganizationProxyPage />);
-    expect(screen.queryByRole("switch")).toBeNull();
-  });
-
-  it("member does not see the mode toggle buttons", () => {
-    orgData = {
-      data: { callerRole: "member", features: { organizations: true } },
-      isLoading: false,
-    };
-    render(<OrganizationProxyPage />);
-    expect(document.querySelector("[role='group'][aria-label='Credential mode']")).toBeNull();
-  });
-
-  it("member sees read-only gateway and mode summary", () => {
-    orgData = {
-      data: { callerRole: "member", features: { organizations: true } },
-      isLoading: false,
-    };
-    settingsResult = { data: { enabled: true, mode: "centralized" }, isLoading: false };
-    render(<OrganizationProxyPage />);
-    expect(screen.getByText("Gateway: On · Centralized mode")).toBeTruthy();
-    expect(screen.getByText("Managed by your organization admins.")).toBeTruthy();
   });
 });
 

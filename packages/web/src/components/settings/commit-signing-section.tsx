@@ -9,7 +9,7 @@ import { useCommitSigning, useEnrollCommitSigning } from "~/api/commit-signing";
 import { useMe } from "~/api/settings";
 
 /**
- * You · Connected accounts · Commit signing (agent commit signing design).
+ * Personal · Integrations · Commit signing (agent commit signing design).
  *
  * One passkey tap creates the user's Turnkey sub-organization; the browser
  * makes the passkey with `@turnkey/sdk-browser` and posts the attestation.

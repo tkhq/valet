@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { Section } from "~/components/settings/section";
-import { Spinner } from "~/components/primitives";
+import { ErrorRow, LoadingRow } from "~/components/primitives";
 import { MembersTable } from "~/components/settings/members-table";
 import { InvitesPanel } from "~/components/settings/invites-panel";
 import { useOrg, useOrgMembers } from "~/api/settings";
@@ -24,14 +24,8 @@ export function OrganizationMembersPage() {
 
   return (
     <Section title="Members" description="Everyone in your organization.">
-      {membersQ.isLoading && (
-        <div className="flex items-center gap-2 py-4 text-sm text-muted">
-          <Spinner size={14} /> Loading…
-        </div>
-      )}
-      {membersQ.error && (
-        <p className="py-4 text-sm text-danger-500">Failed to load members.</p>
-      )}
+      {membersQ.isLoading && <LoadingRow />}
+      {membersQ.error && <ErrorRow>Failed to load members. Reload the page to try again.</ErrorRow>}
       {membersQ.data && <MembersTable members={membersQ.data.members} />}
       {isAdmin && <div className="pt-6"><InvitesPanel /></div>}
     </Section>

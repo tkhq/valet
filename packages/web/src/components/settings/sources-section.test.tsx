@@ -110,7 +110,7 @@ describe("SourcesSection", () => {
     sourcesError = true;
     sourcesData = undefined;
     render(<SourcesSection />);
-    expect(screen.getByText("Failed to load image sources. Reload the page.")).toBeTruthy();
+    expect(screen.getByText("Failed to load image sources. Reload the page to try again.")).toBeTruthy();
   });
 
   // ── Builder-unavailable banner ────────────────────────────────────────────

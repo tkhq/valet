@@ -1,5 +1,5 @@
 import { createFileRoute, Link, useNavigate, useSearch } from "@tanstack/react-router";
-import { Section } from "~/components/settings/section";
+import { Section, SectionHeading } from "~/components/settings/section";
 import { RepoSourcesPanel } from "~/components/skills/repo-sources-panel";
 import {
   readSkillFilter,
@@ -7,7 +7,7 @@ import {
   SkillGrid,
   type SkillGridFilters,
 } from "~/components/skills/skill-grid";
-import { Button, Spinner } from "~/components/primitives";
+import { Button, LoadingRow } from "~/components/primitives";
 import { Pager } from "~/components/pager";
 import {
   currentCursor,
@@ -90,9 +90,7 @@ export function OrganizationLibraryPage() {
         description="An admin adds, removes, and syncs a repository. Valet re-reads it on each GitHub push. If the webhook is not live, it re-reads every 5 minutes. A private repository is read with the GitHub App installed for this organization."
       >
         {orgId === undefined ? (
-          <div className="flex items-center gap-2 text-sm text-muted">
-            <Spinner size={14} /> Loading the organization…
-          </div>
+          <LoadingRow label="Loading the organization…" />
         ) : (
           <RepoSourcesPanel
             owner={{ type: "org", id: orgId }}
@@ -151,27 +149,19 @@ function OrgSkillsSection({
 
   return (
     <section className="space-y-4">
-      <div className="flex items-end justify-between gap-4">
-        <div className="space-y-1">
-          <h2 className="font-display text-xl text-ink">Organization skills &amp; prompts</h2>
-          <p className="text-sm text-muted">
-            Skills and prompts owned by the org. Every member&apos;s runtimes can read them.
-          </p>
-        </div>
-        {isAdmin && (
+      <SectionHeading
+        title="Organization skills and prompts"
+        description="Skills and prompts owned by the org. Every member's runtimes can read them."
+        actions={isAdmin && (
           <Button size="sm" asChild>
             <Link to="/skills/new" search={{ scope: "org" }}>
               New org skill
             </Link>
           </Button>
         )}
-      </div>
+      />
 
-      {waiting && (
-        <div className="flex items-center gap-2 text-sm text-muted">
-          <Spinner size={14} /> Loading skills…
-        </div>
-      )}
+      {waiting && <LoadingRow label="Loading skills…" />}
       {!waiting && (
         <>
           <SkillGrid

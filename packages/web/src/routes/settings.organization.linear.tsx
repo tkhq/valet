@@ -152,7 +152,7 @@ function SetupCards({ data }: { data: GetLinearConnectionResponse }) {
 function ConnectedCard({ data }: { data: GetLinearConnectionResponse }) {
   const disconnect = useDisconnectLinear();
   const [confirm, setConfirm] = useState(false);
-  return <div className="max-w-2xl space-y-3 rounded-md border border-line p-4">
+  return <div className="space-y-3 rounded-md border border-line p-4">
     <div className="flex flex-wrap items-start justify-between gap-3">
       <div className="flex items-start gap-3">
         <ServiceIcon slug="linear" label="Linear" />

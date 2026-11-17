@@ -1,7 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import type { OrgMcpServerWire } from "@valet/api/wire";
 import { Section } from "~/components/settings/section";
-import { Badge, Spinner } from "~/components/primitives";
+import { Badge, ErrorRow, LoadingRow } from "~/components/primitives";
 import { useOrgMcpServers } from "~/api/settings";
 
 /**
@@ -37,16 +37,8 @@ export function OrganizationMcpServersPage() {
       title="MCP servers"
       description="Remote MCP servers this deployment loads from its config file. To add or change a server, edit mcpServers in valet.yaml."
     >
-      {serversQ.isLoading && (
-        <div className="flex items-center gap-2 py-4 text-sm text-muted">
-          <Spinner size={14} /> Loading…
-        </div>
-      )}
-      {serversQ.error && (
-        <div className="py-4 text-sm text-danger-500">
-          Failed to load MCP servers. Reload the page to try again.
-        </div>
-      )}
+      {serversQ.isLoading && <LoadingRow />}
+      {serversQ.error && <ErrorRow>Failed to load MCP servers. Reload the page to try again.</ErrorRow>}
 
       {serversQ.data && serversQ.data.servers.length === 0 && (
         <div className="py-4 text-sm text-muted">
