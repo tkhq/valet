@@ -354,7 +354,10 @@ sandboxSecretsRouter.post("/find", async (c) => {
   const ctx = { orgId: sandbox.orgId, userId: sandbox.userId, teamId };
   const lines: string[] = [];
   const { secretStore } = c.var.providers;
-  if (secretStore.enabled) {
+  // A running security cell resolves only its engagement's allowlist, so it
+  // gets no saved-secret names either: listing them would name credentials
+  // `/resolve` refuses it.
+  if (secretStore.enabled && securityCaller.kind === "non-security") {
     const readCtx: SecretReadContext = {
       orgId: sandbox.orgId,
       userId: sandbox.userId,
@@ -369,7 +372,10 @@ sandboxSecretsRouter.post("/find", async (c) => {
       lines.push(...(await findSavedSecrets(secretStore, readCtx, teamId, memberTeamIds, listAll ? null : query)));
     } catch (err) {
       if (!(err instanceof SecretStoreError)) throw err;
-      return c.json({ error: `The secret store could not list saved secrets: ${err.message}` }, 502);
+      // `*` asks only the store, so its failure is the answer. A named search
+      // still has 1Password to ask, and a store outage must not hide a hit there.
+      if (listAll) return c.json({ error: `The secret store could not list saved secrets: ${err.message}` }, 502);
+      console.warn("sandbox-secrets: saved-secret search failed; searching 1Password only", err.message);
     }
   }
   if (listAll) return c.text(lines.join("\n"), 200, { "content-type": "text/plain; charset=utf-8" });

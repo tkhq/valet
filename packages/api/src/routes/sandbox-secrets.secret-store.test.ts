@@ -9,7 +9,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { mintSandboxToken } from "../auth/sandbox-tokens.js";
-import { agentSessions, orgMembers, secretStoreSpaces, teamMembers, teams } from "../schema/index.js";
+import { agentSessions, orgMembers, secretStoreSpaces, securityCells, securityEngagements, teamMembers, teams } from "../schema/index.js";
 import { SecretStoreError, type SecretLabels, type SecretStoreProvider } from "../services/secret-store/provider.js";
 import { createSecretStoreService, parseSecretReference, secretReference } from "../services/secret-store/service.js";
 
@@ -342,6 +342,44 @@ describe("finding saved secrets", () => {
     const text = await res.text();
     expect(text.trim()).toBe("saved\tsecret://personal/TEST_VALET_KEY");
     expect(text).not.toContain("mine");
+  });
+
+  it("lists no saved secret to a running security cell", async () => {
+    await seed();
+    const token = await userSession("sess-f5", "user-a");
+    await api!.providers.db.insert(securityEngagements).values({
+      id: "eng-f5",
+      sessionId: "eng-f5-session",
+      repoFullName: "acme/widgets",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      credentialsJson: [],
+      status: "running",
+    });
+    await api!.providers.db.insert(securityCells).values({
+      id: "sess-f5-cell",
+      engagementId: "eng-f5",
+      ordinal: 0,
+      persona: "code-review",
+      goal: "test cell",
+      dir: "01-recon",
+      childSessionId: "sess-f5",
+      status: "running",
+      createdAt: Date.now(),
+    });
+    const res = await find("*", token);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("");
+  });
+
+  it("still searches 1Password when the secret store cannot list", async () => {
+    const fake = await seed();
+    fake.provider.list = async () => {
+      throw new SecretStoreError("upstream down", "provider");
+    };
+    const token = await userSession("sess-f6", "user-a");
+    expect((await find("valet", token)).status).toBe(200);
+    expect((await find("*", token)).status).toBe(502);
   });
 
   it("lists nothing for a personal session of someone else's token", async () => {
