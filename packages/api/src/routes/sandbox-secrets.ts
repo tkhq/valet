@@ -21,9 +21,16 @@ import { onePasswordScopesFor, resolveAcrossScopes } from "../services/credentia
 import { isOnePasswordReference, OnePasswordAuthError, type OnePasswordScope } from "../services/onepassword.js";
 import { classifySecurityBrokerCaller, loadEngagementCredentialRefs } from "../services/security-broker-allowlist.js";
 import { registerSecurityCredentialValue } from "../services/security-credential-tripwire.js";
-import { getTeamInOrg } from "../services/teams.js";
+import { getTeamInOrg, listTeamsForUser } from "../services/teams.js";
 import { SecretStoreError } from "../services/secret-store/provider.js";
-import { isSecretReference, parseSecretReference, readRefusal, type SecretReadContext } from "../services/secret-store/service.js";
+import {
+  isSecretReference,
+  parseSecretReference,
+  readRefusal,
+  type SecretReadContext,
+  type SecretScope,
+  type SecretStoreService,
+} from "../services/secret-store/service.js";
 import { workflowSessionOwner } from "../workflows/session-owner.js";
 import type { AppQueryable } from "../lib/drizzle.js";
 import type { ResolveSandboxSecretsResponse } from "../wire/types.js";
@@ -314,8 +321,11 @@ sandboxSecretsRouter.post("/find", async (c) => {
   const query = body.query;
   if (typeof query !== "string" || query.trim() === "") {
     // A blank query would list the vaults, which this surface does not offer.
-    return c.json({ error: "query must be a non-empty string naming the credential to look for" }, 400);
+    return c.json({ error: "query must be a non-empty string naming the credential to look for. Pass * to list the saved secrets this session can read." }, 400);
   }
+  // `*` lists the secret store names this session may read. It never lists
+  // 1Password: vault and item titles stay behind a named search.
+  const listAll = query.trim() === "*";
   if (query.length > MAX_QUERY_LENGTH) {
     return c.json({ error: `query must be ${MAX_QUERY_LENGTH} characters or fewer` }, 400);
   }
@@ -343,6 +353,32 @@ sandboxSecretsRouter.post("/find", async (c) => {
 
   const ctx = { orgId: sandbox.orgId, userId: sandbox.userId, teamId };
   const lines: string[] = [];
+  const { secretStore } = c.var.providers;
+  // A running security cell resolves only its engagement's allowlist, so it
+  // gets no saved-secret names either: listing them would name credentials
+  // `/resolve` refuses it.
+  if (secretStore.enabled && securityCaller.kind === "non-security") {
+    const readCtx: SecretReadContext = {
+      orgId: sandbox.orgId,
+      userId: sandbox.userId,
+      sessionId: sandbox.sessionId,
+      sessionOwnerType: teamId ? "team" : isOwnUserSession ? "user" : "org",
+      sessionOwnerId: teamId ?? (isOwnUserSession ? sandbox.userId : sandbox.orgId),
+    };
+    const memberTeamIds = isOwnUserSession
+      ? (await listTeamsForUser(db, sandbox.userId)).filter((t) => t.orgId === sandbox.orgId).map((t) => t.id)
+      : [];
+    try {
+      lines.push(...(await findSavedSecrets(secretStore, readCtx, teamId, memberTeamIds, listAll ? null : query)));
+    } catch (err) {
+      if (!(err instanceof SecretStoreError)) throw err;
+      // `*` asks only the store, so its failure is the answer. A named search
+      // still has 1Password to ask, and a store outage must not hide a hit there.
+      if (listAll) return c.json({ error: `The secret store could not list saved secrets: ${err.message}` }, 502);
+      console.warn("sandbox-secrets: saved-secret search failed; searching 1Password only", err.message);
+    }
+  }
+  if (listAll) return c.text(lines.join("\n"), 200, { "content-type": "text/plain; charset=utf-8" });
   for (const scope of narrowed.scopes) {
     try {
       for (const cand of await onePassword.findCandidates(scope, ctx, query)) {
@@ -364,6 +400,40 @@ sandboxSecretsRouter.post("/find", async (c) => {
 
   return c.text(lines.join("\n"), 200, { "content-type": "text/plain; charset=utf-8" });
 });
+
+/**
+ * Saved secrets whose name contains the query (any name when it is null), as
+ * `secret://` references tagged `saved`. Only scopes the session may read are
+ * listed, with the same `mayRead` rule `/resolve` applies, so every line is a
+ * reference `run` accepts here: a team session sees its team and the company,
+ * and a personal session sees its owner's personal secrets, the owner's
+ * teams, and the company.
+ */
+async function findSavedSecrets(
+  store: SecretStoreService,
+  ctx: SecretReadContext,
+  sessionTeamId: string | undefined,
+  memberTeamIds: string[],
+  query: string | null,
+): Promise<string[]> {
+  const scopes: SecretScope[] = [{ kind: "company" }];
+  if (sessionTeamId) scopes.push({ kind: "team", teamId: sessionTeamId });
+  if (ctx.sessionOwnerType === "user") {
+    scopes.push({ kind: "personal" });
+    for (const teamId of memberTeamIds) scopes.push({ kind: "team", teamId });
+  }
+  const needle = query?.trim().toLowerCase() ?? null;
+  const lines: string[] = [];
+  for (const scope of scopes) {
+    if (!(await store.mayRead(ctx, scope))) continue;
+    for (const row of await store.list(ctx, scope)) {
+      if (needle === null || row.name.toLowerCase().includes(needle)) {
+        lines.push(`saved\t${row.reference}`);
+      }
+    }
+  }
+  return lines;
+}
 
 /**
  * The owner columns the scope rule reads. A coding session has an

@@ -9,7 +9,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { mintSandboxToken } from "../auth/sandbox-tokens.js";
-import { agentSessions, orgMembers, secretStoreSpaces, teamMembers, teams } from "../schema/index.js";
+import { agentSessions, orgMembers, secretStoreSpaces, securityCells, securityEngagements, teamMembers, teams } from "../schema/index.js";
 import { SecretStoreError, type SecretLabels, type SecretStoreProvider } from "../services/secret-store/provider.js";
 import { createSecretStoreService, parseSecretReference, secretReference } from "../services/secret-store/service.js";
 
@@ -290,6 +290,102 @@ describe("company and team secrets through the broker", () => {
       expect(res.status).toBe(403);
     }
     expect(fake.reads).toHaveLength(0);
+  });
+});
+
+describe("finding saved secrets", () => {
+  async function find(query: string, token: string) {
+    return fetch(`${api!.baseUrl}/api/sandbox-secrets/find`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-valet-sandbox": token },
+      body: JSON.stringify({ query }),
+    });
+  }
+  const lines = async (res: Response) => (await res.text()).split("\n").filter(Boolean).sort();
+
+  async function seed() {
+    const fake = await bootWithStore();
+    await addTeam("team-1", ["user-a"]);
+    await addTeam("team-2", ["user-c"]);
+    const svc = api!.providers.secretStore;
+    await svc.saveValue(as("local-user"), company, "DATABASE_URL", "postgres://x");
+    await svc.saveValue(as("user-a"), team("team-1"), "TEAM_KEY", "t1");
+    await svc.saveValue(as("user-c"), team("team-2"), "OTHER_TEAM_KEY", "t2");
+    await svc.saveValue(as("user-a"), personal, "TEST_VALET_KEY", "mine");
+    await svc.saveValue(as("user-b"), personal, "NOT_YOURS", "theirs");
+    return fake;
+  }
+
+  it("lists what a team session may read: its team and the company, never a personal secret", async () => {
+    const fake = await seed();
+    const token = await session("sess-f1", { type: "team", id: "team-1" }, "user-a");
+    const res = await find("*", token);
+    expect(res.status).toBe(200);
+    expect(await lines(res)).toEqual(["saved\tsecret://company/DATABASE_URL", "saved\tsecret://team/team-1/TEAM_KEY"]);
+    expect(fake.reads).toHaveLength(0);
+  });
+
+  it("lists the owner's personal secrets, their teams, and the company in a personal session", async () => {
+    await seed();
+    const token = await userSession("sess-f2", "user-a");
+    expect(await lines(await find("*", token))).toEqual([
+      "saved\tsecret://company/DATABASE_URL",
+      "saved\tsecret://personal/TEST_VALET_KEY",
+      "saved\tsecret://team/team-1/TEAM_KEY",
+    ]);
+  });
+
+  it("matches a name case-insensitively and prints no value", async () => {
+    await seed();
+    const token = await userSession("sess-f3", "user-a");
+    const res = await find("valet", token);
+    const text = await res.text();
+    expect(text.trim()).toBe("saved\tsecret://personal/TEST_VALET_KEY");
+    expect(text).not.toContain("mine");
+  });
+
+  it("lists no saved secret to a running security cell", async () => {
+    await seed();
+    const token = await userSession("sess-f5", "user-a");
+    await api!.providers.db.insert(securityEngagements).values({
+      id: "eng-f5",
+      sessionId: "eng-f5-session",
+      repoFullName: "acme/widgets",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      credentialsJson: [],
+      status: "running",
+    });
+    await api!.providers.db.insert(securityCells).values({
+      id: "sess-f5-cell",
+      engagementId: "eng-f5",
+      ordinal: 0,
+      persona: "code-review",
+      goal: "test cell",
+      dir: "01-recon",
+      childSessionId: "sess-f5",
+      status: "running",
+      createdAt: Date.now(),
+    });
+    const res = await find("*", token);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("");
+  });
+
+  it("still searches 1Password when the secret store cannot list", async () => {
+    const fake = await seed();
+    fake.provider.list = async () => {
+      throw new SecretStoreError("upstream down", "provider");
+    };
+    const token = await userSession("sess-f6", "user-a");
+    expect((await find("valet", token)).status).toBe(200);
+    expect((await find("*", token)).status).toBe(502);
+  });
+
+  it("lists nothing for a personal session of someone else's token", async () => {
+    await seed();
+    const token = await userSession("sess-f4", "user-a", "user-b");
+    expect(await lines(await find("*", token))).toEqual(["saved\tsecret://company/DATABASE_URL"]);
   });
 });
 
