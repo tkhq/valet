@@ -598,6 +598,22 @@ describe("review-pull-request handler", () => {
     expect(store.pointers()?.findings).toMatchObject([{ id: "f1", status: "open", line: 6, commentId }]);
   });
 
+  it("does not reopen the inline thread of a fixed finding for a repeat with no evidence", async () => {
+    const gh = new FakeGitHub();
+    const store = new FakeStore();
+    const handler = createReviewHandler({ fetch: gh.fetch });
+    await handler.handle(event("ev1"), context(new FakeThreads(scripted(reviewOf([finding({})]), {})), store));
+    const commentId = gh.comments[0].id;
+    gh.head = H2;
+    await handler.handle(event("ev2"), context(new FakeThreads(scripted(reviewOf([]), { "Null deref in parse": verdict("refuted") })), store));
+
+    gh.head = "3".repeat(40);
+    await handler.handle(event("ev3"), context(new FakeThreads(scripted(reviewOf([finding({ line: 6, evidence: "" })]), {})), store));
+    expect(gh.resolved.has(commentId)).toBe(true);
+    expect(gh.writes).not.toContain(`unresolve ${commentId}`);
+    expect(store.pointers()?.findings).toContainEqual({ id: "f2", path: "a.ts", line: 6, status: "open", unsupported: true });
+  });
+
   it.each(["comment", "thread"])("retries a failed %s edit before recording a finding as resolved", async (failure) => {
     const gh = new FakeGitHub();
     const store = new FakeStore();

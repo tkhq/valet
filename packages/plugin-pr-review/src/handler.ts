@@ -400,8 +400,9 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
     if ([...stillOpen, ...posted].some((o) => sameIssue(o, f))) continue;
     // A finding a person dismissed is never posted again.
     if (open.dismissed.some((d) => (hasTitle(d) ? sameIssue(d, f) : d.path === f.path && Math.abs(d.line - f.line) <= 3))) continue;
-    // A fixed finding that came back reopens its own thread.
-    const back = open.fixed.find((o) => !reopened.some((r) => r.id === o.id) && sameIssue(o, f));
+    // A fixed finding that came back reopens its own thread. One with no trigger or
+    // evidence gets no inline comment, so it posts as a new summary-only finding instead.
+    const back = unsupported.has(f) ? undefined : open.fixed.find((o) => !reopened.some((r) => r.id === o.id) && sameIssue(o, f));
     if (back) {
       reopened.push({ ...f, id: back.id, line: f.line, ...(back.commentId !== undefined ? { commentId: back.commentId } : {}), ...(back.threadId !== undefined ? { threadId: back.threadId } : {}) });
       continue;
