@@ -1,5 +1,6 @@
 import { intersectToolScopes, readToolScope, TOOL_SCOPE_KEY } from "@valet/shared";
-import { Thread, isItemDrivenInProcess, resolveModelId as resolveSessionModel } from "./thread.js";
+import { THREAD_BRANCHED_KEY, Thread, isItemDrivenInProcess, resolveModelId as resolveSessionModel } from "./thread.js";
+import { walkTranscriptDag } from "./compaction.js";
 import { uid } from "./ids.js";
 import { builtinTools, CHILD_EXCLUDED_TOOL_NAMES, WAKEUP_TOOL_NAMES } from "./builtin-tools/index.js";
 import { decideReconciliation, type ReconcileContext } from "./submission.js";
@@ -1815,7 +1816,16 @@ export class Session {
     const other = siblings.find((d) => d.id === threadKey)
       ?? siblings.filter((d) => d.key === threadKey).sort((a, b) => b.updatedAt - a.updatedAt)[0];
     if (!other || (reader && !(await this.threadReadable(reader, other)))) return [];
-    return this.providers.store.getEntries(other.sessionId, other.id, opts);
+    if (other.metadata?.[THREAD_BRANCHED_KEY] !== true || opts?.queueItemId !== undefined) {
+      return this.providers.store.getEntries(other.sessionId, other.id, opts);
+    }
+    // An edited thread keeps abandoned branches. Read its active path, as
+    // `Thread.readEntries` does.
+    const snapshot = await this.providers.store.getThreadSnapshot(other.sessionId, other.id);
+    if (!snapshot) return [];
+    let path = walkTranscriptDag(snapshot.entries, snapshot.thread.activeLeafEntryId);
+    if (opts?.includeCompacted === false) path = path.filter((entry) => entry.type !== "compaction");
+    return opts?.limit && opts.limit > 0 ? path.slice(-opts.limit) : path;
   }
 
   /** Threads of the workspace's other sessions (`CreateSessionOptions.workspaceSessions`),
