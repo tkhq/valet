@@ -25,7 +25,7 @@
  * `VALET_EVAL_PRIVATE_CASES` (see the README, "Private suites").
  */
 import { existsSync } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
@@ -232,7 +232,13 @@ async function main(): Promise<void> {
     ];
     for (const { g, prefix, rejected } of groups) {
       const file = join(outDir, `${missCaseId(g, prefix)}.yaml`);
-      if (existsSync(file)) continue;
+      if (existsSync(file)) {
+        // Keep a case someone may have edited, but say when it lacks rejected findings this run found.
+        if (rejected.length > 0 && !(await readFile(file, "utf8")).includes("rejected:")) {
+          console.warn(`${file} exists without the ${rejected.length} rejected finding(s) this run found. Delete it and run again to add them.`);
+        }
+        continue;
+      }
       const baseRef = byNumber.get(g.pr)?.baseRefOid ?? [...g.rows, ...rejected][0]?.base ?? "";
       const base = (await gh(["api", `repos/${repo}/compare/${baseRef}...${g.commit}`, "--jq", ".merge_base_commit.sha"])).trim();
       await writeFile(file, `${caseHeader(g, prefix, rejected)}\n${stringify(missCase(g, base, isPrivate, prefix, rejected), { lineWidth: 0 })}`);

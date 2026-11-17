@@ -36,6 +36,10 @@ describe("compareRuns", () => {
     expect(c.verdict).toBe("hold");
     expect(c.reasons.join()).toMatch(/rejected findings/);
     expect(compareRuns(base, base).rejectedDiff?.mean).toBe(0);
+    // A case whose only change is a repeated rejected finding sorts ahead of one with a lone false finding.
+    const one = new Map([["fp-only", [run(1, 1, 1, 0.1, 0, 1)]], ["rejected-only", [run(1, 1, 1, 0.1, 0, 1)]]]);
+    const two = new Map([["fp-only", [run(1, 2, 1, 0.1, 0, 1)]], ["rejected-only", [run(1, 1, 1, 0.1, 1, 1)]]]);
+    expect(compareRuns(one, two).changed.map((x) => x.id)).toEqual(["rejected-only", "fp-only"]);
     expect(compareRuns(suite(3, () => [run(1, 0, 0)]), suite(3, () => [run(1, 0, 0)])).rejectedDiff).toBeUndefined();
   });
 

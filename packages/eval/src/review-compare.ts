@@ -213,7 +213,7 @@ export function compareRuns(base: CaseRuns, candidate: CaseRuns, rule: ShipRule 
       return { id, tp: tc.tp - tb.tp, fp: tc.fp - tb.fp, rejected: tc.rejected - tb.rejected };
     })
     .filter((x) => x.tp !== 0 || x.fp !== 0 || x.rejected !== 0)
-    .sort((x, y) => Math.abs(y.tp) * 10 + Math.abs(y.fp) - (Math.abs(x.tp) * 10 + Math.abs(x.fp)));
+    .sort((x, y) => (Math.abs(y.tp) + Math.abs(y.rejected)) * 10 + Math.abs(y.fp) - ((Math.abs(x.tp) + Math.abs(x.rejected)) * 10 + Math.abs(x.fp)));
 
   const withRates = (t: Totals) => ({ ...t, recall: recallOf(t), precision: t.tp + t.fp === 0 ? 0 : t.tp / (t.tp + t.fp) });
   return { cases: ids.length, base: withRates(bt), candidate: withRates(ct), recallDiff, fpRatio, ...(rejectedDiff ? { rejectedDiff } : {}), costRatio, verdict, reasons, changed, unmatched };
