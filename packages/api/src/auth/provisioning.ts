@@ -19,7 +19,7 @@ import type { AuthConfig } from "./config.js";
 import type { InstanceConfig } from "../config/instance-config.js";
 import type { SourceService } from "../bakes/source-service.js";
 import { acceptInvite, findValidInviteByCode, findValidInviteByEmail } from "./invites.js";
-import { guardPersonalApiKeyRoutes } from "./api-key-hooks.js";
+import { guardApiKeyPolicy, guardPersonalApiKeyRoutes } from "./api-key-hooks.js";
 import { guardSsoRoutes } from "./sso-hooks.js";
 
 export type Admission =
@@ -248,6 +248,7 @@ export function buildAuthHooks(deps: ProvisioningDeps): {
     guardSsoRoutes({ path: ctx.path, body: ctx.body ?? null, params }, cfg.oidc !== undefined);
     const query = "query" in ctx && ctx.query && typeof ctx.query === "object" ? (ctx.query as Record<string, unknown>) : null;
     await guardPersonalApiKeyRoutes({ path: ctx.path, body: ctx.body ?? null, query }, db);
+    return guardApiKeyPolicy({ path: ctx.path, body: ctx.body ?? null, fromRequest: ctx.request !== undefined }, db);
   });
 
   const userCreateBefore = async (

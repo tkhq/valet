@@ -153,6 +153,8 @@ export interface ValetAuth {
         metadata?: Record<string, unknown>;
         userId?: string;
         prefix?: string;
+        /** Seconds until the key expires. Null or absent: no expiry. */
+        expiresIn?: number | null;
       };
       headers?: Headers;
     }) => Promise<{
@@ -161,6 +163,7 @@ export interface ValetAuth {
       name: string | null;
       start: string | null;
       createdAt: Date;
+      expiresAt: Date | null;
     } | null>;
   };
 }

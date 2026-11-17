@@ -5,7 +5,7 @@
  * other place's rows.
  */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import type { CreateTeamApiKeyResponse, TeamApiKeySummary } from "@valet/api/wire";
+import type { CreateTeamApiKeyRequest, CreateTeamApiKeyResponse, TeamApiKeySummary } from "@valet/api/wire";
 import { authClient } from "~/lib/auth-client";
 import { api } from "./client";
 
@@ -20,6 +20,17 @@ export type ApiKeySummary = NonNullable<ListResult["data"]>["apiKeys"][number];
 
 type CreateResult = Awaited<ReturnType<typeof authClient.apiKey.create>>;
 export type CreatedApiKey = NonNullable<CreateResult["data"]>;
+
+/**
+ * What a create sends. A bare string is the key name with no `expiresIn`:
+ * the server then applies the org maximum lifetime, or no expiry when the
+ * org sets none. `expiresIn` is seconds; null is "No expiry".
+ */
+export type CreateApiKeyInput = string | CreateTeamApiKeyRequest;
+
+function createBody(input: CreateApiKeyInput): CreateTeamApiKeyRequest {
+  return typeof input === "string" ? { name: input } : input;
+}
 
 function isTeamScopedKey(key: ApiKeySummary): boolean {
   if (!("metadata" in key)) return false;
@@ -42,9 +53,9 @@ export function useApiKeys() {
 
 export function useCreateApiKey() {
   const qc = useQueryClient();
-  return useMutation<CreatedApiKey, Error, string>({
-    mutationFn: async (name) => {
-      const { data, error } = await authClient.apiKey.create({ name });
+  return useMutation<CreatedApiKey, Error, CreateApiKeyInput>({
+    mutationFn: async (input) => {
+      const { data, error } = await authClient.apiKey.create(createBody(input));
       if (error) throw new Error(error.message ?? "Couldn't create API key.");
       if (!data) throw new Error("Couldn't create API key.");
       return data;
@@ -80,8 +91,8 @@ export function useTeamApiKeys(teamId: string) {
 
 export function useCreateTeamApiKey(teamId: string) {
   const qc = useQueryClient();
-  return useMutation<CreateTeamApiKeyResponse, Error, string>({
-    mutationFn: (name) => api.createTeamApiKey(teamId, { name }),
+  return useMutation<CreateTeamApiKeyResponse, Error, CreateApiKeyInput>({
+    mutationFn: (input) => api.createTeamApiKey(teamId, createBody(input)),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qkApiKeys.team(teamId) });
     },

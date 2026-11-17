@@ -9,7 +9,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { mintCliToken } from "../auth/cli-tokens.js";
-import { apikey, llmProxyRequests, orgMembers, users } from "../schema/index.js";
+import { apikey, llmProxyRequests, orgMembers, orgs, users } from "../schema/index.js";
 import { createLlmProvider } from "../services/llm-providers.js";
 import { setProxySettings } from "../services/org.js";
 import { clearDeviceStartLimits } from "./cli-device.js";
@@ -177,6 +177,22 @@ describe("proxy key device flow", () => {
     expect(((await gone.json()) as { error: { message: string } }).error.message).toContain("valet proxy setup");
     expect((await status(key.id, cli.access_token)).status).toBe(404);
     expect((await revoke(key.id, cli.access_token)).status).toBe(404);
+  });
+
+  it("gives a proxy key the organization's maximum key lifetime", async () => {
+    api = await bootTestApi({ auth: true });
+    const { baseUrl, providers } = api;
+    const ownerCookie = await signUp(baseUrl, "owner@example.test", await bootstrapAdminInviteCode(api.providers.db));
+    await providers.db.update(orgs).set({ maxApiKeyLifetimeDays: 30 });
+    const cli = await mintCliToken(providers.db, await userId(api, "owner@example.test"), "test-box");
+    const started = await start(baseUrl, { device: "test-box", purpose: "proxy-key", key_name: "claude-code@test-box" }, cli.access_token);
+    const code = (await started.json()) as CliDeviceCodeResponse;
+    expect((await browser(baseUrl, ownerCookie).decide(code.user_code, true)).status).toBe(200);
+    const { proxy_key: key } = (await (await poll(baseUrl, code.device_code)).json()) as CliProxyKeyResponse;
+    const [row] = await providers.db.select({ expiresAt: apikey.expiresAt }).from(apikey).where(eq(apikey.id, key.id));
+    const days = ((row?.expiresAt?.getTime() ?? 0) - Date.now()) / 86_400_000;
+    expect(days).toBeGreaterThan(29.9);
+    expect(days).toBeLessThanOrEqual(30);
   });
 
   it("refuses to revoke a key that is not proxy-scoped, and keeps login requests as they were", async () => {

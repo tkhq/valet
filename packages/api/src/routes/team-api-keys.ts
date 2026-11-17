@@ -20,6 +20,8 @@ import { canAdministerTeam, getTeamInOrg, isTeamMember, lockTeamForOwnership } f
 import { TEAM_ADMIN_REQUIRED_CODE } from "../services/team-deletion-access.js";
 import { isOrgAdmin } from "../services/org.js";
 import { parseApiKeyMetadata, teamIdFromApiKeyMetadata } from "../lib/request-principal.js";
+import { getApiKeyPolicy, resolveKeyExpiry } from "../services/api-key-policy.js";
+import { SECONDS_PER_DAY } from "@valet/shared";
 import type { CreateTeamApiKeyResponse, ListTeamApiKeysResponse, TeamApiKeySummary } from "../wire/types.js";
 
 export const teamApiKeysRouter = new Hono<AppEnv>();
@@ -116,6 +118,24 @@ async function canViewTeamKeys(
   return isTeamMember(db, teamId, userId);
 }
 
+/** better-auth's own bounds on `expiresIn`: one day to one year. */
+const MIN_EXPIRES_IN = SECONDS_PER_DAY;
+const MAX_EXPIRES_IN = 365 * SECONDS_PER_DAY;
+
+const EXPIRES_IN_SHAPE_ERROR =
+  "expiresIn must be a whole number of seconds from 86400 (1 day) to 31536000 (1 year), or null for no expiry.";
+
+/** `expiresIn` from the body: seconds, null for no expiry, undefined when absent. */
+function readExpiresIn(body: object): { ok: true; value: number | null | undefined } | { ok: false } {
+  if (!("expiresIn" in body) || body.expiresIn === undefined) return { ok: true, value: undefined };
+  const value = body.expiresIn;
+  if (value === null) return { ok: true, value: null };
+  if (typeof value === "number" && Number.isInteger(value) && value >= MIN_EXPIRES_IN && value <= MAX_EXPIRES_IN) {
+    return { ok: true, value };
+  }
+  return { ok: false };
+}
+
 function createdByFromMetadata(metadata: Record<string, unknown> | null): string | null {
   const raw = metadata?.createdBy;
   return typeof raw === "string" && raw.length > 0 ? raw : null;
@@ -128,6 +148,7 @@ const SUMMARY_COLUMNS = {
   start: apikey.start,
   createdAt: apikey.createdAt,
   lastRequest: apikey.lastRequest,
+  expiresAt: apikey.expiresAt,
   metadata: apikey.metadata,
 };
 
@@ -137,6 +158,7 @@ type SummaryRow = {
   start: string | null;
   createdAt: Date;
   lastRequest: Date | null;
+  expiresAt: Date | null;
   metadata: string | null;
 };
 
@@ -148,6 +170,7 @@ function toSummary(row: SummaryRow): TeamApiKeySummary {
     start: row.start,
     createdAt: row.createdAt.getTime(),
     lastRequest: row.lastRequest ? row.lastRequest.getTime() : null,
+    expiresAt: row.expiresAt ? row.expiresAt.getTime() : null,
     createdBy: createdByFromMetadata(metadata),
   };
 }
@@ -189,16 +212,23 @@ teamApiKeysRouter.post("/:id/api-keys", async (c) => {
   } catch {
     return c.json({ error: "invalid JSON body" }, 400);
   }
-  const name = raw && typeof raw === "object" && !Array.isArray(raw) && "name" in raw ? raw.name : undefined;
+  const body: object = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+  const name = "name" in body ? body.name : undefined;
   if (!name || typeof name !== "string" || name.trim().length === 0) {
     return c.json({ error: "name is required. Send a non-empty key name." }, 400);
   }
+  const requested = readExpiresIn(body);
+  if (!requested.ok) return c.json({ error: EXPIRES_IN_SHAPE_ERROR }, 400);
+  // The org maximum covers team keys too. The personal-keys switch does not:
+  // only a team or org admin reaches this point.
+  const expiry = resolveKeyExpiry(await getApiKeyPolicy(db, user.orgId), requested.value);
+  if (!expiry.ok) return c.json({ error: expiry.message }, 400);
 
   // No metadata on the plugin call: better-auth treats that field as
   // client-writable. The SQL stamp below is the only writer of the team
   // pin, in both places at once.
   const created = await auth.api.createApiKey({
-    body: { name: name.trim() },
+    body: { name: name.trim(), expiresIn: expiry.expiresIn },
     headers: c.req.raw.headers,
   });
   if (!created?.key) {
@@ -249,6 +279,7 @@ teamApiKeysRouter.post("/:id/api-keys", async (c) => {
     name: created.name,
     start: created.start,
     createdAt: created.createdAt.getTime(),
+    expiresAt: created.expiresAt ? new Date(created.expiresAt).getTime() : null,
     key: created.key,
     createdBy: user.id,
   };

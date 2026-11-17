@@ -1,7 +1,8 @@
 /**
  * `PATCH /api/org/settings` — org-level toggles: bare-skill-commands
- * (slash-commands plan, Task 3) and the public-artifact opt-in
- * (artifacts design). Org-admin gated via `requireOrgAdmin`.
+ * (slash-commands plan, Task 3), the public-artifact opt-in
+ * (artifacts design), and the API key policy (auth v2 design, update of 2026-11-17).
+ * Org-admin gated via `requireOrgAdmin`.
  *
  * Accepts boolean settings, including `allowAnonymousImageBakes`, and
  * `compactionWindowTokens`: a token count from 50,000 to 1,000,000, 0 for no
@@ -17,10 +18,30 @@ import { auditRequest } from "./_admin-audit.js";
 import { diffFields } from "../services/admin-audit.js";
 import { orgs } from "../schema/index.js";
 import type { OrgSettingsResponse } from "../wire/types.js";
+import { isApiKeyLifetimeDays } from "@valet/shared";
 
 export const orgSettingsRouter = new Hono<AppEnv>();
 
-const PATCH_FIELDS = new Set(["bareSkillCommands", "allowPublicArtifacts", "allowAnonymousImageBakes", "allowPersonalInstallations", "compactionWindowTokens"]);
+const PATCH_FIELDS = new Set([
+  "bareSkillCommands",
+  "allowPublicArtifacts",
+  "allowAnonymousImageBakes",
+  "allowPersonalInstallations",
+  "allowPersonalApiKeys",
+  "maxApiKeyLifetimeDays",
+  "compactionWindowTokens",
+]);
+
+/** The fields the audit row diffs. */
+const AUDITED_FIELDS = [
+  "bareSkillCommands",
+  "allowPublicArtifacts",
+  "allowAnonymousImageBakes",
+  "allowPersonalInstallations",
+  "allowPersonalApiKeys",
+  "maxApiKeyLifetimeDays",
+  "compactionWindowTokens",
+] as const;
 
 /** Smallest and largest compaction window an org can set (0 turns the cap off). */
 const MIN_COMPACTION_WINDOW = 50_000;
@@ -50,6 +71,8 @@ orgSettingsRouter.patch("/", async (c) => {
     allowPublicArtifacts?: boolean;
     allowAnonymousImageBakes?: boolean;
     allowPersonalInstallations?: boolean;
+    allowPersonalApiKeys?: boolean;
+    maxApiKeyLifetimeDays?: number | null;
     compactionWindowTokens?: number | null;
   } = {};
 
@@ -81,6 +104,21 @@ orgSettingsRouter.patch("/", async (c) => {
     update.allowPersonalInstallations = raw.allowPersonalInstallations;
   }
 
+  if ("allowPersonalApiKeys" in raw) {
+    if (typeof raw.allowPersonalApiKeys !== "boolean") {
+      return c.json({ error: "allowPersonalApiKeys must be a boolean. Send true or false." }, 400);
+    }
+    update.allowPersonalApiKeys = raw.allowPersonalApiKeys;
+  }
+
+  if ("maxApiKeyLifetimeDays" in raw) {
+    const value = raw.maxApiKeyLifetimeDays;
+    if (value !== null && !isApiKeyLifetimeDays(value)) {
+      return c.json({ error: "maxApiKeyLifetimeDays must be 30, 90, or 365, or null for no limit." }, 400);
+    }
+    update.maxApiKeyLifetimeDays = value;
+  }
+
   if ("compactionWindowTokens" in raw) {
     const value = raw.compactionWindowTokens;
     const valid = value === null || value === 0 || (typeof value === "number" && Number.isInteger(value)
@@ -108,7 +146,7 @@ orgSettingsRouter.patch("/", async (c) => {
     targetType: "org_settings",
     targetId: user.orgId,
     targetName: row.name,
-    changes: before ? diffFields(before, row, ["bareSkillCommands", "allowPublicArtifacts", "allowAnonymousImageBakes", "allowPersonalInstallations", "compactionWindowTokens"]) : update,
+    changes: before ? diffFields(before, row, [...AUDITED_FIELDS]) : update,
   });
   if ("compactionWindowTokens" in update) {
     c.var.providers.engineHost.setOrgCompactionWindow(user.orgId, row.compactionWindowTokens);
@@ -119,6 +157,8 @@ orgSettingsRouter.patch("/", async (c) => {
     allowPublicArtifacts: row.allowPublicArtifacts,
     allowAnonymousImageBakes: row.allowAnonymousImageBakes,
     allowPersonalInstallations: row.allowPersonalInstallations,
+    allowPersonalApiKeys: row.allowPersonalApiKeys,
+    maxApiKeyLifetimeDays: row.maxApiKeyLifetimeDays,
     compactionWindowTokens: row.compactionWindowTokens,
   };
   return c.json(resp);
