@@ -60,7 +60,6 @@ export function findMisses(rows: readonly OutcomeRow[], opts: { ours: string; re
     && !mine.some((m) => m.repo === r.repo && m.pr === r.pr && m.path === r.path && Math.abs(m.line - r.line) <= window));
 }
 
-/** A review comment as plain golden text: no HTML, collapsed details, code blocks or badges. */
 const ORIGINAL_FINDING = "<details><summary>Original finding</summary>";
 
 /**
@@ -76,6 +75,7 @@ export function originalFinding(body: string): string {
   return end === -1 ? inner : inner.slice(0, end);
 }
 
+/** A review comment as plain golden text: no HTML, collapsed details, code blocks or badges. */
 export function goldenText(body: string): string {
   const text = originalFinding(body)
     .replace(/<!--[\s\S]*?-->/g, " ")
