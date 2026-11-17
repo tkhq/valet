@@ -61,8 +61,23 @@ export function findMisses(rows: readonly OutcomeRow[], opts: { ours: string; re
 }
 
 /** A review comment as plain golden text: no HTML, collapsed details, code blocks or badges. */
+const ORIGINAL_FINDING = "<details><summary>Original finding</summary>";
+
+/**
+ * The finding a comment made. When the reviewer resolved the comment, it
+ * rewrote the body to "Fixed in" or "Withdrawn" and kept the finding in an
+ * "Original finding" block: read that block, not the resolution note.
+ */
+export function originalFinding(body: string): string {
+  const start = body.indexOf(ORIGINAL_FINDING);
+  if (start === -1) return body;
+  const inner = body.slice(start + ORIGINAL_FINDING.length);
+  const end = inner.lastIndexOf("</details>");
+  return end === -1 ? inner : inner.slice(0, end);
+}
+
 export function goldenText(body: string): string {
-  const text = body
+  const text = originalFinding(body)
     .replace(/<!--[\s\S]*?-->/g, " ")
     .replace(/<details[\s\S]*?<\/details>/gi, " ")
     .replace(/```[\s\S]*?```/g, " ")
@@ -84,7 +99,8 @@ export interface MissGroup {
 /** Our own comments the author addressed: the defects a later reviewer must keep finding. */
 export function keptFindings(rows: readonly OutcomeRow[], ours: string): OutcomeRow[] {
   const key = loginKey(ours);
-  return rows.filter((r) => loginKey(r.bot) === key && r.outcome === "addressed" && r.side === "RIGHT");
+  // A withdrawn finding is one our own recheck refuted: a later edit near its lines does not make it a kept finding.
+  return rows.filter((r) => loginKey(r.bot) === key && r.outcome === "addressed" && r.side === "RIGHT" && r.botStatus !== "withdrawn");
 }
 
 /** Misses grouped by pull request and the commit the comments were made on. */

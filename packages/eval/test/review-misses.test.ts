@@ -36,6 +36,9 @@ describe("review misses", () => {
 
   it("writes golden text without HTML, collapsed details or code blocks", () => {
     expect(goldenText("<!-- id -->**Clear the id**\n\nThe sync keeps a stale id.\n<details><summary>SQL</summary>\n\nselect 1\n</details>\n```suggestion\nx\n```")).toBe("**Clear the id** The sync keeps a stale id.");
+    const original = "<!-- valet-pr-review:finding f1 low bug -->\n**Clear the id**\n\nThe sync keeps a stale id.\n<details><summary>SQL</summary>\n\nselect 1\n</details>";
+    expect(goldenText(`**Fixed in \`abc1234\`.** The id is cleared now.\n\n<details><summary>Original finding</summary>\n\n${original}\n</details>`)).toBe("**Clear the id** The sync keeps a stale id.");
+    expect(goldenText(`**Withdrawn.** A recheck found this claim does not hold.\n\n<details><summary>Original finding</summary>\n\n${original}\n</details>`)).toBe("**Clear the id** The sync keeps a stale id.");
     const long = goldenText("word ".repeat(300));
     expect(long.length).toBeLessThanOrEqual(603);
     expect(long.endsWith("...")).toBe(true);
@@ -63,6 +66,7 @@ describe("review misses", () => {
       row({ bot: "acme-review[bot]", commentId: 3, outcome: "ignored" }),
       row({ bot: "acme-review[bot]", commentId: 4, side: "LEFT" }),
       row({ commentId: 5 }),
+      row({ bot: "acme-review[bot]", commentId: 6, botStatus: "withdrawn" }),
     ];
     expect(keptFindings(rows, "acme-review").map((r) => r.commentId)).toEqual([2]);
     const [g] = groupMisses(keptFindings(rows, "acme-review"));
