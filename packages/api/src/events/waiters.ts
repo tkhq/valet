@@ -316,7 +316,6 @@ export interface WaiterMatchDepsOptions {
   channelVisibility?: (viewer: { orgId: string; userId: string | undefined }) => ChannelVisibility;
 }
 
-/** The org's Linear app-actor token, or null when Linear is not connected with an app. */
 /** The production matcher deps over the API's providers. */
 export function waiterMatchDeps(providers: WaiterProviders, opts: WaiterMatchDepsOptions = {}): WaiterMatchDeps {
   const timeoutMs = opts.providerTimeoutMs ?? WAITER_PROVIDER_TIMEOUT_MS;

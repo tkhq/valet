@@ -53,7 +53,7 @@ export interface ReviewComment {
   html_url?: string;
 }
 
-/** One emoji reaction on a review comment. */
+/** A GitHub issue a pull request description closes. */
 export interface Issue {
   title: string;
   body?: string | null;
@@ -61,6 +61,7 @@ export interface Issue {
   state?: string;
 }
 
+/** One emoji reaction on a review comment. */
 export interface Reaction {
   content: string;
   user?: { login: string } | null;

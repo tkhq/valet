@@ -1143,21 +1143,29 @@ async function learnFromPullRequest(
  * a review without tickets is still a review.
  */
 async function linkedTickets(ctx: PluginEventContext, gh: GitHubClient, pr: PullRequest, fetchImpl: typeof fetch | undefined): Promise<string> {
-  try {
-    const tickets: LinkedTicket[] = [];
-    const ids = linearTicketIds(pr.title, pr.body, pr.head.ref);
-    const linear = ids.length > 0 ? await ctx.appToken("linear") : null;
-    if (linear) tickets.push(...(await fetchLinearTickets(linear, ids, fetchImpl, ctx.signal)));
-    for (const n of closedIssueNumbers(pr.body)) {
-      const issue = await gh.issue(n);
-      if (issue) tickets.push(githubTicket(n, issue));
+  // Each source is best effort on its own: a failed read keeps the tickets the other reads found.
+  const read = async <T>(what: string, load: () => Promise<T[]>): Promise<T[]> => {
+    try {
+      return await load();
+    } catch (err) {
+      if (ctx.signal.aborted) throw err;
+      console.warn(`pr-review: could not read ${what}; the review runs without it`, err);
+      return [];
     }
-    return ticketsSection(tickets.slice(0, MAX_TICKETS));
-  } catch (err) {
-    if (ctx.signal.aborted) throw err;
-    console.warn("pr-review: could not read the linked tickets; the review runs without them", err);
-    return "";
+  };
+  const ids = linearTicketIds(pr.title, pr.body, pr.head.ref);
+  const linear = await read("the linked Linear tickets", async () => {
+    const token = ids.length > 0 ? await ctx.appToken("linear") : null;
+    return token ? fetchLinearTickets(token, ids, fetchImpl, ctx.signal) : [];
+  });
+  const issues: LinkedTicket[] = [];
+  for (const n of closedIssueNumbers(pr.body)) {
+    issues.push(...(await read(`issue #${n}`, async () => {
+      const issue = await gh.issue(n);
+      return issue ? [githubTicket(n, issue)] : [];
+    })));
   }
+  return ticketsSection([...linear, ...issues].slice(0, MAX_TICKETS));
 }
 
 /** The learning pass as a note in the plugin thread. */

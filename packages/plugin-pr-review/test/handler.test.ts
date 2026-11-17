@@ -94,6 +94,8 @@ class FakeGitHub {
   prBody = "Adds a.";
   /** Issues by number, for linked tickets. */
   issues: Record<number, { title: string; body: string; html_url: string; state: string }> = {};
+  /** Status for an issue read, such as 503. */
+  issueStatus: Record<number, number> = {};
   /** Linear GraphQL answers: issues by identifier; `linearFails` makes the request fail. */
   linearIssues: Record<string, { identifier: string; title: string; description: string; state: { name: string }; comments: { nodes: { body: string; user: { name: string } }[] } }> = {};
   linearFails = false;
@@ -132,6 +134,8 @@ class FakeGitHub {
     if (method !== "GET") this.writes.push(`${method} ${path}`);
     const issueMatch = /^\/issues\/(\d+)$/.exec(path);
     if (method === "GET" && issueMatch) {
+      const status = this.issueStatus[Number(issueMatch[1])];
+      if (status) return new Response(JSON.stringify({ message: "Server Error" }), { status });
       const issue = this.issues[Number(issueMatch[1])];
       return issue ? ok(issue) : new Response(JSON.stringify({ message: "Not Found" }), { status: 404 });
     }
@@ -1082,6 +1086,20 @@ describe("review-pull-request handler", () => {
     expect(reviewer).toContain("#3 (github, open): Parse accepts empty input");
     expect(reviewer).not.toContain("Not closed by this PR.");
     expect(threads.spawned.find((s) => s.req.role === "pr-verifier")?.req.prompt).toContain("Empty input must fail fast.");
+  });
+
+  it("keeps the Linear tickets when a closed issue cannot be read", async () => {
+    const gh = new FakeGitHub();
+    gh.prTitle = "ENG-12: reject empty input";
+    gh.prBody = "Closes #3.";
+    gh.issueStatus[3] = 503;
+    gh.linearIssues["ENG-12"] = { identifier: "ENG-12", title: "Reject empty input", description: "Empty input must fail fast.", state: { name: "In Progress" }, comments: { nodes: [] } };
+    const threads = new FakeThreads(scripted(reviewOf([finding({})]), {}));
+    const ctx = { ...context(threads, new FakeStore(), { contextBudget: 0 }), appToken: async (service: string) => (service === "github" ? "ghs_test" : service === "linear" ? "lin_test" : null) };
+    await createReviewHandler({ fetch: gh.fetch }).handle(event("ev1", "github.pull_request.opened"), ctx);
+    const reviewer = threads.spawned.find((s) => s.req.role === "pr-reviewer")?.req.prompt ?? "";
+    expect(reviewer).toContain("ENG-12 (linear, In Progress): Reject empty input");
+    expect(reviewer).not.toContain("#3 (github");
   });
 
   it("reviews without tickets when Linear fails or the org has no Linear token", async () => {
