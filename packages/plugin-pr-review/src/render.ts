@@ -12,6 +12,8 @@ export interface PostedFinding extends Finding {
   id: string;
   /** The verifier could not confirm it: the summary lists it, with no inline comment. */
   unconfirmed?: boolean;
+  /** No trigger or no path:line evidence: the summary lists it, with no inline comment. */
+  unsupported?: boolean;
 }
 
 const SEVERITIES = ["critical", "high", "medium", "low"] as const;
@@ -96,8 +98,10 @@ export interface SummaryInput {
 /** The body of the PR's one summary review, edited in place on each review. */
 export function renderSummary(s: SummaryInput): string {
   const scope = s.incrementFrom ? `the commits since \`${s.incrementFrom.slice(0, 7)}\`` : "the whole pull request";
-  const unconfirmed = s.unconfirmed ?? [];
-  const open = [...s.inline, ...s.outsideDiff, ...unconfirmed].sort((a, b) => SEVERITIES.indexOf(a.severity) - SEVERITIES.indexOf(b.severity));
+  const summaryOnly = s.unconfirmed ?? [];
+  const unconfirmed = summaryOnly.filter((f) => !f.unsupported);
+  const unsupported = summaryOnly.filter((f) => f.unsupported);
+  const open = [...s.inline, ...s.outsideDiff, ...summaryOnly].sort((a, b) => SEVERITIES.indexOf(a.severity) - SEVERITIES.indexOf(b.severity));
   const lines = [
     `<!-- valet-pr-review:summary ${s.head} -->`,
     "## Valet review",
@@ -108,7 +112,7 @@ export function renderSummary(s: SummaryInput): string {
   ];
   if (open.length > 0) {
     lines.push("", `### Open findings (${open.length})`, "");
-    for (const f of open) lines.push(`- **${label(f.severity)}** \`${f.path}:${f.line}\`${f.side === "LEFT" ? " (deleted line)" : ""} ${oneLine(f.title)}${f.unconfirmed ? " (not confirmed)" : ""}`);
+    for (const f of open) lines.push(`- **${label(f.severity)}** \`${f.path}:${f.line}\`${f.side === "LEFT" ? " (deleted line)" : ""} ${oneLine(f.title)}${f.unsupported ? " (no evidence)" : f.unconfirmed ? " (not confirmed)" : ""}`);
   } else {
     lines.push("", "No open findings.");
   }
@@ -130,6 +134,11 @@ export function renderSummary(s: SummaryInput): string {
   if (unconfirmed.length > 0) {
     lines.push("", `<details><summary>Findings the verifier could not confirm (${unconfirmed.length})</summary>`, "", "A second check could neither confirm nor rule out these claims from the code. They get no inline comment.", "");
     for (const f of unconfirmed) lines.push(`\`${f.path}:${f.line}\``, "", renderFinding(f), "");
+    lines.push("</details>");
+  }
+  if (unsupported.length > 0) {
+    lines.push("", `<details><summary>Findings without a trigger or code evidence (${unsupported.length})</summary>`, "", "The reviewer named no input that triggers these, or cited no line of code that shows them. They get no inline comment.", "");
+    for (const f of unsupported) lines.push(`\`${f.path}:${f.line}\``, "", renderFinding(f), "");
     lines.push("</details>");
   }
   if (s.hidden > 0) lines.push("", `${s.hidden} finding(s) are not shown: below the line's minimum severity, in excluded paths, or on a line that does not exist at this head.`);
