@@ -299,6 +299,13 @@ for the same category. Valet has no embeddings, so the match is lexical.
 - The gate never moves a high, critical or security finding, and it never
   drops one.
 - It skips shadow records and records of the pull request under review.
+- It counts only findings the author saw as open findings (inline or
+  outside the diff). A summary-only finding (suppressed, unsupported or
+  unconfirmed) rarely gets a reaction, so its outcome would make the gate
+  hide more findings each round.
+- It compares with the newest 2,000 records by close time. It scans at most
+  20,000 records, because store keys sort as text, not by pull request
+  number.
 - The rule follows Greptile's filter, which blocks a comment similar to
   three distinct downvoted ones. Turn it on for a line once its records
   cover a few weeks of closed pull requests.

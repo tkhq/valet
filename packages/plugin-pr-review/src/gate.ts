@@ -23,8 +23,12 @@ export interface GateOptions {
 }
 
 export const DEFAULT_GATE: GateOptions = { minNeighbors: 3, similarity: 0.35 };
-/** Records read at most per review, newest keys last. */
+/** Newest records with an outcome that the gate compares against. */
 const MAX_HISTORY = 2000;
+/** Records scanned at most per review. Keys sort by text (`repo#10` before `repo#9`), so the scan reads them all, then keeps the newest. */
+const MAX_SCAN = 20_000;
+/** Placements the author saw as an open finding. Summary-only tiers rarely get a reaction, so their outcomes would teach the gate to hide more. */
+const SEEN: ReadonlySet<FindingRecord["placement"]> = new Set(["inline", "outside"]);
 const STOP = new Set(["the", "and", "for", "with", "that", "this", "when", "from", "into", "are", "was", "not", "but", "its", "can", "has", "have", "will", "which", "than", "then", "there", "their", "they", "them", "only", "also", "does", "each", "every", "after", "before", "because", "while", "where", "what", "would", "could", "should"]);
 
 export function words(text: string): Set<string> {
@@ -58,7 +62,7 @@ export function gateFinding(f: Pick<Finding, "title" | "body" | "path" | "catego
   const unaddressedPulls = new Set<number>();
   let addressed = 0;
   for (const r of history) {
-    if (!r.outcome?.merged || r.shadow || r.number === currentPull) continue;
+    if (!r.outcome?.merged || r.shadow || !SEEN.has(r.placement) || r.number === currentPull) continue;
     if (similarity(f, r) < opts.similarity) continue;
     if (r.outcome.result === "addressed") addressed++;
     else unaddressedPulls.add(r.number);
@@ -66,14 +70,20 @@ export function gateFinding(f: Pick<Finding, "title" | "body" | "path" | "catego
   return { suppress: unaddressedPulls.size >= opts.minNeighbors && addressed < opts.minNeighbors, unaddressed: unaddressedPulls.size, addressed };
 }
 
-/** The repository's finding records with an outcome, up to `MAX_HISTORY`. */
+/** The repository's newest `MAX_HISTORY` finding records with an outcome, by close time. */
 export async function repoHistory(store: ScopedPluginStore, repo: string): Promise<FindingRecord[]> {
   const out: FindingRecord[] = [];
+  let scanned = 0;
   let cursor: string | null = null;
   do {
     const page: Awaited<ReturnType<typeof store.list<FindingRecord>>> = await store.list<FindingRecord>(FINDINGS_COLLECTION, { prefix: `${repo}#`, limit: 1000, ...(cursor ? { cursor } : {}) });
+    scanned += page.items.length;
     for (const item of page.items) if (item.doc.outcome) out.push(item.doc);
-    cursor = out.length >= MAX_HISTORY ? null : page.nextCursor;
+    cursor = page.nextCursor;
+    if (cursor && scanned >= MAX_SCAN) {
+      console.warn(`pr-review ${repo}: the outcome gate read only the first ${scanned} finding records`);
+      break;
+    }
   } while (cursor);
-  return out.slice(-MAX_HISTORY);
+  return out.sort((a, b) => (b.outcome?.at ?? "").localeCompare(a.outcome?.at ?? "")).slice(0, MAX_HISTORY);
 }
