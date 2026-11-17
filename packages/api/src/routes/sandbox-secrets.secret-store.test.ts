@@ -293,6 +293,64 @@ describe("company and team secrets through the broker", () => {
   });
 });
 
+describe("finding saved secrets", () => {
+  async function find(query: string, token: string) {
+    return fetch(`${api!.baseUrl}/api/sandbox-secrets/find`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-valet-sandbox": token },
+      body: JSON.stringify({ query }),
+    });
+  }
+  const lines = async (res: Response) => (await res.text()).split("\n").filter(Boolean).sort();
+
+  async function seed() {
+    const fake = await bootWithStore();
+    await addTeam("team-1", ["user-a"]);
+    await addTeam("team-2", ["user-c"]);
+    const svc = api!.providers.secretStore;
+    await svc.saveValue(as("local-user"), company, "DATABASE_URL", "postgres://x");
+    await svc.saveValue(as("user-a"), team("team-1"), "TEAM_KEY", "t1");
+    await svc.saveValue(as("user-c"), team("team-2"), "OTHER_TEAM_KEY", "t2");
+    await svc.saveValue(as("user-a"), personal, "TEST_VALET_KEY", "mine");
+    await svc.saveValue(as("user-b"), personal, "NOT_YOURS", "theirs");
+    return fake;
+  }
+
+  it("lists what a team session may read: its team and the company, never a personal secret", async () => {
+    const fake = await seed();
+    const token = await session("sess-f1", { type: "team", id: "team-1" }, "user-a");
+    const res = await find("*", token);
+    expect(res.status).toBe(200);
+    expect(await lines(res)).toEqual(["saved\tsecret://company/DATABASE_URL", "saved\tsecret://team/team-1/TEAM_KEY"]);
+    expect(fake.reads).toHaveLength(0);
+  });
+
+  it("lists the owner's personal secrets, their teams, and the company in a personal session", async () => {
+    await seed();
+    const token = await userSession("sess-f2", "user-a");
+    expect(await lines(await find("*", token))).toEqual([
+      "saved\tsecret://company/DATABASE_URL",
+      "saved\tsecret://personal/TEST_VALET_KEY",
+      "saved\tsecret://team/team-1/TEAM_KEY",
+    ]);
+  });
+
+  it("matches a name case-insensitively and prints no value", async () => {
+    await seed();
+    const token = await userSession("sess-f3", "user-a");
+    const res = await find("valet", token);
+    const text = await res.text();
+    expect(text.trim()).toBe("saved\tsecret://personal/TEST_VALET_KEY");
+    expect(text).not.toContain("mine");
+  });
+
+  it("lists nothing for a personal session of someone else's token", async () => {
+    await seed();
+    const token = await userSession("sess-f4", "user-a", "user-b");
+    expect(await lines(await find("*", token))).toEqual(["saved\tsecret://company/DATABASE_URL"]);
+  });
+});
+
 describe("secret store service", () => {
   it("creates one personal space per user under concurrent first saves", async () => {
     const fake = await bootWithStore();

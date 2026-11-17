@@ -53,6 +53,15 @@ caller to settle. A vault or item title outside the character set 1Password
 accepts in a reference (letters, digits, spaces, `_`, `.`, `-`) comes back as
 the vault or item id instead, so every reference `find` prints resolves.
 
+`find` also searches saved secrets (Settings, Secrets) and prints them as
+`saved	secret://...` lines. It lists only scopes the session may read, with the
+`mayRead` rule `/resolve` applies: a team session sees its team and the
+company, and a personal session sees its owner's personal secrets, the
+owner's teams, and the company. `find '*'` lists every saved secret the
+session may read. It never lists 1Password, so vault and item titles still
+need a search term. Without this, an agent in a team session could not learn
+that a saved secret existed, and read each guessed name's failure as no access.
+
 ## Decisions
 
 1. **The agent never holds the secret.** A tool that RETURNS a credential puts
