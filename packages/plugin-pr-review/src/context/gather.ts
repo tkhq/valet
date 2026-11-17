@@ -4,7 +4,7 @@
  * memory the reviewer should read first, and build the context pack.
  */
 import { matchesGlob } from "./glob.js";
-import { noteMatch, parseNote, type DomainNote } from "./notes.js";
+import { matchStrength, noteMatch, parseNote, type DomainNote } from "./notes.js";
 import { LEARNED_DIR, LEARNED_PRINCIPLE_PREFIX, parseLearnedNote } from "../learn.js";
 import { buildContextPack, isTestPath, MAX_CALLER_REFS, type ContextPack, type ConventionFile, type MemoryItem, type PackDrop } from "./pack.js";
 import { instructionPath, noiseKind, PLAYBOOK, ROOT_CONVENTIONS, NESTED_CONVENTIONS } from "./paths.js";
@@ -244,6 +244,8 @@ export async function gatherContext(input: GatherInput): Promise<ContextPack> {
       const note: DomainNote = { name: baseName(f.path), title, paths: [], terms: [], body: body.replace(/^#\s+.+$/m, "").trim(), origin: "memory", path: f.path };
       learned.push({ note, why: "learned principle, applies to every change", kind: "check" });
     }
+    // The pack fills learned lessons in this order: a lesson tied to a changed path first, one that applies everywhere last.
+    learned.sort((a, b) => matchStrength(a.why) - matchStrength(b.why));
 
     // Background notes and playbooks found by what the change names:
     // repository, paths, symbols, distinctive terms in added lines, and

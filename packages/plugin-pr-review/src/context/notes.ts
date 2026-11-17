@@ -99,3 +99,11 @@ export function noteMatch(
   if (note.titlePattern && new RegExp(note.titlePattern, "i").test(change.title)) return "PR title";
   return undefined;
 }
+
+/** How closely a `noteMatch` reason ties a note to this change: 0 for a changed path, 1 for an added term, 2 for the PR title, 3 for a note that applies everywhere. */
+export function matchStrength(why: string): number {
+  if (why.startsWith("path ")) return 0;
+  if (why.startsWith("added text has ")) return 1;
+  if (why === "PR title") return 2;
+  return 3;
+}

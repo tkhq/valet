@@ -372,6 +372,26 @@ describe("gatherContext", () => {
     expect(pack.text).toContain("#### Document every exported function (learned principles/review-document-exports.md; check for this; matched: learned principle, applies to every change)\nEvery export has a doc comment.");
   });
 
+  it("keeps a lesson tied to a changed path before one that applies everywhere, and fills lessons on top of the budget", async () => {
+    const r = repo({ "a.ts": "export const a = 1;\n" }, { "a.ts": "export const a = 2;\n" });
+    const pad = "x".repeat(900);
+    // "aaa-everywhere" sorts first in the listing; the path lesson must still win the allowance.
+    const files: Record<string, string> = {
+      "code-review/learned/acme/site/aaa-everywhere.md": `# Applies everywhere\n\nKind: check\nPaths:\nTerms:\n\n${pad}`,
+      "code-review/learned/acme/site/zzz-path.md": `# Tied to a.ts\n\nKind: check\nPaths: a.ts\nTerms:\n\n${pad}`,
+    };
+    const mem: PackMemory = {
+      search: async () => [],
+      read: async (path) => (files[path] !== undefined ? { path, content: files[path] } : null),
+      list: async (prefix) => Object.keys(files).filter((p) => p.startsWith(prefix)).sort().map((path) => ({ path, title: path, description: "" })),
+    };
+    // A 4,400-char budget gives a 1,100-char allowance: room for one lesson.
+    const pack = await gatherContext({ runner: localRunner(r.dir), readTrusted: (p) => gitFileAt(r.dir, r.base, p), patch: r.patch, diffDropped: [], title: "t", repo: "acme/site", memory: mem, budgetChars: 4_400 });
+    expect(pack.text).toContain("#### Tied to a.ts (learned code-review/learned/acme/site/zzz-path.md; check for this; matched: path a.ts)");
+    expect(pack.text).not.toContain("#### Applies everywhere");
+    expect(pack.manifest.dropped).toEqual(expect.arrayContaining([expect.objectContaining({ section: "learned", ref: "code-review/learned/acme/site/aaa-everywhere.md", reason: expect.stringMatching(/^learned allowance/) })]));
+  });
+
   it("does not take a note under a nested lib/ directory, which agents can write, as a rule", async () => {
     const r = repo({ "apps/vivo/gate.yaml": "kind: AnalysisTemplate\n" }, { "apps/vivo/gate.yaml": "kind: AnalysisTemplate\nfailureLimit: 1\n" });
     const pack = await gatherContext({
@@ -403,7 +423,7 @@ describe("buildContextPack", () => {
     why: "path src/a.ts",
   });
   /** A code-heavy change: twelve used definitions and six changed symbols with callers, each about 1,000 chars. */
-  const codeHeavy = (notes: { note: DomainNote; why: string }[], budgetChars: number) => {
+  const codeHeavy = (notes: { note: DomainNote; why: string }[], budgetChars: number, learned: { note: DomainNote; why: string; kind: "check" | "skip" }[] = []) => {
     const used = Array.from({ length: 12 }, (_, i) => `helper${i}`);
     const changed = Array.from({ length: 6 }, (_, i) => `changed${i}`);
     const hits: Hit[] = [
@@ -417,6 +437,7 @@ describe("buildContextPack", () => {
       conventions: [0, 1, 2].map((i) => ({ path: `dir${i}/AGENTS.md`, text: "c".repeat(900), why: `applies to dir${i}/` })),
       changedConventions: [],
       notes,
+      learned,
       memory: [],
       diffDropped: [],
       budgetChars,
@@ -428,6 +449,15 @@ describe("buildContextPack", () => {
     expect(pack.manifest.items.filter((i) => i.section === "notes").map((i) => i.ref)).toEqual(["lib/code-review/notes/a.md", "lib/code-review/notes/b.md"]);
     // The pack was full: code sections lost items to the budget.
     expect(pack.manifest.dropped.some((d) => d.section === "definitions" && d.reason.startsWith("budget ("))).toBe(true);
+  });
+
+  it("fills learned lessons from their own allowance, so code keeps the same share of the budget", () => {
+    const lesson = (name: string): { note: DomainNote; why: string; kind: "check" } => ({ note: { ...note(name, 1000).note, path: `code-review/learned/acme/site/${name}.md` }, why: "path src/a.ts", kind: "check" });
+    const without = codeHeavy([], 10_000);
+    const withLessons = codeHeavy([], 10_000, [lesson("l1"), lesson("l2")]);
+    const code = (p: typeof without) => p.manifest.items.filter((i) => i.section !== "learned").map((i) => i.ref);
+    expect(withLessons.manifest.items.filter((i) => i.section === "learned").map((i) => i.ref)).toEqual(["code-review/learned/acme/site/l1.md", "code-review/learned/acme/site/l2.md"]);
+    expect(code(withLessons)).toEqual(code(without));
   });
 
   it("cuts and logs a rule note only when the rules alone pass the budget", () => {

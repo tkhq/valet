@@ -168,7 +168,18 @@ matches them by paths and terms like rule notes, and puts them in their own
 section after the team rules: "Learned from past reviews". A lesson with no
 paths or terms applies to every change in the repository. A lesson with
 `Status: retired` is skipped. The pack tells the reviewer that a repository
-rule wins over a learned lesson. A learned principle
+rule wins over a learned lesson.
+
+Learned lessons fill from their own allowance: a quarter of the context
+budget, on top of it. Lessons never take room from conventions or code. The
+pack fills them in match order: a lesson tied to a changed path, then one
+matched by an added term, then one matched by the PR title, then one that
+applies everywhere. The pack logs a lesson past the allowance under "Left out
+of this pack". Other review tools also select rules by path and load all of
+the matches, with large rule budgets (Cursor Bugbot allows 100,000 characters
+of rules). Before this change, lessons shared 10% of the budget with nothing
+to order them. On 13 of 80 recent pull requests in a large private repository, a lesson tied to a
+changed path was cut. A learned principle
 (`principles/review-*.md`) loads in the same section with its full text, as
 a lesson for every change in every repository. The owner's other principles
 are listed by title. Keyword search skips learned files, so a lesson does not
