@@ -32,6 +32,7 @@ import {
 } from "./render.js";
 import { ReviewSchema, type Finding, type Review } from "./types.js";
 import { classifyOutcome, FINDINGS_COLLECTION, newRecords, pullRecords, replaceShadowRecords, writeRecords } from "./records.js";
+import { DEFAULT_GATE, gateFinding, repoHistory } from "./gate.js";
 import { anchorProblems, evidenceProblems, lineCount } from "./review.js";
 import { buildVerifierPrompt, claimDiff, decideFinding, refutationCitesRules, refutationGrounded, VerdictSchema, type Verdict } from "./verify.js";
 import { packRules } from "./context/pack.js";
@@ -68,6 +69,10 @@ export const ReviewSettingsSchema = Type.Object(
     shadow: Type.Boolean({
       default: false,
       description: "Record each review in the plugin thread only. Nothing is posted on GitHub.",
+    }),
+    outcomeGate: Type.Boolean({
+      default: false,
+      description: "Learn from silence: a finding like ones this repository's authors left unaddressed on three or more merged pull requests goes to the summary, not an inline comment. Never moves a high, critical or security finding. Needs finding records from closed pull requests.",
     }),
     verify: Type.Boolean({
       default: false,
@@ -125,6 +130,8 @@ export interface FindingPointer {
   unconfirmed?: true;
   /** The reviewer named no trigger or cited no code for it, so it is listed in the summary with no inline comment. */
   unsupported?: true;
+  /** Like findings authors left unaddressed (`outcomeGate`), so it is listed in the summary with no inline comment. */
+  suppressed?: true;
   /**
    * `resolved`: a recheck refuted it, and its thread is resolved. `fixedIn`
    * says a later commit changed its code; `withdrawnAt` says the code did
@@ -368,6 +375,9 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
   // only. The eval reviewer's submit_review refuses such findings; the child
   // answers with JSON, so the handler applies the same check here.
   const unsupported = new Set(evidenceProblems(candidates).map((p) => candidates[p.index]));
+  // 3c. With `outcomeGate` on, a finding like ones authors here left unaddressed goes to the summary (`gate.ts`).
+  const history = settings.outcomeGate ? await repoHistory(ctx.store, repoName).catch((err: unknown) => { console.warn(`pr-review ${slug}: could not read finding history; the outcome gate is skipped`, err); return []; }) : [];
+  const suppressed = new Set(history.length === 0 ? [] : candidates.filter((f) => !unsupported.has(f) && gateFinding(f, history, DEFAULT_GATE, target.number).suppress));
 
   // 4. With `verify` on, check each new finding in a fresh child. Refuted
   // ones are dropped; unconfirmed ones below high go to the summary only.
@@ -406,12 +416,12 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
     if (open.dismissed.some((d) => (hasTitle(d) ? sameIssue(d, f) : d.path === f.path && Math.abs(d.line - f.line) <= 3))) continue;
     // A fixed finding that came back reopens its own thread. One with no trigger or
     // evidence gets no inline comment, so it posts as a new summary-only finding instead.
-    const back = unsupported.has(f) ? undefined : open.fixed.find((o) => !reopened.some((r) => r.id === o.id) && sameIssue(o, f));
+    const back = unsupported.has(f) || suppressed.has(f) ? undefined : open.fixed.find((o) => !reopened.some((r) => r.id === o.id) && sameIssue(o, f));
     if (back) {
       reopened.push({ ...f, id: back.id, line: f.line, ...(back.commentId !== undefined ? { commentId: back.commentId } : {}), ...(back.threadId !== undefined ? { threadId: back.threadId } : {}) });
       continue;
     }
-    posted.push({ ...f, id: `f${nextId++}`, ...(unsupported.has(f) ? { unsupported: true as const } : unconfirmed.has(f) ? { unconfirmed: true as const } : {}) });
+    posted.push({ ...f, id: `f${nextId++}`, ...(unsupported.has(f) ? { unsupported: true as const } : suppressed.has(f) ? { suppressed: true as const } : unconfirmed.has(f) ? { unconfirmed: true as const } : {}) });
   }
 
   await noteBestEffort(ctx, thread, renderConsolidation(head, draft.findings.map((f): StageOutcome => {
@@ -422,7 +432,7 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
       : !candidates.includes(f) ? "dropped: line does not exist at HEAD"
       : !kept.includes(f) ? "dropped: the verifier refuted it"
       : SEVERITY_ORDER.indexOf(f.severity) < minRank ? `hidden: below ${settings.minSeverity}`
-      : out ? `posted as ${out.id}${out.unsupported ? " in the summary only: no trigger or no path:line evidence" : out.unconfirmed ? " in the summary only: the verifier could not confirm it" : ""}`
+      : out ? `posted as ${out.id}${out.unsupported ? " in the summary only: no trigger or no path:line evidence" : out.suppressed ? " in the summary only: like findings authors here left unaddressed" : out.unconfirmed ? " in the summary only: the verifier could not confirm it" : ""}`
       : reopened.some((r) => r.path === f.path && r.title === f.title) ? "reopened a fixed finding"
       : "dropped: repeats an open or dismissed finding";
     return { finding: f, result };
@@ -430,8 +440,8 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
 
   // 6. Map new findings to diff lines. GitHub refuses a comment on a line outside the diff.
   const anchorable = new Map(files.map((f) => [f.filename, { RIGHT: commentableLines(f.patch ?? "", "RIGHT"), LEFT: commentableLines(f.patch ?? "", "LEFT") }]));
-  const summaryOnly = posted.filter((f) => f.unconfirmed === true || f.unsupported === true);
-  const placed = posted.filter((f) => f.unconfirmed !== true && f.unsupported !== true).map((f) => placeNearDiff(f, anchorable.get(f.path)?.[f.side ?? "RIGHT"]));
+  const summaryOnly = posted.filter((f) => f.unconfirmed === true || f.unsupported === true || f.suppressed === true);
+  const placed = posted.filter((f) => f.unconfirmed !== true && f.unsupported !== true && f.suppressed !== true).map((f) => placeNearDiff(f, anchorable.get(f.path)?.[f.side ?? "RIGHT"]));
   let inline = placed.filter((f) => anchorable.get(f.path)?.[f.side ?? "RIGHT"].has(f.line) ?? false);
   let outside = placed.filter((f) => !inline.includes(f));
 
@@ -444,8 +454,8 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
       summary: draft.summary,
       confidence: draft.confidence,
       inline: [...stillOpen.filter((f) => f.commentId !== undefined), ...reopened, ...inline],
-      outsideDiff: [...stillOpen.filter((f) => f.commentId === undefined && f.unconfirmed !== true && f.unsupported !== true), ...outside],
-      unconfirmed: [...stillOpen.filter((f) => f.commentId === undefined && (f.unconfirmed === true || f.unsupported === true)), ...summaryOnly],
+      outsideDiff: [...stillOpen.filter((f) => f.commentId === undefined && f.unconfirmed !== true && f.unsupported !== true && f.suppressed !== true), ...outside],
+      unconfirmed: [...stillOpen.filter((f) => f.commentId === undefined && (f.unconfirmed === true || f.unsupported === true || f.suppressed === true)), ...summaryOnly],
       fixed: fixed.map(({ finding, withdrawn }) => ({ finding, sha: head, withdrawn })),
       rules: [...rules].sort(),
       hidden,
@@ -543,7 +553,7 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
     posted: [
       ...inline.map((f) => ({ finding: f, placement: "inline" as const, ...(commentIds.get(f.id) !== undefined ? { commentId: commentIds.get(f.id) } : {}) })),
       ...outside.map((f) => ({ finding: f, placement: "outside" as const })),
-      ...summaryOnly.map((f) => ({ finding: f, placement: f.unsupported ? ("unsupported" as const) : ("unconfirmed" as const) })),
+      ...summaryOnly.map((f) => ({ finding: f, placement: f.unsupported ? ("unsupported" as const) : f.suppressed ? ("suppressed" as const) : ("unconfirmed" as const) })),
     ],
   });
   await writeRecords(ctx.store, slug, records).catch((err: unknown) => console.warn(`pr-review ${slug}: could not record ${records.length} finding(s) for outcome measurement`, err));
@@ -638,7 +648,7 @@ async function recoverFindings(
     if (p.status === "dismissed" || gone || resolvedByAnotherActor(thread) || (p.status === "open" && thread?.isResolved)) {
       dismissed.push({ id: p.id, path: p.path, line: p.line, ...(text ? { title: text.title } : {}) });
     } else if (p.status === "open") {
-      live.push({ ...text, ...where, ...(p.unconfirmed === true ? { unconfirmed: true } : {}), ...(p.unsupported === true ? { unsupported: true } : {}) });
+      live.push({ ...text, ...where, ...(p.unconfirmed === true ? { unconfirmed: true } : {}), ...(p.unsupported === true ? { unsupported: true } : {}), ...(p.suppressed === true ? { suppressed: true } : {}) });
     } else if (p.commentId !== undefined) {
       fixed.push({ ...text, ...where });
     }
@@ -740,12 +750,13 @@ export async function flaggedCodeChanged(
   return false;
 }
 
-function pointer(f: Pick<PostedFinding, "id" | "path" | "line" | "side" | "unconfirmed" | "unsupported">, status: FindingPointer["status"], ids: { commentId?: number; threadId?: string }): FindingPointer {
+function pointer(f: Pick<PostedFinding, "id" | "path" | "line" | "side" | "unconfirmed" | "unsupported" | "suppressed">, status: FindingPointer["status"], ids: { commentId?: number; threadId?: string }): FindingPointer {
   return {
     id: f.id, path: f.path, line: f.line, status,
     ...(f.side === "LEFT" ? { side: "LEFT" as const } : {}),
     ...(f.unconfirmed === true && ids.commentId === undefined ? { unconfirmed: true as const } : {}),
     ...(f.unsupported === true && ids.commentId === undefined ? { unsupported: true as const } : {}),
+    ...(f.suppressed === true && ids.commentId === undefined ? { suppressed: true as const } : {}),
     ...(ids.commentId !== undefined ? { commentId: ids.commentId } : {}),
     ...(ids.threadId !== undefined ? { threadId: ids.threadId } : {}),
   };

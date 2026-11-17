@@ -283,6 +283,26 @@ The handler also measures its own reviews, with no eval run.
 4. A failure to write a record or an outcome is logged and never fails the
    review or the learning pass.
 
+### Outcome gate
+
+The `outcomeGate` setting (off by default) learns from silence. Before
+posting, the handler compares each new finding with the repository's finding
+records that have an outcome on a merged pull request. Two findings are
+neighbors when their similarity reaches 0.35: the shared words of title and
+body over all their words (Jaccard), plus 0.1 for the same directory and 0.1
+for the same category. Valet has no embeddings, so the match is lexical.
+
+- A finding with neighbors left unaddressed (ignored or rejected) on three or
+  more distinct pull requests goes to the summary under "Findings like ones
+  this repository left unaddressed", unless three or more neighbors were
+  addressed. The pointer keeps `suppressed`.
+- The gate never moves a high, critical or security finding, and it never
+  drops one.
+- It skips shadow records and records of the pull request under review.
+- The rule follows Greptile's filter, which blocks a comment similar to
+  three distinct downvoted ones. Turn it on for a line once its records
+  cover a few weeks of closed pull requests.
+
 `GET /api/code-review/outcomes` sums the records of the selected workspace
 per repository, build, and live or shadow line. Rates count merged pull
 requests only. The Code

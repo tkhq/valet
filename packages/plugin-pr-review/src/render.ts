@@ -14,6 +14,8 @@ export interface PostedFinding extends Finding {
   unconfirmed?: boolean;
   /** No trigger or no path:line evidence: the summary lists it, with no inline comment. */
   unsupported?: boolean;
+  /** Like findings this repository's authors left unaddressed: the summary lists it, with no inline comment. */
+  suppressed?: boolean;
 }
 
 const SEVERITIES = ["critical", "high", "medium", "low"] as const;
@@ -99,8 +101,9 @@ export interface SummaryInput {
 export function renderSummary(s: SummaryInput): string {
   const scope = s.incrementFrom ? `the commits since \`${s.incrementFrom.slice(0, 7)}\`` : "the whole pull request";
   const summaryOnly = s.unconfirmed ?? [];
-  const unconfirmed = summaryOnly.filter((f) => !f.unsupported);
+  const unconfirmed = summaryOnly.filter((f) => !f.unsupported && !f.suppressed);
   const unsupported = summaryOnly.filter((f) => f.unsupported);
+  const suppressed = summaryOnly.filter((f) => f.suppressed && !f.unsupported);
   const open = [...s.inline, ...s.outsideDiff, ...summaryOnly].sort((a, b) => SEVERITIES.indexOf(a.severity) - SEVERITIES.indexOf(b.severity));
   const lines = [
     `<!-- valet-pr-review:summary ${s.head} -->`,
@@ -112,7 +115,7 @@ export function renderSummary(s: SummaryInput): string {
   ];
   if (open.length > 0) {
     lines.push("", `### Open findings (${open.length})`, "");
-    for (const f of open) lines.push(`- **${label(f.severity)}** \`${f.path}:${f.line}\`${f.side === "LEFT" ? " (deleted line)" : ""} ${oneLine(f.title)}${f.unsupported ? " (no evidence)" : f.unconfirmed ? " (not confirmed)" : ""}`);
+    for (const f of open) lines.push(`- **${label(f.severity)}** \`${f.path}:${f.line}\`${f.side === "LEFT" ? " (deleted line)" : ""} ${oneLine(f.title)}${f.unsupported ? " (no evidence)" : f.suppressed ? " (often left unaddressed)" : f.unconfirmed ? " (not confirmed)" : ""}`);
   } else {
     lines.push("", "No open findings.");
   }
@@ -139,6 +142,11 @@ export function renderSummary(s: SummaryInput): string {
   if (unsupported.length > 0) {
     lines.push("", `<details><summary>Findings without a trigger or code evidence (${unsupported.length})</summary>`, "", "The reviewer named no input that triggers these, or cited no line of code that shows them. They get no inline comment.", "");
     for (const f of unsupported) lines.push(`\`${f.path}:${f.line}\``, "", renderFinding(f), "");
+    lines.push("</details>");
+  }
+  if (suppressed.length > 0) {
+    lines.push("", `<details><summary>Findings like ones this repository left unaddressed (${suppressed.length})</summary>`, "", "Authors here did not act on similar findings in several merged pull requests. They get no inline comment.", "");
+    for (const f of suppressed) lines.push(`\`${f.path}:${f.line}\``, "", renderFinding(f), "");
     lines.push("</details>");
   }
   if (s.hidden > 0) lines.push("", `${s.hidden} finding(s) are not shown: below the line's minimum severity, in excluded paths, or on a line that does not exist at this head.`);

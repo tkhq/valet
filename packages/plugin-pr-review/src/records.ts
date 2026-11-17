@@ -20,7 +20,7 @@ import type { PostedFinding } from "./render.js";
 export const FINDINGS_COLLECTION = "findings";
 
 /** Where the finding was posted: an inline comment, the summary's outside-the-diff list, or a summary-only tier. */
-export type FindingPlacement = "inline" | "outside" | "unconfirmed" | "unsupported" | "shadow";
+export type FindingPlacement = "inline" | "outside" | "unconfirmed" | "unsupported" | "suppressed" | "shadow";
 export type FindingOutcome = "addressed" | "rejected" | "ignored";
 
 export interface FindingRecord {
