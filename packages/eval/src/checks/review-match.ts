@@ -173,12 +173,12 @@ export function buildReviewMatcher(opts: ReviewMatcherOptions = {}): ReviewMatch
       try {
         const d = await scoreReview(llm, check, reviewCommentText(draft));
         const m = profileMetrics(check, profile, d.matchedGolden, d.fp);
-        draftMetrics = { "draft:tp": m.tp, "draft:fp": m.fp, "draft:fn": m.fn };
+        draftMetrics = { "draft:tp": m.tp, "draft:fp": m.fp, "draft:fn": m.fn, ...(check.rejected?.length ? { "draft:rejected": d.rejectedHit } : {}) };
       } catch {
         // The draft score is diagnostic; the case score above stands.
       }
     } else if (draft !== undefined) {
-      draftMetrics = { "draft:tp": metrics.tp, "draft:fp": metrics.fp, "draft:fn": metrics.fn };
+      draftMetrics = { "draft:tp": metrics.tp, "draft:fp": metrics.fp, "draft:fn": metrics.fn, ...(check.rejected?.length ? { "draft:rejected": scored.rejectedHit } : {}) };
     }
     const recall = metrics.tp + metrics.fn > 0 ? metrics.tp / (metrics.tp + metrics.fn) : 0;
     const minRecall = check.min_recall ?? 0;
@@ -193,6 +193,7 @@ export function buildReviewMatcher(opts: ReviewMatcherOptions = {}): ReviewMatch
       metrics: {
         ...metrics,
         candidates: scored.candidates,
+        ...(check.rejected?.length ? { rejected: scored.rejectedHit, rejected_total: check.rejected.length } : {}),
         ...(scored.judgeErrors > 0 ? { judge_errors: scored.judgeErrors } : {}),
         ...draftMetrics,
         ...crossRepoMetrics(check, profile, scored.matchedGolden, "cross:"),
@@ -235,6 +236,8 @@ interface ReviewScore {
   fp: number;
   missed: string[];
   judgeErrors: number;
+  /** `rejected` findings the review repeated. */
+  rejectedHit: number;
 }
 
 async function scoreReview(llm: ReviewLlm, check: ReviewMatchCheck, commentText: string): Promise<ReviewScore> {
@@ -266,7 +269,18 @@ async function scoreReview(llm: ReviewLlm, check: ReviewMatchCheck, commentText:
     for (const s of siblings.get(ci) ?? []) candidateMatched.add(s);
   });
   const matchedGolden = [...best.keys()].sort((a, b) => a - b);
+  // A rejected finding counts once, however many candidates repeat it.
+  const rejected = check.rejected ?? [];
+  const rejectedPairs = rejected.flatMap((_, ri) => unique.map((_, ci) => ({ ri, ci })));
+  const rejectedVerdicts = await mapLimit(rejectedPairs, JUDGE_CONCURRENCY, ({ ri, ci }) =>
+    judgePair(llm, rejected[ri].comment, unique[ci]).catch(() => {
+      judgeErrors++;
+      return { match: false, confidence: 0 };
+    }),
+  );
+  const rejectedHit = new Set(rejectedPairs.filter((_, k) => rejectedVerdicts[k].match).map(({ ri }) => ri)).size;
   return {
+    rejectedHit,
     candidates: unique.length,
     matchedGolden,
     fp: unique.length - candidateMatched.size,

@@ -308,8 +308,14 @@ export type ReviewProfile = (typeof REVIEW_PROFILES)[number];
  */
 export interface ReviewMatchCheck {
   type: "review_match";
-  /** Empty only for a `control` or `setup` case. */
+  /** Empty only for a `control` or `setup` case, or a case with `rejected` findings. */
   golden: GoldenComment[];
+  /**
+   * Findings a reviewer posted on this PR that people rejected (a thumbs-down,
+   * or a thread a person resolved with no code change). A review should not
+   * repeat them. Scored as `rejected` (repeated) of `rejected_total`.
+   */
+  rejected?: GoldenComment[];
   /** Unset for Martian cases: every case has golden comments. */
   kind?: ReviewCaseKind;
   /** Default `core`, Martian's primary metric. */

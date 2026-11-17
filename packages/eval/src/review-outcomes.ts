@@ -159,12 +159,13 @@ interface ThreadNode {
   };
 }
 
-interface PullNode {
+export interface PullNode {
   number: number;
   title: string;
   body: string;
   baseRefOid: string;
   headRefOid: string;
+  reviews: { nodes: { author: { login: string } | null; commit: { oid: string } | null }[] };
   reviewThreads: { nodes: ThreadNode[] };
 }
 
@@ -173,6 +174,7 @@ const PULLS_QUERY = `query($q: String!, $after: String) {
     pageInfo { hasNextPage endCursor }
     nodes { ... on PullRequest {
       number title body baseRefOid headRefOid
+      reviews(first: 100) { nodes { author { login } commit { oid } } }
       reviewThreads(first: 100) { nodes {
         isResolved resolvedBy { login } diffSide
         comments(first: 30) { nodes {
@@ -184,12 +186,12 @@ const PULLS_QUERY = `query($q: String!, $after: String) {
   }
 }`;
 
-async function gh(args: string[]): Promise<string> {
+export async function gh(args: string[]): Promise<string> {
   const { stdout } = await run("gh", args, { maxBuffer: 64 * 1024 * 1024 });
   return stdout;
 }
 
-async function mergedPulls(repo: string, since: string): Promise<PullNode[]> {
+export async function mergedPulls(repo: string, since: string): Promise<PullNode[]> {
   const out: PullNode[] = [];
   let after: string | undefined;
   for (;;) {
@@ -232,11 +234,12 @@ export function loginKey(login: string): string {
   return login.toLowerCase().replace(/\[bot\]$/, "");
 }
 
-export async function collectOutcomes(repo: string, since: string, bots: readonly string[]): Promise<OutcomeRow[]> {
+/** Pass `pulls` from {@link mergedPulls} to reuse one fetch. */
+export async function collectOutcomes(repo: string, since: string, bots: readonly string[], pulls?: readonly PullNode[]): Promise<OutcomeRow[]> {
   const read = fileReader(repo);
   const botSet = new Set(bots.map(loginKey));
   const rows: OutcomeRow[] = [];
-  for (const pr of await mergedPulls(repo, since)) {
+  for (const pr of pulls ?? (await mergedPulls(repo, since))) {
     for (const t of pr.reviewThreads.nodes) {
       const [root, ...rest] = t.comments.nodes;
       const bot = root?.author?.login;

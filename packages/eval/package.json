@@ -21,7 +21,8 @@
     "import:swr": "tsx src/swr-import.ts",
     "review-outcomes": "tsx src/review-outcomes.ts",
     "review-compare": "tsx src/review-compare.ts",
-    "pack-snapshot": "tsx src/pack-snapshot.ts"
+    "pack-snapshot": "tsx src/pack-snapshot.ts",
+    "review-misses": "tsx src/review-misses.ts"
   },
   "dependencies": {
     "@valet/api": "workspace:*",
