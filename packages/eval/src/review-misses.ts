@@ -241,8 +241,15 @@ async function main(): Promise<void> {
       const file = join(outDir, `${missCaseId(g, prefix)}.yaml`);
       if (existsSync(file)) {
         // Keep a case someone may have edited, but say when it lacks rejected findings this run found.
-        if (rejected.length > 0 && !hasRejected(await readFile(file, "utf8"))) {
-          console.warn(`${file} exists without the ${rejected.length} rejected finding(s) this run found. Delete it and run again to add them.`);
+        if (rejected.length > 0) {
+          let listed = false;
+          try {
+            listed = hasRejected(await readFile(file, "utf8"));
+          } catch (err) {
+            console.warn(`${file} is not valid YAML, so this run left it as it is. Fix the file, or delete it and run again. ${err instanceof Error ? err.message : String(err)}`);
+            continue;
+          }
+          if (!listed) console.warn(`${file} exists without the ${rejected.length} rejected finding(s) this run found. Delete it and run again to add them.`);
         }
         continue;
       }

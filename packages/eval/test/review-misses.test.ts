@@ -73,6 +73,7 @@ describe("review misses", () => {
     const doc = missCase({ ...g, rows: [] }, "a", true, "rejected", rejected);
     expect(doc).toMatchObject({ id: missCaseId(g, "rejected"), checks: [{ golden: [], rejected: [{ category: "bug" }] }] });
     expect(hasRejected("checks:\n  - type: review_match\n    golden: []\n    rejected:\n      - comment: x\n        category: bug\n")).toBe(true);
+    expect(() => hasRejected("checks: [unclosed")).toThrow();
     expect(hasRejected("# rejected: in a header\nchecks:\n  - type: review_match\n    golden:\n      - comment: 'rejected: quoted'\n        category: bug\n")).toBe(false);
   });
 
