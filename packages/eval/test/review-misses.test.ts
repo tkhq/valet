@@ -74,5 +74,7 @@ describe("review misses", () => {
     expect(insideRepo("/repo", "/repo")).toBe(true);
     expect(insideRepo("/home/me/cases", "/repo")).toBe(false);
     expect(insideRepo("/repo-other/cases", "/repo")).toBe(false);
+    expect(insideRepo("/repo/..cases", "/repo")).toBe(true);
+    expect(insideRepo("/", "/repo")).toBe(false);
   });
 });

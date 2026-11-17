@@ -26,7 +26,7 @@
  */
 import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
-import { join, relative, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { stringify } from "yaml";
@@ -145,7 +145,8 @@ const REPO_ROOT = fileURLToPath(new URL("../../..", import.meta.url));
 /** Whether `dir` is inside this repository's working tree. */
 export function insideRepo(dir: string, root = REPO_ROOT): boolean {
   const rel = relative(resolve(root), resolve(dir));
-  return rel === "" || (!rel.startsWith("..") && !rel.startsWith("/"));
+  // `..cases` is a directory inside the repository; only `..` itself or a `../` prefix leaves it.
+  return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
 }
 
 async function main(): Promise<void> {
