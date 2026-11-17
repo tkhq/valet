@@ -76,6 +76,10 @@ export const ReviewSettingsSchema = Type.Object(
       default: "anthropic/claude-sonnet-5-5",
       description: "provider/model for the reviewer and verifier children.",
     }),
+    verifyModel: Type.Optional(Type.String({
+      minLength: 1,
+      description: "provider/model for verifier and recheck children only, such as a model from another vendor so the check does not share the reviewer's errors. Unset: `model`. The org must have that provider enabled.",
+    })),
     riskPaths: Type.Array(Type.String({ minLength: 1 }), {
       default: [],
       maxItems: 100,
@@ -315,7 +319,7 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
     await packReady;
     const verdict = await runVerifier(ctx, thread, {
       dispatchId: dispatch(`recheck:${f.id}`),
-      model: settings.model,
+      model: settings.verifyModel ?? settings.model,
       prompt: buildVerifierPrompt({ ...claimInput(f), finish: VERDICT_FINISH, ...(prior?.lastReviewedHead ? { recheckFrom: prior.lastReviewedHead } : {}) }),
       title: `Recheck ${f.id} at ${head.slice(0, 7)}`,
       repo: repoName,
@@ -374,7 +378,7 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
     if (!settings.verify || i >= MAX_VERIFIED) return void kept.push(f);
     const verdict = await runVerifier(ctx, thread, {
       dispatchId: dispatch(`verify:${i}`),
-      model: settings.model,
+      model: settings.verifyModel ?? settings.model,
       prompt: buildVerifierPrompt({ ...claimInput(f), finish: VERDICT_FINISH }),
       title: `Verify finding ${i + 1} at ${head.slice(0, 7)}`,
       repo: repoName,

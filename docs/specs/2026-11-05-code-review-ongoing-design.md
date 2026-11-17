@@ -177,6 +177,11 @@ deletes a lesson in Memory like any other file.
 
 ## Verifier
 
+The `verifyModel` setting runs verifier and recheck children on another
+model than the reviewer, such as one from another vendor. Runs of one model
+share its errors, and a second vendor does not. Unset, they use `model`.
+Compare it with the eval's `--verify-model` before a line turns it on.
+
 Every review rechecks each open finding on a file the new commits changed.
 A recheck that refutes the claim resolves the finding as fixed or withdrawn.
 With `verify` on, each new finding also gets a check before it posts. The

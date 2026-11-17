@@ -1043,6 +1043,22 @@ describe("review-pull-request handler", () => {
     expect(threads.spawned.find((s) => s.req.role === "pr-reviewer")?.req.prompt).toContain("- `gen/`");
   });
 
+  it("runs verifier and recheck children on verifyModel, and the reviewer on model", async () => {
+    const gh = new FakeGitHub();
+    const store = new FakeStore();
+    const handler = createReviewHandler({ fetch: gh.fetch });
+    const config = { verify: true, contextBudget: 0, model: "anthropic/claude-sonnet-5-5", verifyModel: "openai/gpt-6.1-sol" };
+    const first = new FakeThreads(scripted(reviewOf([finding({})]), {}));
+    await handler.handle(event("ev1", "github.pull_request.opened"), context(first, store, config));
+    expect(first.spawned.map((s) => [s.req.role, s.req.model])).toEqual([["pr-reviewer", "anthropic/claude-sonnet-5-5"], ["pr-verifier", "openai/gpt-6.1-sol"]]);
+
+    gh.head = H2;
+    gh.contentsAt[H2] = { "a.ts": editedA(5) };
+    const second = new FakeThreads(scripted(reviewOf([]), {}));
+    await handler.handle(event("ev2"), context(second, store, config));
+    expect(second.spawned.find((s) => s.dispatchId.endsWith(":recheck:f1"))?.req.model).toBe("openai/gpt-6.1-sol");
+  });
+
   it("starts no verifier when the line leaves verify off", async () => {
     const gh = new FakeGitHub();
     const store = new FakeStore();
