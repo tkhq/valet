@@ -3,7 +3,7 @@
  * Organization · Policies (action-policies plan, Task 5): the new-policy
  * form enforces target one-of in the UI (radio group swaps which field is
  * sent), matcher rows add/remove and get included in the create payload,
- * and the kill-switch toggle is sugar over a service-level deny policy
+ * and the kill-switch toggle maps to a service-level deny policy
  * (create when off→on, delete the matching row when on→off). Mocks
  * `~/api/policies` and `~/api/integrations` the same way
  * `-settings.organization.models.test.tsx` mocks `~/api/settings`.
@@ -222,7 +222,7 @@ describe("PoliciesSection — kill switches", () => {
     const user = userEvent.setup();
     render(<PoliciesSection />);
 
-    await user.click(screen.getByRole("switch", { name: "Kill switch for gmail" }));
+    await user.click(screen.getByRole("switch", { name: "Kill switch for Gmail" }));
 
     expect(createOrgPolicyMutate).toHaveBeenCalledWith(
       { service: "gmail", mode: "deny", appliesIn: "any" },
@@ -237,11 +237,27 @@ describe("PoliciesSection — kill switches", () => {
     };
     render(<PoliciesSection />);
 
-    const toggle = screen.getByRole("switch", { name: "Kill switch for gmail" });
+    const toggle = screen.getByRole("switch", { name: "Kill switch for Gmail" });
     expect(toggle.getAttribute("aria-checked")).toBe("true");
 
     await user.click(toggle);
     expect(deleteOrgPolicyMutate).toHaveBeenCalledWith("kill_1", expect.anything());
+  });
+
+  it("labels each kill switch with the service display name, not the raw id", () => {
+    pluginsData = {
+      plugins: [{
+        name: "google-workspace",
+        version: "1.0.0",
+        actionCount: 0,
+        services: [{ service: "google_calendar", type: "oauth2", configKeys: [], connected: true, connect: "manual", actions: [] }],
+      }],
+    };
+    render(<PoliciesSection />);
+
+    expect(screen.getByText("Google Calendar")).toBeTruthy();
+    expect(screen.queryByText("google_calendar")).toBeNull();
+    expect(screen.getByRole("switch", { name: "Kill switch for Google Calendar" })).toBeTruthy();
   });
 
   it("does not treat an action-scoped or non-deny policy on the same service as a kill switch", () => {
@@ -253,7 +269,7 @@ describe("PoliciesSection — kill switches", () => {
     };
     render(<PoliciesSection />);
 
-    const toggle = screen.getByRole("switch", { name: "Kill switch for gmail" });
+    const toggle = screen.getByRole("switch", { name: "Kill switch for Gmail" });
     expect(toggle.getAttribute("aria-checked")).toBe("false");
   });
 });

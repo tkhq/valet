@@ -23,7 +23,9 @@ vi.mock("~/api/secrets", () => ({
   useSaveSecret: () => ({ mutate: saveMutate, isPending: false, error: null }),
   useDeleteSecret: () => ({ mutate: vi.fn(), isPending: false, error: null }),
 }));
+let orgRole: "admin" | "member" = "member";
 vi.mock("~/api/settings", () => ({
+  useMe: () => ({ data: { orgRole } }),
   useTeams: () => ({
     data: {
       teams: [
@@ -42,11 +44,17 @@ describe("SecretsPage", () => {
     targets.length = 0;
   });
 
-  it("says the store is off and shows no form", () => {
+  it("says the store is off and shows no form, naming the server setting only to an admin", () => {
     data = { enabled: false, provider: null, canWrite: false, secrets: [] };
+    orgRole = "member";
+    const view = render(<SecretsPage />);
+    expect(screen.getByText("Secrets are not set up on this Valet. Ask an admin to turn them on.")).toBeTruthy();
+    expect(screen.queryByText(/VALET_SECRET_STORE/)).toBeNull();
+    expect(screen.queryByLabelText("Secret value")).toBeNull();
+    view.unmount();
+    orgRole = "admin";
     render(<SecretsPage />);
     expect(screen.getByText(/VALET_SECRET_STORE/)).toBeTruthy();
-    expect(screen.queryByLabelText("Secret value")).toBeNull();
   });
 
   it("lists names with their references and names the provider", () => {
@@ -86,12 +94,12 @@ describe("SecretsPage", () => {
     expect(saveMutate).toHaveBeenCalledWith({ name: "K", value: "v2", replace: true }, expect.anything());
   });
 
-  it("offers the caller's teams and the company, and hides the form where the caller cannot write", () => {
+  it("offers the caller's teams and the organization, and hides the form where the caller cannot write", () => {
     data = { enabled: true, provider: "Turnkey", canWrite: false, secrets: [] };
     render(<SecretsPage />);
     expect(screen.getByRole("tab", { name: "Platform" })).toBeTruthy();
     expect(screen.queryByRole("tab", { name: "Not mine" })).toBeNull();
-    fireEvent.click(screen.getByRole("tab", { name: "Company" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Organization" }));
     expect(targets.at(-1)).toEqual({ scope: "company" });
     fireEvent.click(screen.getByRole("tab", { name: "Platform" }));
     expect(targets.at(-1)).toEqual({ scope: "team", teamId: "t1" });

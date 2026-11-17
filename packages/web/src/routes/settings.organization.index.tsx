@@ -8,16 +8,17 @@ import {
   Dialog,
   DialogContent,
   DialogFooter,
+  ErrorRow,
   Input,
-  Spinner,
+  LoadingRow,
   Switch,
 } from "~/components/primitives";
 import { useOrg, usePatchOrg, usePatchOrgSettings } from "~/api/settings";
 import { useResetTutorialForEveryone } from "~/api/tutorial";
 
 /**
- * `/settings/organization` (index) — Organization · General. Org name +
- * Save (dirty-gated); the read-only id row; the disable-gate control,
+ * `/settings/organization` (index) — Organization · General. Org name with
+ * its own inline Save (dirty-gated); the read-only id row; the disable-gate control,
  * which confirms before flipping `features.organizations` off (spec: the
  * confirm copy must state that nothing is deleted — teams and members stay
  * dormant, not removed) and then returns the caller to their own settings.
@@ -58,41 +59,33 @@ export function OrganizationGeneralPage() {
 
   return (
     <Section title="General" description="Your organization's name and features.">
-      {orgQ.isLoading && (
-        <div className="flex items-center gap-2 py-4 text-sm text-muted">
-          <Spinner size={14} /> Loading…
-        </div>
-      )}
-      {orgQ.error && <div className="py-4 text-sm text-danger-500">Failed to load organization.</div>}
+      {orgQ.isLoading && <LoadingRow />}
+      {orgQ.error && <ErrorRow>Failed to load organization. Reload the page to try again.</ErrorRow>}
 
       {orgQ.data && (
         <>
-          <FieldRow label="Name">
-            <Input
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="Organization name"
-              aria-label="Organization name"
-            />
+          <FieldRow label="Name" error={patchOrg.error && !confirmDisable ? patchOrg.error.message : undefined}>
+            <div className="flex gap-2">
+              <Input
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="Organization name"
+                aria-label="Organization name"
+              />
+              <Button type="button" onClick={save} disabled={!dirty || patchOrg.isPending}>
+                {patchOrg.isPending ? "Saving…" : "Save"}
+              </Button>
+            </div>
           </FieldRow>
           <FieldRow label="Organization ID">
             <Input value={orgQ.data.id} readOnly disabled aria-label="Organization ID" />
           </FieldRow>
 
-          <div className="flex items-center gap-3 py-4">
-            <Button type="button" onClick={save} disabled={!dirty || patchOrg.isPending}>
-              {patchOrg.isPending ? "Saving…" : "Save"}
-            </Button>
-            {patchOrg.error && !confirmDisable && (
-              <p className="text-xs text-danger-500">{patchOrg.error.message}</p>
-            )}
-          </div>
-
           <FieldRow
             label="Public artifact links"
             hint={
               orgQ.data.callerRole === "admin"
-                ? "Off: every shared document link requires a logged-in member of your org, and existing public links go back to requiring login. On: members can widen an individual link to anyone who has it — no login."
+                ? "Off: every shared document link requires a logged-in member of your org, and existing public links go back to requiring login. On: members can open an individual link to anyone who has it, with no login."
                 : "Off: every shared document link requires a logged-in member of your org. Only an org admin can change this."
             }
           >
@@ -126,7 +119,7 @@ export function OrganizationGeneralPage() {
             label="Organization features"
             hint="Hides member roles and teams for everyone in your organization."
           >
-            <Button type="button" variant="secondary" size="sm" onClick={() => setConfirmDisable(true)}>
+            <Button type="button" variant="danger" size="sm" onClick={() => setConfirmDisable(true)}>
               Turn off organization features
             </Button>
           </FieldRow>
@@ -149,7 +142,7 @@ export function OrganizationGeneralPage() {
       <Dialog open={confirmDisable} onOpenChange={setConfirmDisable}>
         <DialogContent
           title="Turn off organization features?"
-          description="This hides Organization settings for everyone in your org. Nothing is deleted — your teams and member roles stay exactly as they are, and you can turn this back on any time."
+          description="This hides Organization settings for everyone in your org. Nothing is deleted. Your teams and member roles stay as they are, and you can turn this back on at any time."
         >
           <DialogFooter>
             <Button type="button" variant="secondary" onClick={() => setConfirmDisable(false)}>
