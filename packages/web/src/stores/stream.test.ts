@@ -2004,6 +2004,38 @@ describe("per-thread status scoping", () => {
     });
     expect(useStreamStore.getState().bySession[SESSION].statusByThread).toEqual({});
   });
+
+  it("init clears queue state, since the handshake seeds only threads with work", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, {
+      seq: 1,
+      ts: 1000,
+      type: "queue.state",
+      sessionId: SESSION,
+      threadId: THREAD,
+      state: { mode: "followup", status: "running", activeItemId: "item-1", pendingIds: [], collectingIds: [] },
+    });
+    ingest(SESSION, {
+      seq: 2,
+      ts: 2000,
+      type: "init",
+      session: {
+        id: SESSION,
+        workspace: "/workspace",
+        status: "active",
+        kind: "code",
+        runState: "idle",
+        createdAt: 0,
+        updatedAt: 0,
+        lastActivityAt: 0,
+        owner: { type: "user", id: "user-1" },
+        messageCount: 0,
+        profile: "headless",
+        docker: false,
+      },
+    });
+    expect(useStreamStore.getState().bySession[SESSION].queueByThread).toEqual({});
+  });
 });
 
 describe("store default slice", () => {

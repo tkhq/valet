@@ -3723,8 +3723,20 @@ export class Thread {
    * Used by the `/status` and `/clear` built-ins.
    */
   async currentQueueState(): Promise<QueueState> {
-    const items = await this.session.providers.store.listUnsettledSubmissions(this.session.id);
-    return deriveQueueState(this.id, items, this.mode, this.paused, this.blockedGateId);
+    return this.queueStateFrom(await this.session.providers.store.listUnsettledSubmissions(this.session.id));
+  }
+
+  /**
+   * The same snapshot from the session's unsettled submissions the caller
+   * already read, so a caller that covers many threads reads them once.
+   */
+  queueStateFrom(unsettled: QueueItem[]): QueueState {
+    return deriveQueueState(this.id, unsettled, this.mode, this.paused, this.blockedGateId);
+  }
+
+  /** True when the thread holds its queue (`/pause`) until resumed. */
+  get isPaused(): boolean {
+    return this.paused;
   }
 
   /** True when this thread is mid-turn (a submission is claimed and running). */

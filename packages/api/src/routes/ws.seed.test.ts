@@ -1,6 +1,8 @@
 /**
- * WS handshake seeding — after `init`, the socket sends each thread's queue,
- * non-idle status, and authoritative active model state.
+ * WS handshake seeding — after `init`, the socket sends the queue, non-idle
+ * status, and authoritative active model state of each thread with work.
+ * Idle threads get no seed: `init` clears the client's copy, and a team
+ * runtime with thousands of idle threads delayed live frames behind them.
  *
  * Why: the client derives its Stop button and Escape interrupt from these
  * signals. Before the seed, a client that connected mid-turn (page load or
@@ -91,16 +93,14 @@ describe("WS handshake seeds per-thread state after init", () => {
     expect(provision).not.toHaveBeenCalled();
   });
 
-  it("seeds an idle thread's queue.state", async () => {
+  it("does not seed an idle thread's queue.state", async () => {
     api = await bootTestApi();
     const sessionId = await createSession(api.baseUrl);
 
-    const frames = await collectUntil(api.wsUrl, sessionId, (ev) => ev.type === "queue.state");
+    // `sandbox.status` follows the queue seed, so every seed frame is in.
+    const frames = await collectUntil(api.wsUrl, sessionId, (ev) => ev.type === "sandbox.status");
     expect(frames[0]?.type).toBe("init");
-    const queueFrame = frames.find((ev) => ev.type === "queue.state");
-    if (queueFrame?.type !== "queue.state") throw new Error("unreachable");
-    expect(queueFrame.state.status).toBe("idle");
-    expect(queueFrame.state.pendingIds).toEqual([]);
+    expect(frames.filter((ev) => ev.type === "queue.state")).toEqual([]);
   });
 
   it("seeds the pending submission of a paused thread on a fresh connect", async () => {
@@ -137,7 +137,7 @@ describe("WS handshake seeds per-thread state after init", () => {
     }
   });
 
-  it("sends the queue seed before durable replay can advance it", async () => {
+  it("sends no seed for an idle thread before durable replay advances it", async () => {
     api = await bootTestApi();
     const sessionId = await createSession(api.baseUrl);
     const engineSession = await api.providers.engineHost.sessionFor(sessionId, {
@@ -168,23 +168,22 @@ describe("WS handshake seeds per-thread state after init", () => {
       "queue:replayed",
     );
 
-    let queueStateCount = 0;
     const frames = await collectUntil(
       api.wsUrl,
       sessionId,
-      (event) => event.type === "queue.state" && ++queueStateCount === 2,
+      (event) => event.type === "sandbox.status",
       5_000,
       "0",
     );
 
     expect(frames[0]?.type).toBe("init");
     const queueStates = frames.filter((event) => event.type === "queue.state");
-    expect(queueStates.map((event) => event.state.status)).toEqual(["idle", "running"]);
-    expect(queueStates.map((event) => event.offset)).toEqual([undefined, offset]);
+    expect(queueStates.map((event) => event.state.status)).toEqual(["running"]);
+    expect(queueStates.map((event) => event.offset)).toEqual([offset]);
     expect(queueStates.at(-1)?.state.activeItemId).toBe("q-newer");
   });
 
-  it("subscribes before it reads one active or idle model snapshot per thread", async () => {
+  it("subscribes before it reads model state, and seeds only active threads", async () => {
     api = await bootTestApi();
     const sessionId = await createSession(api.baseUrl);
     const engineSession = await api.providers.engineHost.sessionFor(sessionId, {
@@ -194,6 +193,7 @@ describe("WS handshake seeds per-thread state after init", () => {
     });
     const activeThread = await engineSession.ensureDefaultThread();
     const idleThread = await engineSession.createThread("web:idle");
+    const laterThread = await engineSession.createThread("web:later");
     const calls: string[] = [];
     const subscribe = api.providers.eventStream.subscribe.bind(api.providers.eventStream);
     vi.spyOn(api.providers.eventStream, "subscribe").mockImplementation((filter, callback) => {
@@ -208,26 +208,65 @@ describe("WS handshake seeds per-thread state after init", () => {
       calls.push("idle getter");
       return null;
     });
+    vi.spyOn(laterThread, "currentModelState").mockImplementation(async () => {
+      calls.push("later getter");
+      return { queueItemId: "q-later", model: "anthropic/claude-opus-4-7" };
+    });
+
+    // The later thread comes after the idle one, so its frame shows the
+    // idle thread was passed over.
+    const frames = await collectUntil(
+      api.wsUrl,
+      sessionId,
+      (event) => event.type === "model.state" && event.threadId === laterThread.id,
+    );
+
+    expect(frames[0]?.type).toBe("init");
+    expect(calls).toEqual(["subscribe", "active getter", "idle getter", "later getter"]);
+    const modelStates = frames.filter((event) => event.type === "model.state");
+    expect(modelStates.map((event) => event.threadId)).toEqual([activeThread.id, laterThread.id]);
+    const active = modelStates[0];
+    if (active?.type !== "model.state") throw new Error("missing active model seed");
+    expect(active.queueItemId).toBe("q-active");
+    expect(active.model).toBe("anthropic/claude-opus-4-7");
+  });
+
+  it("clears model state that replay sent for a thread that is now idle", async () => {
+    api = await bootTestApi();
+    const sessionId = await createSession(api.baseUrl);
+    const engineSession = await api.providers.engineHost.sessionFor(sessionId, {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    const thread = await engineSession.ensureDefaultThread();
+    vi.spyOn(thread, "currentModelState").mockResolvedValue(null);
+    const replayed: BusEvent = {
+      sessionId,
+      threadId: thread.id,
+      userId: "local-user",
+      timestamp: 100,
+      event: {
+        type: "model_state",
+        threadId: thread.id,
+        queueItemId: "q-replayed",
+        model: "anthropic/claude-haiku-4-5",
+      },
+    };
+    await api.providers.eventStream.append(replayed, "model:replayed");
 
     let modelStateCount = 0;
     const frames = await collectUntil(
       api.wsUrl,
       sessionId,
       (event) => event.type === "model.state" && ++modelStateCount === 2,
+      5_000,
+      "0",
     );
 
-    expect(frames[0]?.type).toBe("init");
-    expect(calls).toEqual(["subscribe", "active getter", "idle getter"]);
     const modelStates = frames.filter((event) => event.type === "model.state");
-    expect(modelStates).toHaveLength(2);
-    const active = modelStates.find((event) => event.threadId === activeThread.id);
-    if (active?.type !== "model.state") throw new Error("missing active model seed");
-    expect(active.queueItemId).toBe("q-active");
-    expect(active.model).toBe("anthropic/claude-opus-4-7");
-    const idle = modelStates.find((event) => event.threadId === idleThread.id);
-    if (idle?.type !== "model.state") throw new Error("missing idle model seed");
-    expect(idle.queueItemId).toBeNull();
-    expect(idle.model).toBeNull();
+    expect(modelStates.map((event) => event.queueItemId)).toEqual(["q-replayed", null]);
+    expect(modelStates.at(-1)?.offset).toBeUndefined();
   });
 
   it("sends the model snapshot after replay and subscription-buffered live events", async () => {

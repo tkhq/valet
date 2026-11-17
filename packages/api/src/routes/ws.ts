@@ -8,10 +8,13 @@
  * Semantics:
  *   - One subscriber = one socket = one session.
  *   - `init` is sent first, metadata-only. Thread history loads via REST.
- *   - After `init`, the handshake seeds each thread's queue and non-idle
- *     status before durable replay can advance that state.
+ *   - After `init`, the handshake seeds the queue and non-idle status of
+ *     each thread with work before durable replay can advance that state.
+ *     An idle thread gets no seed: `init` clears the client's copy.
  *   - The handshake subscribes before reading active model state. The model
  *     snapshot follows replay and buffered live frames, so it is authoritative.
+ *     It covers threads with an active model and threads this socket already
+ *     sent model state for.
  *   - Resume: `?fromOffset=<offset>` replays durable events after that offset
  *     before live delivery resumes. Durable frames carry a persistent
  *     `offset`; ephemeral frames (text_delta) never do. Without the query
@@ -283,11 +286,17 @@ export function registerWsRoutes(
             // frame reads the in-memory turn phase. Both are chunk-style
             // (no offset), so the client applies them unconditionally and a
             // later durable replay still converges to the same state.
+            //
+            // Only threads with work get a frame. The client reads a thread
+            // with no queue state as idle, and `init` clears what it held, so
+            // an idle thread needs nothing. A team runtime can hold thousands
+            // of threads, and every frame waits on that thread's access
+            // check: seeding all of them delayed live frames by a minute.
+            const threadsWithWork = new Set(unsettled.map((item: QueueItem) => item.threadId));
             for (const thread of engineSession.listThreads()) {
-              const queueState = await thread.currentQueueState();
-              if (lifecycle.closed) return;
-              deliver(ws, queueStateToWire(sessionId, thread.id, queueState));
               const agentStatus = thread.currentAgentStatus;
+              if (agentStatus === "idle" && !thread.isPaused && !threadsWithWork.has(thread.id)) continue;
+              deliver(ws, queueStateToWire(sessionId, thread.id, thread.queueStateFrom(unsettled)));
               if (agentStatus !== "idle") {
                 const turnStartedAt = thread.currentTurnStartedAt;
                 deliver(ws, { type: "status", threadId: thread.id, status: agentStatus, ...(turnStartedAt !== undefined ? { turnStartedAt } : {}) });
@@ -297,7 +306,9 @@ export function registerWsRoutes(
             // Map one bus event → wire frames and push them. Durable events
             // carry `offset`; we stamp it onto each frame so clients can
             // resume. Ephemeral frames (text_delta) have no offset.
+            const modelStateSent = new Set<string>();
             const emit = (busEvent: DeliveredBusEvent) => {
+              if (busEvent.event.type === "model_state") modelStateSent.add(busEvent.event.threadId);
               if (busEvent.event.type === "message_start") {
                 activeMessageByThread.set(busEvent.event.threadId, busEvent.event.messageId);
               }
@@ -374,9 +385,12 @@ export function registerWsRoutes(
             // `currentModelState()` serializes with model transitions, so an
             // earlier live event is sent before this authoritative snapshot.
             // A later transition follows it through the installed subscription.
+            // A thread with no active model needs a snapshot only when this
+            // socket already sent it model state: `init` clears the rest.
             for (const thread of engineSession.listThreads()) {
               const modelState = await thread.currentModelState();
               if (lifecycle.closed) return;
+              if (!modelState && !modelStateSent.has(thread.id)) continue;
               deliver(ws, modelState
                 ? {
                     type: "model.state",

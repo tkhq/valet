@@ -122,6 +122,11 @@ it("streams a private Slack thread's events only to the channel's members", asyn
   const liveLookup = vi.spyOn(session, "threadById").mockImplementation((id) => id === unresolved.id ? null : findThread(id));
   const storedLookup = vi.spyOn(api.providers.engineStore, "getThread").mockImplementation((sid, id) => id === unresolved.id ? Promise.resolve(null) : getThread(sid, id));
   const shown = await session.createThread("web:shared");
+  // The handshake seeds model state only for a thread with an active model,
+  // so give each thread one: every thread then has a seed frame to filter.
+  for (const thread of [unresolved, hidden, shown]) {
+    vi.spyOn(thread, "currentModelState").mockResolvedValue({ queueItemId: `q-${thread.id}`, model: "anthropic/claude-haiku-4-5" });
+  }
   await connectSlack(api, { CSTREAM: ["USTREAM"] });
 
   const frames: WireEvent[] = [];
