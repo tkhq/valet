@@ -12,9 +12,14 @@ describe("parseEvalOutput", () => {
         { caseId: "b", costUsd: 0.1, checkResults: [{ check: { type: "review_match" }, metrics: { tp: 0, fp: 0, fn: 1 } }] },
       ],
     });
-    const out = parseEvalOutput(`[eval] log line\n${json}\n[eval] done in 12s`);
+    const out = parseEvalOutput(`[eval] log line\n${json}\n[eval] done {cases: 2}`);
     expect(out.get("a")).toEqual([run(1, 1, 0, 0.2), run(0, 2, 1, 0.2)]);
     expect(out.get("b")).toEqual([run(0, 0, 1, 0.1)]);
+  });
+
+  it("ignores braces inside strings when it finds the end of the JSON", () => {
+    const json = JSON.stringify({ entries: [{ caseId: "a}{", checkResults: [{ check: { type: "review_match" }, metrics: { tp: 1, fp: 0, fn: 0 } }] }] });
+    expect(parseEvalOutput(`${json}\n}`).get("a}{")).toEqual([run(1, 0, 0, 0)]);
   });
 
   it("names the fix when the file is not eval JSON", () => {

@@ -83,8 +83,8 @@ interface EvalEntry {
 /** The per-run review metrics of each case in an eval `--json` output. Text before or after the JSON (logs) is skipped. */
 export function parseEvalOutput(text: string): CaseRuns {
   const start = text.search(/\{\s*"entries"/);
-  const end = text.lastIndexOf("}");
-  if (start < 0 || end < start) throw new Error('The file is not eval --json output: no "entries" object found. Run the eval CLI with --json.');
+  const end = start < 0 ? -1 : objectEnd(text, start);
+  if (start < 0 || end < 0) throw new Error('The file is not eval --json output: no "entries" object found. Run the eval CLI with --json.');
   // Logs can come before the JSON and a captured stderr line after it.
   const parsed = JSON.parse(text.slice(start, end + 1)) as { entries?: EvalEntry[] };
   const out: CaseRuns = new Map();
@@ -96,6 +96,22 @@ export function parseEvalOutput(text: string): CaseRuns {
     out.set(e.caseId, perRun.map((m, i) => ({ tp: m.tp ?? 0, fp: m.fp ?? 0, fn: m.fn ?? 0, costUsd: costs[i] ?? 0 })));
   }
   return out;
+}
+
+/** The index of the brace that closes the JSON object opening at `start`, or -1. Braces inside strings do not count. */
+export function objectEnd(text: string, start: number): number {
+  let depth = 0;
+  let inString = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (ch === "\\") i++;
+      else if (ch === '"') inString = false;
+    } else if (ch === '"') inString = true;
+    else if (ch === "{") depth++;
+    else if (ch === "}" && --depth === 0) return i;
+  }
+  return -1;
 }
 
 function totals(runs: RunMetrics[][]): Totals {
