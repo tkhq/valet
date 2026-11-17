@@ -146,6 +146,17 @@ scope holds only its own items.
   page on each navigation outside Settings. The value lives in memory, so
   after a reload into Settings the link opens Home.
 
+**Team overview (2026-11-17).** Team General shows an Overview section
+under the name. It has one `LinkRow` per part of the team: Members, Integrations, Secrets, Access, Policies, and
+Usage. A row has an icon, a title, a one-line description, the current
+value, and a chevron, and the whole row is a link to that tab. Members
+has no tab, so its row scrolls to the Members section on General. A
+value comes only from a query the tab already makes, for example
+"4 members", "3 connected", or "Off" when the deployment has no secret
+store. Usage has no value. An org admin who is not on the team does not
+see the Usage row, because the usage API answers only to members. The
+tabs do not change.
+
 ### 3. Visual language
 
 Settings matches the thread UI:

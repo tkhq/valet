@@ -48,6 +48,7 @@ import { curatedForCatalogId } from "~/lib/models";
 import { reasoningLabelFor } from "~/lib/reasoning";
 import { matchesNeedle } from "~/lib/text-match";
 import { TeamDeletionRequests } from "./team-deletion-requests";
+import { TeamOverview } from "./team-overview";
 
 /**
  * Says what a declared team's controls do and do not survive.
@@ -74,8 +75,9 @@ const DELETE_TEAM_NOTE =
  *   team. A row is a link to that team's settings page, and an admin of the
  *   team can delete it from the row's menu. The team is edited on its page,
  *   never in the list.
- * - **A team's General tab** (`teamId`): the team's name, members, defaults,
- *   Slack home channel, and deletion requests, each a `Section`.
+ * - **A team's General tab** (`teamId`): the team's name, an overview with
+ *   one link row per tab, then members, defaults, Slack home channel, and
+ *   deletion requests, each a `Section`.
  *
  * All member display data (name/email/avatar) is cross-referenced against
  * the org directory (`useOrgDirectory()`, member-visible) since
@@ -312,6 +314,7 @@ function TeamGeneral({ team, orgMembers, canMutate }: {
         </div>
       </div>
       {canMutate && team.origin !== "config" && <TeamName team={team} />}
+      <TeamOverview team={team} />
       <TeamMembers team={team} orgMembers={orgMembers} canMutate={canMutate} onSelfRemoved={leavePage} />
       <TeamDefaults team={team} canMutate={canMutate} />
       <TeamSlack team={team} canMutate={canMutate} />
@@ -428,6 +431,7 @@ function TeamMembers({
 
   return (
     <Section
+      id="members"
       title="Members"
       description={declared ? CONFIG_MANAGED_NOTE : undefined}
       actions={
