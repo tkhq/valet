@@ -146,6 +146,18 @@ scope holds only its own items.
   page on each navigation outside Settings. The value lives in memory, so
   after a reload into Settings the link opens Home.
 
+**Search (2026-11-17).** On a wider screen the rail has a "Search settings"
+box at the top. While it holds text, a list of matching pages
+replaces the groups, and each result names its place in the rail, for
+example "Organization / Security and audit". An admin's Organization items
+expand to one result per tab. A page also matches words for what it holds
+(`keywords` on a rail item): "api keys" finds Access. A result list holds
+only the pages the viewer's rail shows. A page whose own name holds the
+query ranks first. Enter opens the first result, and
+Escape clears the box. The app has no command palette, so settings search
+lives only in the rail. The phone rail is a menu that lists every page, so
+it has no search box.
+
 ### 3. Visual language
 
 Settings matches the thread UI:

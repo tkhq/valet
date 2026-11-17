@@ -21,10 +21,11 @@ vi.mock("@tanstack/react-router", () => ({
     );
   },
   useRouterState: () => pathname,
-  useRouter: () => ({ history: { push: historyPush } }),
+  useRouter: () => ({ history: { push: historyPush }, navigate: routerNavigate }),
 }));
 
 const historyPush = vi.fn();
+const routerNavigate = vi.fn();
 
 let pathname = "/settings/profile";
 let orgData: { callerRole: "admin" | "member"; features: { organizations: boolean }; plugins: Array<{ name: string; enabledForCaller: boolean }>; loadedPlugins?: string[] } | undefined;
@@ -57,6 +58,41 @@ function rail() {
 function groupLabels(): string[] {
   return within(rail()).getAllByRole("group").map((g) => g.getAttribute("aria-label") ?? "");
 }
+
+describe("SettingsRail search", () => {
+  function search() {
+    return within(rail()).getByRole("searchbox", { name: "Search settings" });
+  }
+
+  it("finds an organization tab and a page by what it holds, with its place in the rail", async () => {
+    render(<SettingsRail />);
+    await userEvent.type(search(), "audit");
+    const results = within(rail()).getByRole("list", { name: "Search results" });
+    const first = within(results).getAllByRole("link")[0]!;
+    expect(first.textContent).toContain("Audit log");
+    expect(first.textContent).toContain("Organization / Security and audit");
+    await userEvent.clear(search());
+    await userEvent.type(search(), "api keys");
+    expect(within(rail()).getByRole("list", { name: "Search results" }).textContent).toContain("Access");
+  });
+
+  it("opens the first result on Enter and clears on Escape", async () => {
+    render(<SettingsRail />);
+    await userEvent.type(search(), "platform{Enter}");
+    expect(routerNavigate).toHaveBeenCalledWith({ to: "/settings/teams/$teamId", params: { teamId: "t2" } });
+    await userEvent.type(search(), "zzz");
+    expect(within(rail()).getByText("No settings match.")).toBeTruthy();
+    await userEvent.type(search(), "{Escape}");
+    expect(groupLabels()).toEqual(["Account", "Personal", "Your teams", "Organization"]);
+  });
+
+  it("shows a member only the pages their rail lists", async () => {
+    orgData = { callerRole: "member", features: { organizations: true }, plugins: [] };
+    render(<SettingsRail />);
+    await userEvent.type(search(), "audit");
+    expect(within(rail()).getByText("No settings match.")).toBeTruthy();
+  });
+});
 
 describe("SettingsRail", () => {
   it("links back to the last app page, not to a settings page", async () => {
