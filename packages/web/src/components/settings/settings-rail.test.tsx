@@ -145,11 +145,28 @@ describe("SettingsRail", () => {
     expect(within(org).getByRole("link", { name: "General" }).getAttribute("aria-current")).toBeNull();
   });
 
-  it("shows a member only Teams and 1Password under Organization", () => {
+  it("shows a member only Teams under Organization", () => {
     orgData = { callerRole: "member", features: { organizations: true }, plugins: [] };
     render(<SettingsRail />);
     const org = within(rail()).getByRole("group", { name: "Organization" });
-    expect(within(org).getAllByRole("link").map((a) => a.textContent)).toEqual(["Teams", "1Password"]);
+    expect(within(org).getAllByRole("link").map((a) => a.textContent)).toEqual(["Teams"]);
+  });
+
+  it.each([
+    ["an org admin", "admin" as const, ["General", "Models and usage", "Apps and plugins", "Security and audit"]],
+    ["a plain member on a team", "member" as const, ["Teams"]],
+  ])("gives %s the full rail for their role", (_who, role, orgItems) => {
+    orgData = { callerRole: role, features: { organizations: true }, plugins: [] };
+    teams = [{ id: "t1", name: "team-tvc", callerRole: "member" }, { id: "t3", name: "not-mine", callerRole: null }];
+    render(<SettingsRail />);
+    const items = (group: string) =>
+      within(within(rail()).getByRole("group", { name: group })).getAllByRole("link").map((a) => a.textContent);
+    expect(groupLabels()).toEqual(["Account", "Personal", "Your teams", "Organization"]);
+    expect(items("Account")).toEqual(["Profile", "Preferences", "Notifications"]);
+    expect(items("Personal")).toEqual(["Integrations", "Access", "Secrets", "Policies", "Usage", "Model comparison"]);
+    // Your teams lists memberships only, even for an admin who may open more.
+    expect(items("Your teams")).toEqual(["team-tvc"]);
+    expect(items("Organization")).toEqual(orgItems);
   });
 
   it("hides Organization and Your teams before the org query resolves", () => {

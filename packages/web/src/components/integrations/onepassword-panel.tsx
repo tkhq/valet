@@ -1,18 +1,14 @@
 import { Link } from "@tanstack/react-router";
 import { useOnePasswordSettings } from "~/api/onepassword";
-import { useOrg } from "~/api/settings";
 import { ErrorRow, LoadingRow } from "~/components/primitives";
 import { Section } from "~/components/settings/section";
 import { ServiceIcon } from "~/components/service-icon";
-import {
-  OnePasswordTokenRow,
-  OnePasswordTokenStatus,
-} from "~/components/integrations/onepassword-setup";
+import { OnePasswordTokenRow } from "~/components/integrations/onepassword-setup";
 
 /**
  * Organization · 1Password: the service-account token the whole org shares.
- * An admin sets it; a member sees the same row with the status in place of
- * the controls, so nobody has to guess whether one is connected.
+ * Only an org admin opens this page (the organization route guard), and
+ * sets the token here.
  *
  * Your OWN token is not here. It is a personal credential, so it sits with
  * your other connections on Integrations. Both pages open the same setup
@@ -24,9 +20,7 @@ const REMOVE_ORG_TOKEN_NOTE =
   "stop resolving for every member. An admin can connect a new token here.";
 
 export function OnePasswordPanel() {
-  const orgQ = useOrg();
   const settingsQ = useOnePasswordSettings();
-  const isAdmin = orgQ.data?.callerRole === "admin";
 
   return (
     <Section
@@ -48,23 +42,15 @@ export function OnePasswordPanel() {
       {settingsQ.isLoading && <LoadingRow />}
       {settingsQ.error && <ErrorRow>Failed to load 1Password settings. Reload the page to try again.</ErrorRow>}
 
-      {settingsQ.data &&
-        (isAdmin ? (
-          <OnePasswordTokenRow
-            scope="org"
-            connected={settingsQ.data.orgTokenConnected}
-            label="Organization token"
-            hint="A 1Password service account token shared across the organization."
-            removeNote={REMOVE_ORG_TOKEN_NOTE}
-          />
-        ) : (
-          <OnePasswordTokenStatus
-            connected={settingsQ.data.orgTokenConnected}
-            label="Organization token"
-            hint="A 1Password service account token shared across the organization."
-            note="Only an organization admin can connect or remove this token."
-          />
-        ))}
+      {settingsQ.data && (
+        <OnePasswordTokenRow
+          scope="org"
+          connected={settingsQ.data.orgTokenConnected}
+          label="Organization token"
+          hint="A 1Password service account token shared across the organization."
+          removeNote={REMOVE_ORG_TOKEN_NOTE}
+        />
+      )}
     </Section>
   );
 }

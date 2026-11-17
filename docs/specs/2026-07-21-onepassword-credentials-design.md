@@ -209,9 +209,11 @@ with the same admin/member split by owner type.
 1Password is a credential source, not a plugin. It has two homes, split by
 what a token costs (amended 2026-09-15). The org-wide
 token sits on Organization · 1Password
-(`/settings/organization/onepassword`), beside GitHub and Slack: an admin
-gets its controls, a member gets its status and a line naming who may change
-it. A personal token is a personal credential, so it sits with the rest of
+(`/settings/organization/onepassword`), beside GitHub and Slack. Only an
+admin opens it and sets the token there (2026-11-17). A member got a
+read-only status row there before; with their own token on Integrations the
+page held nothing a member could act on, so the member rail item and the
+member route access were removed. A personal token is a personal credential, so it sits with the rest of
 them on You · Connected accounts, where setting one needs no organization
 permission. Both pages open one shared setup dialog, so the instructions and
 the links into 1Password are written once. `/integrations` does not carry

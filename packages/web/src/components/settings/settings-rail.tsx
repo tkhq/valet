@@ -35,7 +35,9 @@ import { cn } from "~/lib/cn";
  *   `/settings/teams/$teamId` pages.
  * - **Organization**: shown once `useOrg()` resolves with the gate on (never
  *   flashes). An admin sees four grouped sections, each a tab bar over its
- *   existing routes (`ORG_SECTIONS`). A plain member sees Teams and 1Password.
+ *   existing routes (`ORG_SECTIONS`). A plain member sees Teams only: the
+ *   1Password page holds nothing a member can act on, and their own token
+ *   is on Integrations.
  *
  * Active state is computed from the pathname (via `cn`'s `twMerge`) rather
  * than TanStack's `activeProps`, which only concatenates class strings.
@@ -44,9 +46,6 @@ import { cn } from "~/lib/cn";
 /** One source of truth for the Teams path — the rail and the
  * `/settings/organization` route guard must never disagree on it. */
 export const ORG_TEAMS_PATH = "/settings/organization/teams";
-
-/** Same rule for 1Password, which every org member may open. */
-export const ORG_ONEPASSWORD_PATH = "/settings/organization/onepassword";
 
 export interface OrgRoute {
   to: AppPath;
@@ -83,7 +82,7 @@ export const ORG_SECTIONS: ReadonlyArray<{ label: string; icon: LucideIcon; rout
       { to: "/settings/organization/github", label: "GitHub" },
       { to: "/settings/organization/slack", label: "Slack" },
       { to: "/settings/organization/linear", label: "Linear" },
-      { to: ORG_ONEPASSWORD_PATH, label: "1Password" },
+      { to: "/settings/organization/onepassword", label: "1Password" },
       { to: "/settings/organization/library", label: "Library" },
     ],
   },
@@ -184,7 +183,6 @@ const MCP_SERVERS_ITEM: RailItem = {
 
 const MEMBER_ORG_ITEMS: RailItem[] = [
   { to: ORG_TEAMS_PATH, label: "Teams", icon: Users, active: (p) => onRoute(p, ORG_TEAMS_PATH) },
-  { to: ORG_ONEPASSWORD_PATH, label: "1Password", icon: KeyRound, active: exact(ORG_ONEPASSWORD_PATH) },
 ];
 
 const ADMIN_ORG_ITEMS: RailItem[] = ORG_SECTIONS.map((section) => ({

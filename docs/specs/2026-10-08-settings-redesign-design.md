@@ -64,8 +64,8 @@ on these pages, not the switcher's.
   - Security and audit: Policies, Secrets, Sandbox settings, Action log,
     Audit log (Secrets added 2026-11-17)
 
-  A plain member still sees only Teams and 1Password, as two rail items, and
-  no tab bar.
+  A plain member sees only Teams, as a rail item, and no tab bar
+  (1Password left the member rail on 2026-11-17).
 - While organizations are off, Personal also lists Models
   (`/settings/models`). For an org admin it also lists MCP servers
   (`/settings/mcp-servers`), because `GET /api/org/mcp-servers` refuses a
@@ -128,6 +128,12 @@ scope holds only its own items.
   other settings pages. The usage API answers a team's spend to its
   members only, so an org admin who is not on a team sees a pointer to
   Organization Usage on that tab.
+- **Organization rail.** Security and audit holds Policies, Secrets,
+  Sandbox settings, Action log, and Audit log. The member-only 1Password
+  rail item is gone, and the organization guard no longer admits a member
+  to `/settings/organization/onepassword`: the page held only a read-only
+  status of the organization token, and a member's own token is on
+  Integrations.
 
 ### 3. Visual language
 

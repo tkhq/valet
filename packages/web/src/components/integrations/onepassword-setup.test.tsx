@@ -27,7 +27,7 @@ vi.mock("~/api/integrations", () => ({
   }),
 }));
 
-import { OnePasswordTokenRow, OnePasswordTokenStatus } from "./onepassword-setup";
+import { OnePasswordTokenRow } from "./onepassword-setup";
 
 function personalRow(connected = false) {
   return render(
@@ -144,23 +144,5 @@ describe("OnePasswordTokenRow", () => {
     expect(screen.getByText("Connected")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Replace" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Connect 1Password" })).toBeNull();
-  });
-});
-
-describe("OnePasswordTokenStatus", () => {
-  it("shows the state and who may change it, with no controls", () => {
-    render(
-      <OnePasswordTokenStatus
-        connected={false}
-        label="Organization token"
-        hint="Shared across the organization."
-        note="Only an organization admin can connect or remove this token."
-      />,
-    );
-    expect(screen.getByText("Not connected")).toBeTruthy();
-    expect(
-      screen.getByText("Only an organization admin can connect or remove this token."),
-    ).toBeTruthy();
-    expect(screen.queryByRole("button")).toBeNull();
   });
 });
