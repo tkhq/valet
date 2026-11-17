@@ -39,6 +39,7 @@ import { useState } from "react";
 import type { PluginServiceSummary, PluginSummary, ToolPermissionWire } from "@valet/api/wire";
 import { Badge, Button, ConfirmDialog, ManagedNote } from "~/components/primitives";
 import { useCredentials, useDisconnectCredential } from "~/api/integrations";
+import { useOrg } from "~/api/settings";
 import { errorText } from "~/lib/error-text";
 import { Link } from "@tanstack/react-router";
 import { ChevronRight } from "lucide-react";
@@ -336,6 +337,8 @@ function ServiceBlock({
   // the user to connect. The tile states that instead of offering token
   // entry — the Slack bot token, for one, belongs to Settings → Organization.
   const orgProvided = service.connect === "org";
+  // An org admin set it up, so the note does not send them to an admin.
+  const orgAdmin = useOrg({ enabled: orgProvided }).data?.callerRole === "admin";
   // Present only for an org admin, and only for the missing-OAuth-client
   // arm. See `isVisibleService`.
   const missingEnv = service.missingEnv ?? [];
@@ -421,7 +424,7 @@ function ServiceBlock({
   const identityLink = useServiceIdentityLink(service.service);
   const pairing = orgProvided && identityLink.link?.channelReady ? identityLink.link : null;
   const orgProvidedNote =
-    orgProvided && !pairing && !identityLink.isLoading ? <ManagedNote scope="org" askAdmin /> : undefined;
+    orgProvided && !pairing && !identityLink.isLoading ? <ManagedNote scope="org" askAdmin={!orgAdmin} /> : undefined;
 
   const connectionDetails = <>
       {/* The org note reads on a disconnected card too — "your organisation

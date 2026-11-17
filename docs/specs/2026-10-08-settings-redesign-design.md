@@ -160,8 +160,11 @@ Settings matches the thread UI:
   page, disabled. `ManagedNote` (`components/primitives/managed-note.tsx`)
   sits next to it: a lock icon and "Managed by your organization." or
   "Managed by your team.", with "Ask an admin to change it." when the viewer
-  cannot change it. It is presentation only. The API still decides who can
-  write.
+  cannot change it. A viewer who can change it at the higher scope, such as
+  an org admin on a personal page, gets "Change it in Organization settings."
+  as a link instead (`changeAt`). A note that covers a whole section sits
+  beside the section heading. It is presentation only. The API still decides
+  who can write.
 
 ### 4. One place per thing
 

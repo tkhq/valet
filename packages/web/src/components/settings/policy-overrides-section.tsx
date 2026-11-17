@@ -44,7 +44,7 @@ export function PolicyOverridesSection() {
   if (overridesQ.error) return <p role="alert">{apiErrorMessage(overridesQ.error)}</p>;
   if (!overridesQ.data) return <p role="status">Loading…</p>;
   return <PolicyOverridesEditor overrides={overridesQ.data.overrides} title="My policy overrides"
-    description="Your own overrides on top of org policy." canEdit saving={put.isPending} deleting={del.isPending}
+    description="Allow, ask, or deny a service, action, or risk level for your own sessions." canEdit saving={put.isPending} deleting={del.isPending}
     save={body => put.mutateAsync(body)} remove={row => del.mutateAsync({ service: row.service ?? undefined, actionId: row.actionId ?? undefined, riskLevel: row.riskLevel ?? undefined })} />;
 }
 
@@ -85,7 +85,7 @@ export function PolicyOverridesEditor({ overrides, title, description, canEdit, 
 
   return (
     <div className="space-y-10">
-      <Section title={title} description={description}>
+      <Section title={title} description={description} actions={canEdit ? undefined : <ManagedNote scope="team" askAdmin />}>
         {overrides.length === 0 && <p className="py-4 text-sm text-muted">No overrides yet.</p>}
         {overrides.map((o) => (
           <div key={o.id} className="flex items-center gap-3 py-3">
@@ -118,7 +118,6 @@ export function PolicyOverridesEditor({ overrides, title, description, canEdit, 
         {rowError && <p className="pb-2 text-xs text-danger-500">{rowError}</p>}
       </Section>
 
-      {!canEdit && <ManagedNote scope="team" askAdmin />}
       <ConfirmDialog open={selected !== null && canEdit} onOpenChange={open => { if (!open) setSelected(null); }}
         title="Delete override?" description="Remove this override and use the remaining policy rules." confirmLabel="Delete override"
         pending={deleting} error={rowError} onConfirm={() => {

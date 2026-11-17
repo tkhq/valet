@@ -8,6 +8,7 @@
  * Single-user mode and an org admin get `editable={true}`.
  */
 import { useProxySettings, useSetProxyEnabled, useSetProxyMode } from "~/api/proxy-usage";
+import { useOrg } from "~/api/settings";
 import { FilterChips, ManagedNote, Switch } from "~/components/primitives";
 import { FieldRow } from "~/components/settings/field-row";
 
@@ -32,6 +33,8 @@ export function ProxyGovernance({ editable }: ProxyGovernanceProps) {
   const settingsQ = useProxySettings();
   const setEnabled = useSetProxyEnabled();
   const setMode = useSetProxyMode();
+  // An org admin changes the gateway on the organization Proxy tab.
+  const orgAdmin = useOrg({ enabled: !editable }).data?.callerRole === "admin";
 
   const enabled = settingsQ.data?.enabled ?? false;
   const mode = settingsQ.data?.mode ?? "centralized";
@@ -55,7 +58,7 @@ export function ProxyGovernance({ editable }: ProxyGovernanceProps) {
           disabled={!editable || setEnabled.isPending}
           aria-label={enabled ? "Gateway enabled" : "Gateway disabled"}
         />
-        {!editable && <ManagedNote scope="org" askAdmin className="mt-1.5" />}
+        {!editable && <ManagedNote scope="org" askAdmin changeAt={orgAdmin ? "/settings/organization/proxy" : undefined} className="mt-1.5" />}
       </FieldRow>
 
       {/* Credential mode */}
