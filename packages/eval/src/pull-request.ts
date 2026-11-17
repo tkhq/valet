@@ -99,12 +99,17 @@ export async function runPullRequestCase(evalCase: EvalCase, opts: RunnerOptions
   const model = typeof opts.model !== "string" && evalCase.model === undefined ? opts.model : resolveModelId(modelSpec);
   if (!model) throw new Error(`unknown model spec \`${modelSpec}\`. Use provider/model form, e.g. anthropic/claude-sonnet-5-5.`);
 
+  return withCaseWorkspace(evalCase.id, spec, (workspace) => reviewInWorkspace(evalCase, opts, spec, workspace, model, modelSpec));
+}
+
+/** Check out a case's head in a temporary worktree of the cached repo, run `fn` there, then remove the worktree. */
+export async function withCaseWorkspace<T>(caseId: string, spec: PullRequestSpec, fn: (workspace: string) => Promise<T>): Promise<T> {
   const repo = await ensureCommits(spec);
-  const workspace = await mkdtemp(join(tmpdir(), `valet-eval-${evalCase.id}-`));
+  const workspace = await mkdtemp(join(tmpdir(), `valet-eval-${caseId}-`));
   await rm(workspace, { recursive: true, force: true });
   await withRepoLock(repo, () => git(repo, ["worktree", "add", "--quiet", "--detach", workspace, spec.head]));
   try {
-    return await reviewInWorkspace(evalCase, opts, spec, workspace, model, modelSpec);
+    return await fn(workspace);
   } finally {
     await withRepoLock(repo, () => git(repo, ["worktree", "remove", "--force", workspace])).catch(() => undefined);
   }
@@ -227,7 +232,7 @@ async function reviewInWorkspace(
 }
 
 /** `owner/name` of a GitHub remote URL, for the context pack's memory queries. */
-function githubRepo(remote: string): string | undefined {
+export function githubRepo(remote: string): string | undefined {
   return /github\.com[/:]([^/]+\/[^/]+?)(?:\.git)?$/.exec(remote)?.[1];
 }
 

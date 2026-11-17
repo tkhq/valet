@@ -132,22 +132,7 @@ export async function runReviewPipeline(input: PipelineOptions, run: AgentRunner
   // diff from a base branch that moved on shows its later commits reversed.
   const opts = { ...input, base: await mergeBase(input.workspace, input.base, input.head) };
   // Gather once, before any pass: every pass reads the same pack.
-  let context: ContextPack | undefined;
-  if ((opts.contextBudget ?? 0) > 0) {
-    const from = opts.incrementFrom ?? opts.base;
-    const patch = await git(opts.workspace, ["diff", "--unified=5", from, opts.head]);
-    context = await gatherContext({
-      runner: localRunner(opts.workspace),
-      // Instructions come from the merge base, never from the PR head.
-      readTrusted: (path) => gitFileAt(opts.workspace, opts.base, path),
-      patch,
-      diffDropped: rankPatch(patch, opts.diffBudgetChars ?? DIFF_BUDGET).dropped,
-      title: opts.title,
-      budgetChars: opts.contextBudget ?? 0,
-      ...(opts.memory ? { memory: opts.memory } : {}),
-      ...(opts.repo ? { repo: opts.repo } : {}),
-    });
-  }
+  const context = await gatherPipelineContext(opts);
   const withContext = { ...opts, ...(context ? { contextPack: context.text } : {}) };
   // Passes run in parallel; each samples its own path through the PR, so
   // their union finds more than one pass. Pass 1 keeps the label "review".
@@ -252,7 +237,32 @@ async function dedupeFindings(opts: PipelineOptions, findings: Finding[], run: A
   return applyDuplicateGroups(findings, clusters, answer, gate);
 }
 
-async function mergeBase(workspace: string, base: string, head: string): Promise<string> {
+/**
+ * The context pack the pipeline gives every reviewer pass, or undefined when
+ * `contextBudget` is unset. `base` must already be the merge base. The pack
+ * snapshot check (eval) calls this too, so it checks the pack a review gets.
+ */
+export async function gatherPipelineContext(
+  opts: Pick<PipelineOptions, "workspace" | "base" | "head" | "incrementFrom" | "title" | "contextBudget" | "diffBudgetChars" | "memory" | "repo">,
+): Promise<ContextPack | undefined> {
+  if ((opts.contextBudget ?? 0) <= 0) return undefined;
+  const from = opts.incrementFrom ?? opts.base;
+  const patch = await git(opts.workspace, ["diff", "--unified=5", from, opts.head]);
+  return gatherContext({
+    runner: localRunner(opts.workspace),
+    // Instructions come from the merge base, never from the PR head.
+    readTrusted: (path) => gitFileAt(opts.workspace, opts.base, path),
+    patch,
+    diffDropped: rankPatch(patch, opts.diffBudgetChars ?? DIFF_BUDGET).dropped,
+    title: opts.title,
+    budgetChars: opts.contextBudget ?? 0,
+    ...(opts.memory ? { memory: opts.memory } : {}),
+    ...(opts.repo ? { repo: opts.repo } : {}),
+  });
+}
+
+/** The merge base of `base` and `head`: what GitHub diffs a pull request from. */
+export async function mergeBase(workspace: string, base: string, head: string): Promise<string> {
   const sha = (await git(workspace, ["merge-base", base, head])).trim();
   if (!sha) throw new Error(`No merge-base between ${base} and ${head}. Fetch both commits with their history.`);
   return sha;

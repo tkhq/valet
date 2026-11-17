@@ -13,6 +13,8 @@ export {
 } from "./review.js";
 export {
   confidentEnough,
+  gatherPipelineContext,
+  mergeBase,
   mergeFindings,
   runReviewPipeline,
   type AgentRunner,
