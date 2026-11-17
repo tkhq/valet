@@ -559,7 +559,8 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
       ...inline.map((f) => ({ finding: f, placement: "inline" as const, ...(commentIds.get(f.id) !== undefined ? { commentId: commentIds.get(f.id) } : {}) })),
       ...outside.map((f) => ({ finding: f, placement: "outside" as const })),
       ...summaryOnly.map((f) => ({ finding: f, placement: f.unsupported ? ("unsupported" as const) : f.suppressed ? ("suppressed" as const) : ("unconfirmed" as const) })),
-    ].map((p) => (wouldGate.has(p.finding.id) ? { ...p, wouldGate: true as const } : p)),
+    // Only findings the author saw as open findings: a summary-only one rarely gets a reaction.
+    ].map((p) => (wouldGate.has(p.finding.id) && (p.placement === "inline" || p.placement === "outside") ? { ...p, wouldGate: true as const } : p)),
   });
   await writeRecords(ctx.store, slug, records).catch((err: unknown) => console.warn(`pr-review ${slug}: could not record ${records.length} finding(s) for outcome measurement`, err));
   await finishPendingUpdates(gh, next, save, ctx.signal);

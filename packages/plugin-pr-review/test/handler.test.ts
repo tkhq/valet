@@ -1086,6 +1086,26 @@ describe("review-pull-request handler", () => {
     }
   });
 
+  it("with outcomeGate log, does not mark a finding the verifier left summary-only", async () => {
+    const gh = new FakeGitHub();
+    const store = new FakeStore();
+    for (const n of [1, 2, 3]) {
+      await store.put("findings", `acme/site#${n}/f1`, {
+        repo: "acme/site", number: n, id: "f1", title: "Timeout looks short in fetch", body: "The fetch timeout of two seconds may cut slow responses.",
+        severity: "low", category: "performance", path: "a.ts", line: 9, placement: "inline", head: H1, at: "2026-11-10T00:00:00Z", rules: [],
+        outcome: { result: "ignored", merged: true, closedHead: H2, at: "2026-11-11T00:00:00Z" },
+      } satisfies FindingRecord);
+    }
+    const threads = new FakeThreads(scripted(
+      reviewOf([finding({ title: "Null deref in parse" }), finding({ line: 9, severity: "low", category: "performance", title: "Fetch timeout looks short", body: "A two second fetch timeout may cut slow responses." })]),
+      { "Fetch timeout looks short": verdict("unverifiable", { evidence: "the timeout comes from an external client" }) },
+    ));
+    await createReviewHandler({ fetch: gh.fetch }).handle(event("ev1", "github.pull_request.opened"), context(threads, store, { verify: true, contextBudget: 0, outcomeGate: "log" }));
+    const record = (await store.get<FindingRecord>("findings", "acme/site#7/f2"))?.doc;
+    expect(record?.placement).toBe("unconfirmed");
+    expect(record?.wouldGate).toBeUndefined();
+  });
+
   it("starts no verifier when the line leaves verify off", async () => {
     const gh = new FakeGitHub();
     const store = new FakeStore();

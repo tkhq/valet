@@ -312,7 +312,9 @@ for the same category. Valet has no embeddings, so the match is lexical.
   comments; this gate covers every low and medium finding, and the match is
   lexical, so it can match a real bug to past nits.
 - With `log`, the gate decides the same way but moves nothing. A finding it
-  would move posts as usual, and its record keeps `wouldGate`. When those
+  would move posts as usual. Its record keeps `wouldGate` when it posts
+  inline or outside the diff; a finding the verifier left unconfirmed stays
+  summary-only and gets no mark. When those
   pull requests merge, the outcomes show how many of these findings authors
   addressed. Run `log` on a line for a few weeks of closed pull requests
   before `on`. If authors addressed a real share of the would-move findings,
