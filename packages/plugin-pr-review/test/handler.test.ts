@@ -34,6 +34,7 @@ import {
   ReviewSettingsSchema,
   localRunner,
   type Finding,
+  type FindingRecord,
   type PullPointers,
   type Review,
   type ReviewRound,
@@ -252,8 +253,11 @@ class FakeStore implements ScopedPluginStore {
     this.docs.set(`${collection}/${key}`, next);
     return next;
   }
-  async list<T>(): Promise<{ items: PluginStoreDoc<T>[]; nextCursor: string | null }> {
-    return { items: [], nextCursor: null };
+  async list<T>(collection: string, opts?: { prefix?: string }): Promise<{ items: PluginStoreDoc<T>[]; nextCursor: string | null }> {
+    const head = `${collection}/${opts?.prefix ?? ""}`;
+    // Test-only store: each key holds whatever the handler put there.
+    const items = [...this.docs.entries()].filter(([k]) => k.startsWith(head)).sort(([a], [b]) => a.localeCompare(b)).map(([, d]) => d as PluginStoreDoc<T>);
+    return { items, nextCursor: null };
   }
   async delete(): Promise<boolean> {
     return false;
@@ -1521,6 +1525,46 @@ describe("review-pull-request handler: learning on close", () => {
     await handler.handle(event("ev2", "github.pull_request.closed"), { ...context(threads, store), memory: memory.port });
     expect(threads.spawned.some((s) => s.req.role === "pr-learner")).toBe(false);
     expect(memory.writes).toEqual([]);
+  });
+
+  it("records each posted finding, then its outcome when the pull request merges, with learning off", async () => {
+    const gh = new FakeGitHub();
+    const store = new FakeStore();
+    const threads = new FakeThreads(scripted(reviewOf([
+      finding({ title: "Null deref in parse" }),
+      finding({ line: 9, severity: "medium", title: "Retry may loop" }),
+      finding({ line: 12, severity: "low", title: "Timeout looks short" }),
+    ]), {}));
+    const handler = createReviewHandler({ fetch: gh.fetch });
+    gh.contentsAt[H1] = { "a.ts": editedA(0) };
+    await handler.handle(event("ev1", "github.pull_request.opened"), { ...context(threads, store, { learn: false }), build: "abc1234" });
+
+    const records = () => [...store.docs.entries()].filter(([k]) => k.startsWith(`findings/${SLUG}/`)).map(([, d]) => d.doc as FindingRecord);
+    expect(records().map((r) => [r.id, r.placement, r.head, r.build, r.outcome])).toEqual([
+      ["f1", "inline", H1, "abc1234", undefined],
+      ["f2", "inline", H1, "abc1234", undefined],
+      ["f3", "inline", H1, "abc1234", undefined],
+    ]);
+    expect(records()[0]).toMatchObject({ title: "Null deref in parse", severity: "high", repo: "acme/site", number: 7 });
+
+    // f1's lines change, a person gives f2 a thumbs-down, and nobody touches f3.
+    const commentOf = (line: number) => gh.comments.find((c) => c.line === line)?.id ?? 0;
+    gh.reactions[commentOf(9)] = [{ content: "-1", user: { login: "alice" } }];
+    gh.head = H2;
+    gh.merged = true;
+    gh.contentsAt[H2] = { "a.ts": editedA(5) };
+    await handler.handle(event("ev2", "github.pull_request.closed"), context(threads, store, { learn: false }));
+    expect(records().map((r) => [r.id, r.outcome?.result, r.outcome?.merged, r.outcome?.closedHead])).toEqual([
+      ["f1", "addressed", true, H2],
+      ["f2", "rejected", true, H2],
+      ["f3", "ignored", true, H2],
+    ]);
+    expect(threads.spawned.some((s) => s.req.role === "pr-learner")).toBe(false);
+
+    // A second close keeps the first outcomes.
+    gh.contentsAt[H2] = { "a.ts": editedA(12) };
+    await handler.handle(event("ev3", "github.pull_request.closed"), context(threads, store, { learn: false }));
+    expect(records().map((r) => r.outcome?.result)).toEqual(["addressed", "rejected", "ignored"]);
   });
 
   it("does not learn when the line turns learning off", async () => {

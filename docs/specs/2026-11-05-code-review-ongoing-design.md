@@ -254,3 +254,28 @@ settings and other reviewers on the same repositories and dates. Each row
 also carries the PR and the comment's commit, so it can become a replay
 case. Address-rate rows start to cover a reviewer version only after its
 pull requests merge.
+
+### Finding records
+
+The handler also measures its own reviews, with no eval run.
+
+1. After each review round, the handler writes a record for each new
+   finding to the `findings` collection, keyed
+   `<owner>/<repo>#<number>/<finding id>`. A record keeps the title, body,
+   severity, category, confidence, path and line, the placement (inline,
+   outside the diff, or a summary-only tier), the commit it was posted on,
+   the rules and lessons in the pack, and the host build. The host passes its
+   build to every plugin handler as `ctx.build`.
+2. On `github.pull_request.closed`, the handler gives each record its
+   outcome with the `review-outcomes` rule: `addressed` when the flagged
+   lines changed by close, `rejected` when a person disagreed (a thumbs-down,
+   a thread a person resolved, a dismissal or a withdrawal), else `ignored`.
+   The outcome also says whether the pull request merged. This runs on every
+   line except a shadow line, with learning on or off, and a second close
+   keeps the first outcome.
+3. A failure to write a record or an outcome is logged and never fails the
+   review or the learning pass.
+
+`GET /api/code-review/outcomes` sums the records of the selected workspace
+per repository and build. Rates count merged pull requests only. The Code
+review page shows each row as "Review outcomes" with the address rate.

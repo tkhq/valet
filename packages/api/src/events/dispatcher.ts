@@ -34,6 +34,7 @@ import { and, arrayContains, asc, eq, inArray, lte, sql, type SQL } from "drizzl
 import type { AppDb } from "../lib/drizzle.js";
 import { eventDeliveries, events, eventSubscriptions, workflowDefinitions, workflowRuns } from "../schema/index.js";
 import { definitionVersionId } from "../workflows/definition-version.js";
+import { valetBuildSha } from "../version.js";
 import { findFollowedThread, repointFollowedThread, upsertFollowedThread } from "./followed-threads.js";
 import { conversationBinding, isConversationalEvent } from "./conversation-binding.js";
 import { hasTeamCoverage } from "./delivery-policy.js";
@@ -1147,6 +1148,7 @@ export class EventDispatcher {
           return host.appToken(sub.orgId, service, scope);
         },
         signal,
+        ...(valetBuildSha() ? { build: valetBuildSha() } : {}),
       },
     );
   }

@@ -96,3 +96,4 @@ export {
 } from "./handler.js";
 export { githubClient, GitHubError, type GitHubClient } from "./github.js";
 export { parseFindings, renderFinding, renderSummary, type PostedFinding } from "./render.js";
+export { classifyOutcome, FINDINGS_COLLECTION, recordKey, type FindingOutcome, type FindingPlacement, type FindingRecord } from "./records.js";

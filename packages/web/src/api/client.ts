@@ -166,6 +166,7 @@ import type {
   ListNotificationsResponse,
   ListNotificationDecisionsResponse,
   ListModelsResponse,
+  ListCodeReviewOutcomesResponse,
   ListCodeReviewsResponse,
   RunCodeReviewRequest,
   RunCodeReviewResponse,
@@ -1502,6 +1503,11 @@ export const api = {
     request<ListCodeReviewsResponse>(
       "GET",
       teamId === undefined ? "/code-review/reviews" : `/code-review/reviews?teamId=${encodeURIComponent(teamId)}`,
+    ),
+  listCodeReviewOutcomes: (teamId?: string) =>
+    request<ListCodeReviewOutcomesResponse>(
+      "GET",
+      teamId === undefined ? "/code-review/outcomes" : `/code-review/outcomes?teamId=${encodeURIComponent(teamId)}`,
     ),
   listPlugins: (teamId?: string) =>
     request<ListPluginsResponse>(

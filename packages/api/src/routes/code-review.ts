@@ -1,9 +1,9 @@
 /** Review chains for the selected personal or team workspace, and manual review runs. */
 import { randomUUID } from "node:crypto";
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import type { Principal } from "@valet/engine";
 import { and, desc, eq, inArray, ne, sql } from "drizzle-orm";
-import { MANUAL_REVIEW_EVENT, POINTERS_COLLECTION, pullTarget, type ManualReviewOptions, type PullPointers, type ReviewRound } from "@valet/plugin-pr-review";
+import { FINDINGS_COLLECTION, MANUAL_REVIEW_EVENT, POINTERS_COLLECTION, pullTarget, type ManualReviewOptions, type PullPointers, type ReviewRound } from "@valet/plugin-pr-review";
 import type { AppEnv } from "../env.js";
 import { catalogForService } from "../events/ingest.js";
 import { authorizedSubscriptionMatchesEvent } from "../events/team-slack-gate.js";
@@ -13,7 +13,7 @@ import { assistantExecutions, assistants, eventDeliveries, events, eventSubscrip
 import { resolveGithubApiUrl } from "../services/github-env.js";
 import { resolveGitHubToken } from "../services/github-tokens.js";
 import { canViewTeam, getTeamInOrg } from "../services/teams.js";
-import type { CodeReviewWire, ListCodeReviewsResponse, RunCodeReviewRequest, RunCodeReviewResponse } from "../wire/types.js";
+import type { CodeReviewOutcomeWire, CodeReviewWire, ListCodeReviewOutcomesResponse, ListCodeReviewsResponse, RunCodeReviewRequest, RunCodeReviewResponse } from "../wire/types.js";
 
 export const PR_REVIEW_PLUGIN = "pr-review";
 
@@ -70,17 +70,25 @@ function untilAborted<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
 
 export const codeReviewRouter = new Hono<AppEnv>();
 
-codeReviewRouter.get("/reviews", async (c) => {
-  const { db, engineStore, engineCredentials, encryptionKey } = c.var.providers;
+/** The workspace a read is for: the `teamId` query (a team the caller can view) or the caller. Undefined when the team is not accessible. */
+async function readOwner(c: Context<AppEnv>): Promise<Principal | undefined> {
+  const { db } = c.var.providers;
   const user = c.var.user;
   const principal = c.var.principal;
   const teamId = c.req.query("teamId") ?? (principal.type === "team" ? principal.id : undefined);
-  if (principal.type === "team" && teamId !== principal.id) return c.json({ error: "Team not found. Select an accessible team." }, 404);
+  if (principal.type === "team" && teamId !== principal.id) return undefined;
   if (teamId) {
     const team = await getTeamInOrg(db, user.orgId, teamId);
-    if (!team || (principal.type !== "team" && !(await canViewTeam(db, teamId, user.id)))) return c.json({ error: "Team not found. Select an accessible team." }, 404);
+    if (!team || (principal.type !== "team" && !(await canViewTeam(db, teamId, user.id)))) return undefined;
   }
-  const owner: Principal = teamId ? { type: "team", id: teamId } : { type: "user", id: user.id };
+  return teamId ? { type: "team", id: teamId } : { type: "user", id: user.id };
+}
+
+codeReviewRouter.get("/reviews", async (c) => {
+  const { db, engineStore, engineCredentials, encryptionKey } = c.var.providers;
+  const user = c.var.user;
+  const owner = await readOwner(c);
+  if (!owner) return c.json({ error: "Team not found. Select an accessible team." }, 404);
 
   const stored = await db.select({
     key: pluginStore.key,
@@ -206,6 +214,41 @@ codeReviewRouter.get("/reviews", async (c) => {
     }];
   });
   return c.json({ reviews } satisfies ListCodeReviewsResponse);
+});
+
+/** Outcome rows returned at most: one per repository and build. */
+const MAX_OUTCOME_ROWS = 100;
+
+/**
+ * `GET /api/code-review/outcomes`: what authors did with posted findings,
+ * per repository and host build, from the plugin's finding records. Rates
+ * count merged pull requests only; `posted` counts every recorded finding.
+ */
+codeReviewRouter.get("/outcomes", async (c) => {
+  const { db } = c.var.providers;
+  const owner = await readOwner(c);
+  if (!owner) return c.json({ error: "Team not found. Select an accessible team." }, 404);
+  const doc = pluginStore.doc;
+  const merged = sql`(${doc}->'outcome'->>'merged')::boolean`;
+  const result = (r: string) => sql<number>`count(*) filter (where ${merged} and ${doc}->'outcome'->>'result' = ${r})::int`;
+  const rows = await db.select({
+    repo: sql<string>`${doc}->>'repo'`,
+    build: sql<string | null>`${doc}->>'build'`,
+    posted: sql<number>`count(*)::int`,
+    merged: sql<number>`count(*) filter (where ${merged})::int`,
+    addressed: result("addressed"),
+    rejected: result("rejected"),
+    ignored: result("ignored"),
+    lastPostedAt: sql<string>`max(${doc}->>'at')`,
+  }).from(pluginStore).where(and(
+    eq(pluginStore.plugin, PR_REVIEW_PLUGIN), eq(pluginStore.scopeType, owner.type), eq(pluginStore.scopeId, owner.id),
+    eq(pluginStore.collection, FINDINGS_COLLECTION),
+  )).groupBy(sql`${doc}->>'repo'`, sql`${doc}->>'build'`).orderBy(desc(sql`max(${doc}->>'at')`)).limit(MAX_OUTCOME_ROWS);
+  const outcomes: CodeReviewOutcomeWire[] = rows.map((r) => ({
+    repo: r.repo, ...(r.build ? { build: r.build } : {}), posted: r.posted, merged: r.merged,
+    addressed: r.addressed, rejected: r.rejected, ignored: r.ignored, lastPostedAt: r.lastPostedAt,
+  }));
+  return c.json({ outcomes } satisfies ListCodeReviewOutcomesResponse);
 });
 
 const PR_URL = /^https:\/\/github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/pull\/([1-9]\d*)\/?(?:[?#].*)?$/;

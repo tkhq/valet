@@ -3843,6 +3843,30 @@ export interface ListCodeReviewsResponse {
   reviews: CodeReviewWire[];
 }
 
+/** What authors did with one repository's posted findings under one host build. */
+export interface CodeReviewOutcomeWire {
+  /** `owner/repo`. */
+  repo: string;
+  /** The host build that posted the findings. Absent for findings from a build that did not know its sha. */
+  build?: string;
+  /** Findings recorded, open or closed. */
+  posted: number;
+  /** Findings whose pull request merged: the base of the rates. */
+  merged: number;
+  /** Of `merged`: flagged lines changed before the merge. */
+  addressed: number;
+  /** Of `merged`: code kept and a person disagreed. */
+  rejected: number;
+  /** Of `merged`: neither. */
+  ignored: number;
+  lastPostedAt: string;
+}
+
+/** `GET /api/code-review/outcomes`. */
+export interface ListCodeReviewOutcomesResponse {
+  outcomes: CodeReviewOutcomeWire[];
+}
+
 /** `POST /api/code-review/runs`: review one pull request now, through the workspace's line for its repository. */
 export interface RunCodeReviewRequest {
   /** `https://github.com/<owner>/<repo>/pull/<number>`. */

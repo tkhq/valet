@@ -1,12 +1,13 @@
 import { useState, type ReactNode } from "react";
 import { createFileRoute } from "@tanstack/react-router";
-import { useCodeReviews } from "~/api/code-review";
+import { useCodeReviewOutcomes, useCodeReviews } from "~/api/code-review";
 import { useEventSubscriptions } from "~/api/events";
 import { usePlugins } from "~/api/integrations";
 import { useRepos } from "~/api/repos";
 import { useTeams } from "~/api/settings";
 import { AddRepositoryDialog } from "~/components/code-review/add-repository-dialog";
 import { OngoingReviews } from "~/components/code-review/ongoing-reviews";
+import { ReviewOutcomes } from "~/components/code-review/review-outcomes";
 import { RepositoryRow } from "~/components/code-review/repository-row";
 import { RepositorySetupRow } from "~/components/code-review/repository-setup-row";
 import { RunReviewDialog } from "~/components/code-review/run-review-dialog";
@@ -45,6 +46,7 @@ export function CodeReviewPage() {
   const reposQ = useRepos();
   const teamsQ = useTeams();
   const reviewsQ = useCodeReviews(scope.teamId);
+  const outcomesQ = useCodeReviewOutcomes(scope.teamId);
   const [adding, setAdding] = useState(false);
   const [running, setRunning] = useState(false);
   const [repositorySearch, setRepositorySearch] = useState("");
@@ -121,6 +123,7 @@ export function CodeReviewPage() {
               </>}
           </WorkSection>
           <OngoingReviews reviews={reviewsQ.data?.reviews} loading={reviewsQ.isLoading} error={reviewsQ.error} />
+          <ReviewOutcomes outcomes={outcomesQ.data?.outcomes} loading={outcomesQ.isLoading} error={outcomesQ.error} />
         </div>
       <RunReviewDialog open={running} onOpenChange={setRunning} teamId={scope.teamId} />
       <AddRepositoryDialog open={adding} onOpenChange={setAdding} lines={lines} handler={handler} teamId={scope.teamId} onAdded={openSettings} onExisting={openSettings} />
