@@ -8,7 +8,9 @@ description = "Valet-owned policy engine boundary"
 publish = false
 
 [dependencies]
+anyhow.workspace = true
 regorus.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_jcs.workspace = true
 thiserror.workspace = true
