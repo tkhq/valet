@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { AppearancePage } from "./settings.appearance";
-import { ThreadDefaultsPage } from "./settings.threads";
+import { AppearancePage } from "~/components/settings/appearance-section";
+import { ThreadDefaultsPage } from "~/components/settings/thread-defaults-section";
 
 /** `/settings/preferences` — how Valet looks and the defaults for new
  * threads, on one page (settings-redesign spec, decision 2). */

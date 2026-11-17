@@ -122,7 +122,8 @@ export function TopNav() {
     { to: "/changelog", label: "Changelog" },
     { to: "/settings/model-comparison", label: "Model comparison" },
   ];
-  const onMore = useRouterState({ select: (st) => more.some(({ to }) => st.location.pathname.startsWith(to)) });
+  // A Settings page lights its own rail item, so More stays unlit there.
+  const onMore = useRouterState({ select: (st) => !st.location.pathname.startsWith("/settings") && more.some(({ to }) => st.location.pathname.startsWith(to)) });
   const destinationLabel = (label: string) => (
     <span className="inline-flex items-center gap-1.5">
       {label}

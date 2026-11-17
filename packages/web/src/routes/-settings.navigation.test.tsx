@@ -1,8 +1,10 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import {
+  Link,
+  Outlet,
   RouterProvider,
   createMemoryHistory,
   createRootRoute,
@@ -77,5 +79,26 @@ describe("settings navigation from Organization Teams", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(router.state.location.pathname).toBe(expectedPath);
     expect(screen.queryByText("Teams page")).toBeNull();
+  });
+});
+
+describe("leaving settings", () => {
+  it.each(["/integrations", "/workflows", "/chat"])("allows primary navigation to %s", async (destination) => {
+    const root = createRootRoute({ component: () => <><Link to={destination}>Leave settings</Link><Outlet /></> });
+    const settings = createRoute({ getParentRoute: () => root, path: "/settings", component: SettingsLayout });
+    const profile = createRoute({ getParentRoute: () => settings, path: "/profile", component: () => <p>Profile page</p> });
+    const target = createRoute({ getParentRoute: () => root, path: destination, component: () => <p>Destination content</p> });
+    const router = createRouter({
+      routeTree: root.addChildren([settings.addChildren([profile]), target]),
+      history: createMemoryHistory({ initialEntries: ["/settings/profile"] }),
+      defaultPendingMinMs: 0,
+    });
+    render(<RouterProvider router={router} />);
+    await screen.findByText("Profile page");
+    fireEvent.click(screen.getByRole("link", { name: "Leave settings" }));
+    await screen.findByText("Destination content");
+    await waitFor(() => expect(router.state.status).toBe("idle"));
+    expect(router.state.location.pathname).toBe(destination);
+    expect(screen.queryByText("Profile page")).toBeNull();
   });
 });

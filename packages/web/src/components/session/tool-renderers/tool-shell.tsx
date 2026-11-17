@@ -112,7 +112,7 @@ export function ToolShell({
 }: ToolShellProps) {
   // The user's default policy is read once at mount. A live preference
   // change never rewrites an already-mounted card — the Chat density
-  // toggle on /settings/appearance takes effect on the next tool card
+  // toggle on /settings/preferences takes effect on the next tool card
   // mount, which matches how V1's `thread-sidebar-collapsed` behaves and
   // keeps this effect free of listener plumbing.
   const [policy] = useState<ToolCardDefault>(() => getToolCardDefault());

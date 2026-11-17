@@ -1,8 +1,8 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { Section } from "~/components/settings/section";
+import { Section, SectionHeading } from "~/components/settings/section";
 import { ApiKeysSection } from "~/components/settings/api-keys-section";
+import { SettingsProxyPage } from "~/components/settings/proxy-section";
 import { PinnedWorkspaceScope } from "~/lib/workspace-scope";
-import { SettingsProxyPage } from "./settings.proxy";
 
 /**
  * `/settings/api-keys` — the personal workspace's API keys and proxy. It
@@ -22,10 +22,13 @@ export function PersonalAccessPage() {
   );
 }
 
-/** Coding-tool setup, then API keys, for whichever scope the caller pinned. */
+/** Coding-tool setup, then API keys, for whichever scope the caller pinned.
+ * The page title matches the rail label. Under the team tab of the same name
+ * it stays for screen readers only. */
 export function AccessSections() {
   return (
     <div className="space-y-10">
+      <SectionHeading title="API keys and proxy" />
       <SettingsProxyPage />
       <ApiKeysPage />
     </div>

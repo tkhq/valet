@@ -2,7 +2,7 @@
 /**
  * Team and personal settings scope (settings-redesign spec, decisions 1-2):
  * a team's settings live on `/settings/teams/$teamId` and pin that team's
- * scope; the personal workspace pages pin personal scope; neither follows the
+ * scope; the personal pages pin personal scope; neither follows the
  * workspace switcher.
  */
 import { fireEvent, render, screen } from "@testing-library/react";
@@ -34,9 +34,6 @@ vi.mock("@tanstack/react-router", () => ({
   Link: ({ to, children, ...rest }: { to: string; children: ReactNode; "aria-current"?: "page" }) => (
     <a href={to} aria-current={rest["aria-current"]}>{children}</a>
   ),
-  Navigate: ({ to, params }: { to: string; params?: Record<string, string> }) => (
-    <div data-testid="redirect">{params?.teamId ? to.replace("$teamId", params.teamId) : to}</div>
-  ),
   Outlet: () => <TabWithDraft />,
 }));
 vi.mock("~/api/settings", () => ({
@@ -54,10 +51,9 @@ vi.mock("~/api/settings", () => ({
   }),
 }));
 vi.mock("~/components/settings/api-keys-section", () => ({ ApiKeysSection: () => <ScopeProbe label="keys" /> }));
-vi.mock("./settings.proxy", () => ({ SettingsProxyPage: () => <ScopeProbe label="proxy" /> }));
+vi.mock("~/components/settings/proxy-section", () => ({ SettingsProxyPage: () => <ScopeProbe label="proxy" /> }));
 
 import { TeamSettingsShell } from "./settings.teams.$teamId";
-import { TeamSettingsRedirect } from "./settings.team";
 import { PersonalAccessPage } from "./settings.api-keys";
 
 beforeEach(() => {
@@ -106,19 +102,7 @@ describe("team settings pages", () => {
   });
 });
 
-describe("/settings/team", () => {
-  it("opens the switcher's team", () => {
-    render(<PinnedWorkspaceScope teamId="t1"><TeamSettingsRedirect /></PinnedWorkspaceScope>);
-    expect(screen.getByTestId("redirect").textContent).toBe("/settings/teams/t1");
-  });
-
-  it("opens Profile from the personal workspace", () => {
-    render(<TeamSettingsRedirect />);
-    expect(screen.getByTestId("redirect").textContent).toBe("/settings/profile");
-  });
-});
-
-describe("personal workspace pages", () => {
+describe("personal pages", () => {
   it("keep personal scope while the switcher holds a team", () => {
     render(<PinnedWorkspaceScope teamId="t1"><PersonalAccessPage /></PinnedWorkspaceScope>);
     expect(screen.getByText("keys: personal")).toBeTruthy();
