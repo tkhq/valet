@@ -60,7 +60,8 @@ on these pages, not the switcher's.
   - Models and usage: Models, Proxy, Usage (2026-11-17)
   - Apps and plugins: Plugins, MCP servers, GitHub, Slack, Linear,
     1Password, Library
-  - Security and audit: Policies, Sandbox settings, Action log
+  - Security and audit: Policies, Secrets, Sandbox settings, Action log,
+    Audit log (Secrets added 2026-11-17)
 
   A plain member still sees only Teams and 1Password, as two rail items, and
   no tab bar.
@@ -109,6 +110,11 @@ scope holds only its own items.
   (`/settings/organization/usage`). The organization route guard admits
   only an org admin there. Both views keep the period controls and the CSV
   download, which names its scope. The team Usage tab does not change.
+- **Secrets.** Each scope keeps its secrets on its own page, and the scope
+  tab bar is gone: personal on `/settings/secrets`, a team's on its
+  Secrets tab, and the organization's on Security and audit · Secrets.
+  The three share one list and form (`SecretsSection`) with a scope
+  target. The API decides who may change each scope (`canWrite`).
 
 ### 3. Visual language
 

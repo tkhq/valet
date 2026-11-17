@@ -26,17 +26,11 @@ vi.mock("~/api/secrets", () => ({
 let orgRole: "admin" | "member" = "member";
 vi.mock("~/api/settings", () => ({
   useMe: () => ({ data: { orgRole } }),
-  useTeams: () => ({
-    data: {
-      teams: [
-        { id: "t1", name: "Platform", callerRole: "member" },
-        { id: "t2", name: "Not mine", callerRole: null },
-      ],
-    },
-  }),
 }));
 
 import { SecretsPage } from "./settings.secrets";
+import { OrganizationSecretsPage } from "./settings.organization.secrets";
+import { TeamSecretsTab } from "./settings.teams.$teamId.secrets";
 
 describe("SecretsPage", () => {
   beforeEach(() => {
@@ -94,15 +88,34 @@ describe("SecretsPage", () => {
     expect(saveMutate).toHaveBeenCalledWith({ name: "K", value: "v2", replace: true }, expect.anything());
   });
 
-  it("offers the caller's teams and the organization, and hides the form where the caller cannot write", () => {
-    data = { enabled: true, provider: "Turnkey", canWrite: false, secrets: [] };
+  it("keeps the personal page personal, with no scope tabs", () => {
+    data = { enabled: true, provider: "Turnkey", canWrite: true, secrets: [] };
     render(<SecretsPage />);
-    expect(screen.getByRole("tab", { name: "Platform" })).toBeTruthy();
-    expect(screen.queryByRole("tab", { name: "Not mine" })).toBeNull();
-    fireEvent.click(screen.getByRole("tab", { name: "Organization" }));
-    expect(targets.at(-1)).toEqual({ scope: "company" });
-    fireEvent.click(screen.getByRole("tab", { name: "Platform" }));
+    expect(targets.at(-1)).toEqual({ scope: "personal" });
+    expect(screen.queryByRole("tablist")).toBeNull();
+    expect(screen.getByText("Only sessions you own personally can use these.")).toBeTruthy();
+  });
+
+  it("shows a team's secrets on its tab, read-only when the API refuses writes", () => {
+    data = { enabled: true, provider: "Turnkey", canWrite: false, secrets: [{ name: "K", reference: "secret://team/t1/K", createdAt: 0 }] };
+    render(<TeamSecretsTab teamId="t1" />);
     expect(targets.at(-1)).toEqual({ scope: "team", teamId: "t1" });
+    expect(screen.getByText(/Team members can change them/)).toBeTruthy();
+    expect(screen.getByText("K")).toBeTruthy();
     expect(screen.queryByLabelText("Secret value")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Delete" })).toBeNull();
+  });
+
+  it("lets a team member save on the team tab", () => {
+    data = { enabled: true, provider: "Turnkey", canWrite: true, secrets: [] };
+    render(<TeamSecretsTab teamId="t1" />);
+    expect(screen.getByLabelText("Secret value")).toBeTruthy();
+  });
+
+  it("shows the organization's secrets on the organization page", () => {
+    data = { enabled: true, provider: "Turnkey", canWrite: true, secrets: [] };
+    render(<OrganizationSecretsPage />);
+    expect(targets.at(-1)).toEqual({ scope: "company" });
+    expect(screen.getByText(/Organization admins can change them/)).toBeTruthy();
   });
 });

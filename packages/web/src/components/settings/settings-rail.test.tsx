@@ -121,6 +121,12 @@ describe("SettingsRail", () => {
     expect(section?.routes.at(-1)?.to).toBe("/settings/organization/usage");
   });
 
+  it("lists the organization's Secrets and Sandbox settings under Security and audit", () => {
+    const section = ORG_SECTIONS.find((s) => s.label === "Security and audit");
+    expect(section?.routes.map((r) => r.label)).toEqual(["Policies", "Secrets", "Sandbox settings", "Action log", "Audit log"]);
+    expect(orgSectionFor("/settings/organization/secrets")?.label).toBe("Security and audit");
+  });
+
   it("marks a team active on any of its tabs", () => {
     pathname = "/settings/teams/t1/policies";
     render(<SettingsRail />);

@@ -92,11 +92,11 @@ describe("team settings pages", () => {
     expect(screen.getByRole("link", { name: "Access" }).getAttribute("aria-current")).toBe("page");
   });
 
-  it("holds the team's Integrations and Usage beside its other settings", () => {
+  it("lists the team's tabs in order: General, Integrations, Secrets, Access, Policies, Usage", () => {
     pathname = "/settings/teams/t1/integrations";
     render(<TeamSettingsShell teamId="t1" />);
     expect(screen.getAllByRole("link").map((link) => link.textContent).filter((label) => label !== "Open team threads"))
-      .toEqual(["General", "Integrations", "Usage", "Access", "Policies"]);
+      .toEqual(["General", "Integrations", "Secrets", "Access", "Policies", "Usage"]);
     expect(screen.getByRole("link", { name: "Integrations" }).getAttribute("aria-current")).toBe("page");
     expect(screen.getByRole("link", { name: "General" }).getAttribute("aria-current")).toBeNull();
   });

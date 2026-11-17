@@ -329,6 +329,7 @@ Rules that apply to every provider:
 - Saves are sealed in the browser. `POST /api/secrets/import/begin` returns the provider's envelope, the web sealer for its `kind` encrypts the value (`web/src/lib/secret-seal/`), and `import/finish` receives only the sealed value. No route accepts a plaintext value.
 - A replace imports the new value as `<name>@r<time>`, then deletes the old versions, because providers keep names unique and cannot edit a value in place. A failed import keeps the old value. Reads and lists use the newest version.
 - Changing the provider gives every user a new, empty personal space. Valet does not move secrets between providers.
+- Settings shows each scope where that scope lives (2026-11-17): personal secrets on `/settings/secrets`, a team's on its Secrets tab (`/settings/teams/$teamId/secrets`), and company secrets on Organization · Security and audit · Secrets (`/settings/organization/secrets`, admins only). Every page lists the scope's names and shows the save form only when `GET /api/secrets` returns `canWrite`: always for personal, for any member of the team, and for an org admin on company secrets. An org admin who is not on a team reads its secrets but cannot change them.
 
 ### Getting a credential without the value entering a thread
 
