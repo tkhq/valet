@@ -14,6 +14,7 @@ import type { ActionPlugin, PluginAction, PluginActionContext, PluginActionResul
 import type { AppDb } from "../lib/drizzle.js";
 import { externalCalls, orgMembers, teamMembers, users } from "../schema/index.js";
 import { visibleThreadIds, type AccessDeps } from "../services/thread-access.js";
+import { isTeamMember } from "../services/teams.js";
 import { recentErrorReports } from "@valet/engine";
 import { requestTimingSummary, serverErrorSummary } from "../observability/request-timings.js";
 import { processHealthSummary } from "../observability/process-health.js";
@@ -229,16 +230,20 @@ export function diagnosticsActionPlugin(db: AppDb, deps: () => DiagnosticsDeps, 
       "Find the threads where people got stuck. Returns the outcome count for every label in the period, the threads with the requested outcomes " +
       "grouped by person and main tool intent, and the threads themselves newest first: outcome, link, person, tool calls, tool errors and error codes. " +
       "Outcomes: completed, partial, failed, blocked_on_human, abandoned, unclear. Only threads the outcome classifier labeled are counted. " +
-      "An organization admin in a private conversation reads the whole organization; a team workflow reads its team's threads. " +
+      "An organization admin in a private conversation reads the whole organization; a team workflow, or a member in the team's workspace, reads that team's threads. " +
       "A thread title and a short excerpt of the first request come only from threads the caller can open.",
     riskLevel: "low",
     execute: async ({ hours, outcomes, limit }, ctx) => {
       if (ctx.externalSender) return EXTERNAL_SENDER;
       const caller = await member(ctx);
       if (!caller || !ctx.orgId) return { success: false, error: "You are not a member of this organization. Ask an organization admin to add you." };
-      const teamRun = caller.teamRun && ctx.owner?.type === "team" ? ctx.owner.id : undefined;
+      const teamOwner = ctx.owner?.type === "team" ? ctx.owner.id : undefined;
+      // A team's own run, or a member in the team's workspace, reads that
+      // team's threads with the team audience's view. The transcript is
+      // shared with the team, so a member's private threads add no text.
+      const teamRun = teamOwner && (caller.teamRun || await isTeamMember(db, teamOwner, caller.userId)) ? teamOwner : undefined;
       if (!teamRun && caller.role !== "admin") {
-        return { success: false, error: "Thread outcomes are for organization admins. Ask an admin to run this check, or run it from a team workflow to read that team's threads." };
+        return { success: false, error: "Thread outcomes are for organization admins. Ask an admin to run this check, or ask in your team's workspace to read that team's threads." };
       }
       if (!teamRun && transcriptIsShared(ctx)) {
         return { success: false, error: "Thread outcomes list other people's threads, and other people read this conversation. Ask in a private conversation." };
