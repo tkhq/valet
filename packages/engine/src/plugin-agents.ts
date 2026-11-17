@@ -177,6 +177,12 @@ export interface PluginEventContext {
    * is shutting down. `ctx.threads` waits end with an `AbortError` then.
    */
   signal: AbortSignal;
+  /**
+   * The build of the host running this delivery (a git sha), when the
+   * deployment knows it. A handler stamps it on what it records, so outcomes
+   * can be compared across versions.
+   */
+  build?: string;
 }
 
 /** An event delivered to a plugin handler, with its stored id. */

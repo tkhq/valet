@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
-import type { PullPointers, PullRequestReviewState } from "@valet/plugin-pr-review";
+import type { FindingOutcome, FindingRecord, PullPointers, PullRequestReviewState } from "@valet/plugin-pr-review";
 import githubPlugin from "@valet/plugin-github/plugin";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { ensureAssistantExecution } from "../assistants/service.js";
@@ -7,7 +7,7 @@ import { pluginThreadKey } from "../plugins/plugin-thread-key.js";
 import { pluginStore } from "../services/plugin-store.js";
 import { eventDeliveries, events, eventSubscriptions, teams } from "../schema/index.js";
 import { startGithubFixture, type GithubFixture, type GithubFixtureHandlers } from "../test-helpers/github-fixture.js";
-import type { ListCodeReviewsResponse } from "../wire/types.js";
+import type { ListCodeReviewOutcomesResponse, ListCodeReviewsResponse } from "../wire/types.js";
 
 let api: TestApi | undefined;
 let github: GithubFixture | undefined;
@@ -198,6 +198,39 @@ it("refuses a team the caller cannot see", async () => {
   api = await bootTestApi();
   const { status } = await reviews("?teamId=team-nope");
   expect(status).toBe(404);
+});
+
+it("reports finding outcomes per repository and build, counting merged pull requests only, for the selected workspace", async () => {
+  api = await bootTestApi();
+  const now = Date.now();
+  await api.providers.db.insert(teams).values({ id: "team-1", orgId: "local-org", name: "Team", createdAt: now });
+  const mine = pluginStore(api.providers.db, "pr-review").user(owner.id);
+  const record = (id: string, build: string | undefined, outcome?: { result: FindingOutcome; merged: boolean }): FindingRecord => ({
+    repo: "acme/site", number: 7, id, title: id, body: "b", severity: "medium", category: "bug", path: "a.ts", line: 1, placement: "inline",
+    head: "1".repeat(40), at: new Date(now).toISOString(), rules: [], ...(build ? { build } : {}),
+    ...(outcome ? { outcome: { ...outcome, closedHead: "2".repeat(40), at: new Date(now).toISOString() } } : {}),
+  });
+  await mine.put("findings", "acme/site#7/f1", record("f1", "aaa1111", { result: "addressed", merged: true }));
+  await mine.put("findings", "acme/site#7/f2", record("f2", "aaa1111", { result: "ignored", merged: true }));
+  await mine.put("findings", "acme/site#7/f3", record("f3", "aaa1111", { result: "addressed", merged: false }));
+  await mine.put("findings", "acme/site#7/f4", record("f4", "aaa1111"));
+  await mine.put("findings", "acme/site#7/f5", record("f5", "bbb2222", { result: "rejected", merged: true }));
+  await mine.put("findings", "acme/site#7/s1", { ...record("s1", "aaa1111", { result: "ignored", merged: true }), placement: "shadow", shadow: true });
+  await pluginStore(api.providers.db, "pr-review").team("team-1").put("findings", "acme/site#9/f1", record("f1", "ccc3333", { result: "addressed", merged: true }));
+
+  const res = await fetch(`${api.baseUrl}/api/code-review/outcomes`);
+  expect(res.status).toBe(200);
+  const { outcomes } = await res.json() as ListCodeReviewOutcomesResponse;
+  const live = outcomes.filter(o => !o.shadow);
+  const byBuild = new Map(live.map(o => [o.build, o]));
+  expect(byBuild.get("aaa1111")).toMatchObject({ repo: "acme/site", posted: 4, merged: 2, addressed: 1, rejected: 0, ignored: 1 });
+  expect(outcomes.filter(o => o.shadow)).toMatchObject([{ build: "aaa1111", shadow: true, posted: 1, merged: 1, ignored: 1 }]);
+  expect(byBuild.get("bbb2222")).toMatchObject({ posted: 1, merged: 1, rejected: 1 });
+  expect(byBuild.has("ccc3333")).toBe(false);
+
+  const team = await (await fetch(`${api.baseUrl}/api/code-review/outcomes?teamId=team-1`)).json() as ListCodeReviewOutcomesResponse;
+  expect(team.outcomes.map(o => o.build)).toEqual(["ccc3333"]);
+  expect((await fetch(`${api.baseUrl}/api/code-review/outcomes?teamId=team-nope`)).status).toBe(404);
 });
 
 async function run(body: Record<string, unknown>): Promise<{ status: number; body: Record<string, unknown> }> {

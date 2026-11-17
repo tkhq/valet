@@ -34,6 +34,7 @@ import {
   ReviewSettingsSchema,
   localRunner,
   type Finding,
+  type FindingRecord,
   type PullPointers,
   type Review,
   type ReviewRound,
@@ -252,11 +253,14 @@ class FakeStore implements ScopedPluginStore {
     this.docs.set(`${collection}/${key}`, next);
     return next;
   }
-  async list<T>(): Promise<{ items: PluginStoreDoc<T>[]; nextCursor: string | null }> {
-    return { items: [], nextCursor: null };
+  async list<T>(collection: string, opts?: { prefix?: string }): Promise<{ items: PluginStoreDoc<T>[]; nextCursor: string | null }> {
+    const head = `${collection}/${opts?.prefix ?? ""}`;
+    // Test-only store: each key holds whatever the handler put there.
+    const items = [...this.docs.entries()].filter(([k]) => k.startsWith(head)).sort(([a], [b]) => a.localeCompare(b)).map(([, d]) => d as PluginStoreDoc<T>);
+    return { items, nextCursor: null };
   }
-  async delete(): Promise<boolean> {
-    return false;
+  async delete(collection: string, key: string): Promise<boolean> {
+    return this.docs.delete(`${collection}/${key}`);
   }
   pointers(): PullPointers | undefined {
     return this.docs.get(`pulls/${SLUG}`)?.doc as PullPointers | undefined;
@@ -629,6 +633,9 @@ describe("review-pull-request handler", () => {
     }));
 
     await expect(handler.handle(event("ev2"), context(second, store))).rejects.toThrow("Temporary");
+    // The new finding posted before the failed edit already has its record.
+    const titles = [...store.docs.entries()].filter(([k]) => k.startsWith(`findings/${SLUG}/`)).map(([, d]) => (d.doc as FindingRecord).title);
+    expect(titles).toContain("Leaked handle in close");
     expect(store.pointers()?.lastReviewedHead).toBe(H1);
     expect(store.pointers()?.rounds).toHaveLength(1);
     expect(store.pointers()?.findings[0].status).toBe("open");
@@ -1130,7 +1137,7 @@ describe("review-pull-request handler", () => {
     }
   });
 
-  it("records a shadow review in the plugin thread and writes nothing to GitHub or the store", async () => {
+  it("records a shadow review in the plugin thread and writes nothing to GitHub and no pointers", async () => {
     const gh = new FakeGitHub();
     const store = new FakeStore();
     const threads = new FakeThreads(scripted(reviewOf([finding({}), finding({ line: 99, title: "Past the end" })]), {}));
@@ -1188,6 +1195,30 @@ describe("review-pull-request handler", () => {
     expect(threads.records[0].body).toContain("Null deref in parse");
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("concurrency reviewer skipped"), expect.stringContaining("child_cap"));
     warn.mockRestore();
+  });
+
+  it("keeps a shadow line's latest findings as records and gives them outcomes on close", async () => {
+    const gh = new FakeGitHub();
+    const store = new FakeStore();
+    const shadowRecords = () => [...store.docs.entries()].filter(([k]) => k.startsWith(`findings/${SLUG}/`)).map(([, d]) => d.doc as FindingRecord);
+    gh.contentsAt[H1] = { "a.ts": editedA(0) };
+    const first = new FakeThreads(scripted(reviewOf([finding({}), finding({ line: 9, title: "Retry may loop" })]), {}));
+    await createReviewHandler({ fetch: gh.fetch }).handle(event("ev1"), { ...context(first, store, { shadow: true, contextBudget: 0 }), build: "abc1234" });
+    expect(shadowRecords().map((r) => [r.id, r.placement, r.shadow, r.build])).toEqual([["s1", "shadow", true, "abc1234"], ["s2", "shadow", true, "abc1234"]]);
+
+    // The next push replaces the set with the latest shadow review.
+    gh.head = H2;
+    gh.contentsAt[H2] = { "a.ts": editedA(0) };
+    const second = new FakeThreads(scripted(reviewOf([finding({ line: 5, title: "Null deref in parse" })]), {}));
+    await createReviewHandler({ fetch: gh.fetch }).handle(event("ev2"), context(second, store, { shadow: true, contextBudget: 0 }));
+    expect(shadowRecords().map((r) => [r.id, r.title, r.head])).toEqual([["s1", "Null deref in parse", H2]]);
+
+    gh.head = "3".repeat(40);
+    gh.merged = true;
+    gh.contentsAt["3".repeat(40)] = { "a.ts": editedA(5) };
+    await createReviewHandler({ fetch: gh.fetch }).handle(event("ev3", "github.pull_request.closed"), context(second, store, { shadow: true, contextBudget: 0 }));
+    expect(shadowRecords().map((r) => [r.id, r.outcome?.result, r.outcome?.merged])).toEqual([["s1", "addressed", true]]);
+    expect(second.spawned.some((c) => c.req.role === "pr-learner")).toBe(false);
   });
 
   it("shadow-reviews a merged pull request at the given commit", async () => {
@@ -1521,6 +1552,46 @@ describe("review-pull-request handler: learning on close", () => {
     await handler.handle(event("ev2", "github.pull_request.closed"), { ...context(threads, store), memory: memory.port });
     expect(threads.spawned.some((s) => s.req.role === "pr-learner")).toBe(false);
     expect(memory.writes).toEqual([]);
+  });
+
+  it("records each posted finding, then its outcome when the pull request merges, with learning off", async () => {
+    const gh = new FakeGitHub();
+    const store = new FakeStore();
+    const threads = new FakeThreads(scripted(reviewOf([
+      finding({ title: "Null deref in parse" }),
+      finding({ line: 9, severity: "medium", title: "Retry may loop" }),
+      finding({ line: 12, severity: "low", title: "Timeout looks short" }),
+    ]), {}));
+    const handler = createReviewHandler({ fetch: gh.fetch });
+    gh.contentsAt[H1] = { "a.ts": editedA(0) };
+    await handler.handle(event("ev1", "github.pull_request.opened"), { ...context(threads, store, { learn: false }), build: "abc1234" });
+
+    const records = () => [...store.docs.entries()].filter(([k]) => k.startsWith(`findings/${SLUG}/`)).map(([, d]) => d.doc as FindingRecord);
+    expect(records().map((r) => [r.id, r.placement, r.head, r.build, r.outcome])).toEqual([
+      ["f1", "inline", H1, "abc1234", undefined],
+      ["f2", "inline", H1, "abc1234", undefined],
+      ["f3", "inline", H1, "abc1234", undefined],
+    ]);
+    expect(records()[0]).toMatchObject({ title: "Null deref in parse", severity: "high", repo: "acme/site", number: 7 });
+
+    // f1's lines change, a person gives f2 a thumbs-down, and nobody touches f3.
+    const commentOf = (line: number) => gh.comments.find((c) => c.line === line)?.id ?? 0;
+    gh.reactions[commentOf(9)] = [{ content: "-1", user: { login: "alice" } }];
+    gh.head = H2;
+    gh.merged = true;
+    gh.contentsAt[H2] = { "a.ts": editedA(5) };
+    await handler.handle(event("ev2", "github.pull_request.closed"), context(threads, store, { learn: false }));
+    expect(records().map((r) => [r.id, r.outcome?.result, r.outcome?.merged, r.outcome?.closedHead])).toEqual([
+      ["f1", "addressed", true, H2],
+      ["f2", "rejected", true, H2],
+      ["f3", "ignored", true, H2],
+    ]);
+    expect(threads.spawned.some((s) => s.req.role === "pr-learner")).toBe(false);
+
+    // A second close keeps the first outcomes.
+    gh.contentsAt[H2] = { "a.ts": editedA(12) };
+    await handler.handle(event("ev3", "github.pull_request.closed"), context(threads, store, { learn: false }));
+    expect(records().map((r) => r.outcome?.result)).toEqual(["addressed", "rejected", "ignored"]);
   });
 
   it("does not learn when the line turns learning off", async () => {

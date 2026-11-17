@@ -56,6 +56,11 @@ let subscriptionsError: Error | null = null;
 const create = vi.fn((_body: unknown, opts?: { onSuccess?: (resp: { id: string }) => void }) => opts?.onSuccess?.({ id: "l-new" }));
 const patch = vi.fn();
 const reviewsQuery = vi.fn((_teamId?: string) => ({ data: { reviews }, isLoading: false, error: null }));
+const outcomesQuery = vi.fn((_teamId?: string) => ({
+  data: { outcomes: [{ repo: "acme/site", build: "abc1234def", posted: 5, merged: 4, addressed: 2, rejected: 1, ignored: 1, lastPostedAt: "2026-11-16T12:00:00.000Z" }] },
+  isLoading: false,
+  error: null,
+}));
 
 vi.mock("~/api/integrations", () => ({
   usePlugins: () => ({ data: { plugins }, isLoading: false, error: null }),
@@ -68,6 +73,7 @@ vi.mock("~/api/events", () => ({
 }));
 vi.mock("~/api/code-review", () => ({
   useCodeReviews: (teamId?: string) => reviewsQuery(teamId),
+  useCodeReviewOutcomes: (teamId?: string) => outcomesQuery(teamId),
 }));
 const initialReposData: GetReposResponse = {
   connected: true,
@@ -109,6 +115,16 @@ beforeEach(() => {
 });
 
 describe("CodeReviewPage", () => {
+  it("shows the address rate per repository and build for this workspace", () => {
+    renderPage();
+    const section = screen.getByRole("region", { name: "Review outcomes" });
+    expect(within(section).getByText("acme/site")).toBeTruthy();
+    expect(within(section).getByText("50% addressed")).toBeTruthy();
+    expect(within(section).getByText("Build abc1234de")).toBeTruthy();
+    expect(within(section).getByText("5 posted, 4 on merged pull requests: 2 addressed, 1 rejected, 1 ignored")).toBeTruthy();
+    expect(outcomesQuery).toHaveBeenCalled();
+  });
+
   it("lists accessible review configurations and saves this workspace's settings", () => {
     subscriptions = [
       reviewLine("l-site", "acme/site", { target: { kind: "plugin", plugin: "pr-review", handler: "review-pull-request", config: { minSeverity: "high" } } }),

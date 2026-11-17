@@ -4,11 +4,12 @@
  * reviews on are event subscriptions (`~/api/events`).
  */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import type { ListCodeReviewsResponse, RunCodeReviewRequest, RunCodeReviewResponse } from "@valet/api/wire";
+import type { ListCodeReviewOutcomesResponse, ListCodeReviewsResponse, RunCodeReviewRequest, RunCodeReviewResponse } from "@valet/api/wire";
 import { api } from "./client";
 
 export const qkCodeReview = {
   reviews: (teamId?: string) => ["code-review", "reviews", teamId ?? ""] as const,
+  outcomes: (teamId?: string) => ["code-review", "outcomes", teamId ?? ""] as const,
 };
 
 /** A review runs for minutes; a 30-second poll shows a new one soon enough. */
@@ -19,6 +20,14 @@ export function useCodeReviews(teamId?: string) {
     queryKey: qkCodeReview.reviews(teamId),
     queryFn: () => api.listCodeReviews(teamId),
     refetchInterval: REVIEWS_POLL_MS,
+  });
+}
+
+/** What authors did with posted findings, per repository and build (`GET /api/code-review/outcomes`). Outcomes land when pull requests close. */
+export function useCodeReviewOutcomes(teamId?: string) {
+  return useQuery<ListCodeReviewOutcomesResponse>({
+    queryKey: qkCodeReview.outcomes(teamId),
+    queryFn: () => api.listCodeReviewOutcomes(teamId),
   });
 }
 

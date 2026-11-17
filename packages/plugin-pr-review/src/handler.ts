@@ -31,6 +31,7 @@ import {
   type PostedFinding,
 } from "./render.js";
 import { ReviewSchema, type Finding, type Review } from "./types.js";
+import { classifyOutcome, FINDINGS_COLLECTION, newRecords, pullRecords, replaceShadowRecords, writeRecords } from "./records.js";
 import { anchorProblems, evidenceProblems, lineCount } from "./review.js";
 import { buildVerifierPrompt, claimDiff, decideFinding, refutationCitesRules, refutationGrounded, VerdictSchema, type Verdict } from "./verify.js";
 import { packRules } from "./context/pack.js";
@@ -247,10 +248,12 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
   const head = pr.head.sha;
   const manual = manualReviewOptions(event);
   if (event.key === "github.pull_request.closed") {
-    if (!settings.learn || settings.shadow) return log(slug, "skipped: learning is off for this line");
+    await recordOutcomes(ctx, gh, pr, { slug, repoName });
+    if (settings.shadow) return log(slug, "skipped learning: a shadow line does not learn");
+    if (!settings.learn) return log(slug, "skipped learning: learning is off for this line");
     return learnFromPullRequest(event, ctx, gh, pr, settings, { slug, repoName, number: target.number });
   }
-  if (settings.shadow || manual?.shadow) return shadowReview(event, ctx, gh, pr, settings, { slug, repoName, commit: manual?.commit });
+  if (settings.shadow || manual?.shadow) return shadowReview(event, ctx, gh, pr, settings, { slug, repoName, number: target.number, commit: manual?.commit });
   if (pr.state !== "open") return log(slug, `skipped: the pull request is ${pr.state}`);
   if (pr.draft && !settings.reviewDrafts) return log(slug, "skipped: draft pull request");
 
@@ -526,6 +529,23 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
   // first, so a retry neither posts duplicates nor mistakes our resolution for
   // a person's dismissal. Pending bodies exist only until the batch completes.
   await save(next);
+  // 9. Record each new finding, so its outcome can be measured when the PR closes.
+  // Record before the edits to earlier comments: a throw there must not lose
+  // records of findings already posted, and a retry skips this reviewed head.
+  const records = newRecords({
+    repo: repoName,
+    number: target.number,
+    slug,
+    head,
+    ...(ctx.build ? { build: ctx.build } : {}),
+    rules: [...rules].sort(),
+    posted: [
+      ...inline.map((f) => ({ finding: f, placement: "inline" as const, ...(commentIds.get(f.id) !== undefined ? { commentId: commentIds.get(f.id) } : {}) })),
+      ...outside.map((f) => ({ finding: f, placement: "outside" as const })),
+      ...summaryOnly.map((f) => ({ finding: f, placement: f.unsupported ? ("unsupported" as const) : ("unconfirmed" as const) })),
+    ],
+  });
+  await writeRecords(ctx.store, slug, records).catch((err: unknown) => console.warn(`pr-review ${slug}: could not record ${records.length} finding(s) for outcome measurement`, err));
   await finishPendingUpdates(gh, next, save, ctx.signal);
   log(slug, `reviewed ${head.slice(0, 7)} (${from ? "follow-up" : "full"}): ${posted.length} new, ${fixed.filter((r) => !r.withdrawn).length} fixed, ${fixed.filter((r) => r.withdrawn).length} withdrawn, ${reopened.length} reopened, ${stillOpen.length} still open`);
 }
@@ -909,7 +929,7 @@ async function shadowReview(
   gh: GitHubClient,
   pr: PullRequest,
   settings: ReviewSettings,
-  where: { slug: string; repoName: string; commit: string | undefined },
+  where: { slug: string; repoName: string; number: number; commit: string | undefined },
 ): Promise<void> {
   const { slug, repoName } = where;
   const checkout = where.commit ?? (pr.merged && pr.merge_commit_sha ? pr.merge_commit_sha : pr.head.sha);
@@ -944,6 +964,14 @@ async function shadowReview(
     renderShadowReview({ slug, commit: checkout, summary: draft.summary, confidence: draft.confidence, findings: shown, hidden: draft.findings.length - shown.length, rules: [...rules].sort() }),
     { dispatchId: dispatch("shadow-record") },
   );
+  // A shadow line on an open pull request records what it would have posted, so its outcomes compare with the live line's.
+  if (pr.state === "open" && where.commit === undefined) {
+    const records = newRecords({
+      repo: repoName, number: where.number, slug, head: checkout, ...(ctx.build ? { build: ctx.build } : {}), rules: [...rules].sort(),
+      posted: shown.map((f, i) => ({ finding: { ...f, id: `s${i + 1}` }, placement: "shadow" as const })),
+    });
+    await replaceShadowRecords(ctx.store, slug, records).catch((err: unknown) => console.warn(`pr-review ${slug}: could not record ${records.length} shadow finding(s)`, err));
+  }
   log(slug, `shadow review of ${checkout.slice(0, 7)} recorded in the plugin thread: ${shown.length} finding(s)`);
 }
 
@@ -1128,6 +1156,41 @@ async function learnFromPullRequest(
   await noteBestEffort(ctx, thread, renderLearnOutcome(slug, feedback.length, outcome), `${event.id}:learned`);
   await markLearned();
   log(slug, `learned from ${feedback.length} feedback item(s): ${outcome.written.length} written, ${outcome.skipped.length} skipped`);
+}
+
+/**
+ * On close, give each recorded finding of the pull request its outcome
+ * (`records.ts`). A person's dismissal counts from the pointers and from
+ * threads resolved since the last review. A failure is logged, never thrown:
+ * outcome records must not block the learning pass.
+ */
+async function recordOutcomes(ctx: PluginEventContext, gh: GitHubClient, pr: PullRequest, where: { slug: string; repoName: string }): Promise<void> {
+  const { slug, repoName } = where;
+  try {
+    const open = (await pullRecords(ctx.store, slug)).filter((r) => r.record.outcome === undefined);
+    if (open.length === 0) return;
+    const pointers = new Map(((await ctx.store.get<PullPointers>(POINTERS_COLLECTION, slug))?.doc.findings ?? []).map((p) => [p.id, p]));
+    const threads = new Map((await gh.reviewThreads()).flatMap((t) => (t.commentId !== null ? [[t.commentId, t] as const] : [])));
+    const closedHead = pr.head.sha;
+    const at = new Date().toISOString();
+    const counts: Record<string, number> = { addressed: 0, rejected: 0, ignored: 0 };
+    for (const { key, record, revision } of open) {
+      ctx.signal.throwIfAborted();
+      const changed = record.head !== closedHead && (await flaggedCodeChanged(gh, record, record.head, closedHead, "", repoName));
+      const p = pointers.get(record.id);
+      const thread = record.commentId !== undefined ? threads.get(record.commentId) : undefined;
+      const resolvedByPerson = thread?.isResolved === true && thread.resolvedBy !== undefined && thread.resolvedBy !== thread.author;
+      const thumbsDown = !changed && record.commentId !== undefined && (await gh.commentReactions(record.commentId)).some((r) => r.content === "-1");
+      const disagreed = p?.withdrawnAt !== undefined || p?.status === "dismissed" || resolvedByPerson || thumbsDown;
+      const result = classifyOutcome({ changed, disagreed });
+      counts[result]++;
+      await ctx.store.put(FINDINGS_COLLECTION, key, { ...record, outcome: { result, merged: pr.merged === true, closedHead, at } }, { ifRevision: revision });
+    }
+    log(slug, `recorded outcomes at ${closedHead.slice(0, 7)} (${pr.merged ? "merged" : "closed"}): ${counts.addressed} addressed, ${counts.rejected} rejected, ${counts.ignored} ignored`);
+  } catch (err) {
+    if (ctx.signal.aborted) throw err;
+    console.warn(`pr-review ${slug}: could not record finding outcomes`, err);
+  }
 }
 
 /** The learning pass as a note in the plugin thread. */
