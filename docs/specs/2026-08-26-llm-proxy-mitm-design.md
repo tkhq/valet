@@ -258,7 +258,7 @@ New route in `packages/web/src/routes/` (proposed `usage.tsx`, or a tab under se
 
 ### 9. Onboarding panel
 
-The API keys and proxy page leads with **Connect your coding tool**, before the general API key list. A selector shows one tool's instructions at a time: Claude Code, Codex, OpenCode, Cursor, or Other tools. Agent access through MCP is a separate function from sending model requests through this proxy.
+The Access page (`/settings/access`, and a team's Access tab) holds the panel under **Set up a coding tool**, before the general API key list. Its heading is **Send model requests through Valet**. A selector shows one tool's instructions at a time: Claude Code, Codex, OpenCode, Cursor, or Other tools. On the personal page the MCP prompt, **Connect Valet tools**, sits above it in the same section. MCP and CLI sign-in are a separate function from sending model requests through this proxy (2026-11-17).
 
 For personal access in centralized mode, the panel first shows the instance-local CLI installer and browser-approved setup:
 
@@ -413,11 +413,11 @@ Frontend regression tests cover successful creation in both scopes, actual-key s
 
 A report said that a regular user cannot create a proxy token and that no organization setting enables it. The gate is the workspace, not an organization setting. In a personal workspace every signed-in user creates a proxy key. In a team workspace only a team admin or an organization admin creates the shared key, because the key bills and authorizes as the team. No organization toggle changes this rule, and none is added.
 
-The blocked state on a team's API keys and proxy tab (`/settings/teams/$teamId/access`) states three things:
+The blocked state on a team's Access tab (`/settings/teams/$teamId/access`) states three things:
 
 1. Only a team admin or an organization admin can create a shared key for this team.
 2. Ask an admin of this team to create the key.
-3. To create your own key, open Personal workspace → API keys and proxy (`/settings/api-keys`). Team settings pin the team, so the workspace switcher cannot make that tab personal.
+3. To create your own key, open Personal → Access (`/settings/access`). Team settings pin the team, so the workspace switcher cannot make that tab personal.
 
 The API refusal for the same member (`TEAM_KEY_ADMIN_REQUIRED`, code `team_admin_required`) states the same three things.
 

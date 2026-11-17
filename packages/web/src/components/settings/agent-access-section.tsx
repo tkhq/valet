@@ -29,7 +29,6 @@ export function AgentAccessSection() {
 
   return (
     <div className="space-y-8">
-      <SetupCard />
       <div className="space-y-2">
         <h3 className="text-sm font-medium text-ink">MCP apps</h3>
         {apps.length === 0 ? (
@@ -94,11 +93,13 @@ function AccessRow({ title, detail, pending, onDisconnect }: { title: string; de
 }
 
 /**
- * How to connect a coding agent: one sentence the person pastes into it. The
- * agent then follows `/agent-setup.md`, which runs `valet login` and
- * `valet mcp setup` and asks the person to approve each in the browser.
+ * The MCP and CLI half of "Set up a coding tool" on the Access page: one
+ * sentence the person pastes into the agent. The agent then follows
+ * `/agent-setup.md`, which runs `valet login` and `valet mcp setup` and asks
+ * the person to approve each in the browser. The proxy half, which routes
+ * model requests, follows it on the same page.
  */
-function SetupCard() {
+export function AgentSetupCard() {
   const instruction = `Read ${window.location.origin}/agent-setup.md and follow it.`;
   const [copied, setCopied] = useState(false);
   async function copy() {
@@ -112,9 +113,9 @@ function SetupCard() {
   }
   return (
     <div className="space-y-2 rounded border border-line px-4 py-3">
-      <h3 className="text-sm font-medium text-ink">Set up a coding agent</h3>
+      <h3 className="text-sm font-medium text-ink">Connect Valet tools</h3>
       <p className="text-sm text-muted">
-        To connect Claude Code, Codex, or Cursor, paste this into the agent. It installs the Valet CLI, connects MCP, and asks you to approve each step in the browser.
+        Paste this into Claude Code, Codex, or Cursor. The agent installs the Valet CLI, connects MCP, and asks you to approve each step in the browser. It then shows under Connected agents.
       </p>
       <div className="flex items-center gap-2">
         <code className="min-w-0 flex-1 select-all truncate rounded bg-neutral-100 px-2 py-1.5 text-xs text-ink dark:bg-neutral-800">{instruction}</code>

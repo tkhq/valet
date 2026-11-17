@@ -42,12 +42,13 @@ on these pages, not the switcher's.
 | Group | Items | Scope |
 |---|---|---|
 | Account | Profile, Preferences, Notifications | you |
-| Personal | Integrations, Usage, API keys and proxy, Secrets, Agent access, Policies, Model comparison | your personal workspace |
+| Personal | Integrations, Access, Secrets, Policies, Usage, Model comparison | your personal workspace |
 | Your teams | one item per team you belong to | that team |
 | Organization | General, Models and usage, Apps and plugins, Security and audit | the organization (admins) |
 
 - **Preferences** joins Appearance and Thread defaults on one page.
-- **API keys and proxy** joins the two pages for the personal workspace.
+- **Access** joins API keys, proxy, and agent access for the personal
+  workspace (2026-11-17).
 - **A team** opens `/settings/teams/$teamId`, a page with tabs: General (the
   team panel: members, defaults, Slack home channel, connections), API keys and
   proxy, and Policies. A draft on one team's tab does not carry to another
@@ -87,6 +88,22 @@ uses the danger button. Organization Security kill switches show service
 display names. The Secrets empty state names `VALET_SECRET_STORE` only to an
 admin.
 
+**Restructure (2026-11-17).** The rail has one page per thing, and each
+scope holds only its own items.
+
+- **Access.** Personal Agent access and API keys and proxy are one page,
+  Access (`/settings/access`), the same name as the team tab. Its sections
+  are, in order: Connected agents (MCP apps and Valet CLI sign-ins), Set up
+  a coding tool, API keys, and Proxy. Set up a coding tool is the one setup
+  entry point. It has two parts because they do different things: Connect
+  Valet tools (the `agent-setup.md` prompt, which signs in the CLI and
+  connects MCP) and Send model requests through Valet (the proxy flow with
+  the tool picker). A team's Access tab has the same order without
+  Connected agents and the MCP prompt. `/settings/api-keys` and
+  `/settings/agent-access` are deleted without redirects: no link outside
+  web Settings opens them. CLI, consent page, and API copy say "Settings >
+  Access".
+
 ### 3. Visual language
 
 Settings matches the thread UI:
@@ -106,7 +123,7 @@ Settings matches the thread UI:
   already there, and your 1Password token becomes a row.
 - Each space has one settings home (2026-11-04, Linear's team settings). A
   team's Integrations and Usage are tabs on `/settings/teams/$teamId`, beside
-  General, API keys and proxy, and Policies. Your own are
+  General, Access, and Policies. Your own are
   `/settings/integrations` and `/settings/usage` under Personal. The
   sidebar's Settings row under each space is one link to that home, and Skills
   and Memory are ordinary space rows. The team General tab no longer repeats
@@ -293,13 +310,14 @@ Restart replay publishes the same completion event after it saves the result.
   with the switcher.
 - `-settings.routes.test.tsx` (real router, real layout and scope provider):
   Preferences with both parts; personal Policies pinned while
-  the switcher holds a team; a team's API keys and proxy and Policies tabs;
+  the switcher holds a team; personal Access with its four sections in order;
+  a team's Access and Policies tabs;
   the Organization tabs for an admin but not a member; and, while
   organizations are off, MCP servers outside the organization route guard
   for an admin and the ask-an-admin notice for a member.
 - `-settings.team.test.tsx`: the team page pins its team, marks its tab,
   refuses a team the caller is not on, and drops a draft when another of the
-  caller's teams opens; the personal API keys and proxy page pins personal
+  caller's teams opens; the personal Access page pins personal
   scope.
 - `-settings.navigation.test.tsx`: rail links leave Organization Teams, and
   primary links leave Settings.

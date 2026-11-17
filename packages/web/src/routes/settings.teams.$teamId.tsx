@@ -39,7 +39,7 @@ export function TeamSettingsShell({ teamId }: { teamId: string }) {
     { to: "/settings/teams/$teamId", label: "General", params: { teamId } },
     { to: "/settings/teams/$teamId/integrations", label: "Integrations", params: { teamId } },
     { to: "/settings/teams/$teamId/usage", label: "Usage", params: { teamId } },
-    { to: "/settings/teams/$teamId/access", label: "API keys and proxy", params: { teamId } },
+    { to: "/settings/teams/$teamId/access", label: "Access", params: { teamId } },
     { to: "/settings/teams/$teamId/policies", label: "Policies", params: { teamId } },
   ];
   const path = normalizeSettingsPath(pathname);

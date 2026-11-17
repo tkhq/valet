@@ -3,7 +3,7 @@ export interface AppPageHint { pathname: string; workspace: string }
 
 const pages = new Set([
   "/chat", "/workflows", "/events", "/integrations", "/skills", "/library", "/settings",
-  ...["profile", "preferences", "notifications", "integrations", "usage", "api-keys", "secrets", "agent-access", "policies", "model-comparison", "models", "mcp-servers", "connected-accounts"].map(page => `/settings/${page}`),
+  ...["profile", "preferences", "notifications", "integrations", "usage", "access", "secrets", "policies", "model-comparison", "models", "mcp-servers", "connected-accounts"].map(page => `/settings/${page}`),
   ...["", "/members", "/teams", "/models", "/proxy", "/plugins", "/mcp-servers", "/github", "/slack", "/linear", "/onepassword", "/library", "/policies", "/sandbox-images", "/action-log", "/audit-log"].map(page => `/settings/organization${page}`),
 ]);
 

@@ -929,10 +929,10 @@ export function UsagePage() {
       <div className="rounded border border-line bg-paper px-4 py-3 text-sm text-muted">
         Generate a key and set up your tools in{" "}
         <Link
-          to="/settings/api-keys"
+          to="/settings/access"
           className="text-moss underline-offset-2 hover:underline"
         >
-          Personal → API keys and proxy
+          Personal → Access
         </Link>
         .
       </div>

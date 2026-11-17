@@ -92,16 +92,18 @@ describe("SettingsRail", () => {
     expect(snapshot()).toEqual(onPersonal);
     // Personal pages stay personal, and the team keeps its own item.
     const personalGroup = within(rail()).getByRole("group", { name: "Personal" });
-    expect(within(personalGroup).getByRole("link", { name: "API keys and proxy" }).getAttribute("href")).toBe("/settings/api-keys");
+    expect(within(personalGroup).getByRole("link", { name: "Access" }).getAttribute("href")).toBe("/settings/access");
     expect(within(rail()).getByRole("group", { name: "Your teams" })).toBeTruthy();
   });
 
-  it("keeps API keys, Agent access, Policies and Model comparison under Personal", () => {
+  it("lists the Personal pages in rail order, with one Access page", () => {
     render(<SettingsRail />);
     const personal = within(rail()).getByRole("group", { name: "Personal" });
-    for (const label of ["API keys and proxy", "Agent access", "Policies", "Model comparison"]) {
-      expect(within(personal).getByRole("link", { name: label })).toBeTruthy();
-    }
+    expect(within(personal).getAllByRole("link").map((a) => a.textContent)).toEqual([
+      "Integrations", "Access", "Secrets", "Policies", "Usage", "Model comparison",
+    ]);
+    expect(within(personal).queryByRole("link", { name: "API keys and proxy" })).toBeNull();
+    expect(within(personal).queryByRole("link", { name: "Agent access" })).toBeNull();
     expect(within(personal).getByRole("link", { name: "Model comparison" }).getAttribute("href")).toBe("/settings/model-comparison");
   });
 

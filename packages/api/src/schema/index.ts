@@ -2916,7 +2916,7 @@ export const cliDeviceRequests = pgTable("cli_device_requests", {
  * A signed-in CLI (`vltc_` access token). The access token lasts a day, the
  * refresh token 30 days from its last use, and each refresh replaces both.
  * Only hashes are stored. The person disconnects a CLI in Settings >
- * Agent access.
+ * Access.
  */
 export const cliTokens = pgTable("cli_tokens", {
   id: text("id").primaryKey(),

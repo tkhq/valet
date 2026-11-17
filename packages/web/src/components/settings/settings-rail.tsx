@@ -2,7 +2,6 @@ import { Link, useRouterState } from "@tanstack/react-router";
 import {
   Bell,
   Blocks,
-  Bot,
   Building2,
   ChevronDown,
   Cpu,
@@ -29,8 +28,9 @@ import { cn } from "~/lib/cn";
  * workspace switcher:
  *
  * - **Account**: you.
- * - **Personal**: the personal scope's integrations, usage, keys, proxy,
- *   secrets, agent access, policies, and model comparison.
+ * - **Personal**: the personal scope's integrations, access (connected
+ *   agents, coding-tool setup, API keys, proxy), secrets, policies, usage,
+ *   and model comparison.
  * - **Your teams**: one item per team you belong to, each opening its own
  *   `/settings/teams/$teamId` pages.
  * - **Organization**: shown once `useOrg()` resolves with the gate on (never
@@ -155,11 +155,10 @@ const ACCOUNT_ITEMS: RailItem[] = [
 
 const PERSONAL_ITEMS: RailItem[] = [
   { to: "/settings/integrations", label: "Integrations", icon: Plug, active: exact("/settings/integrations") },
-  { to: "/settings/usage", label: "Usage", icon: BarChart3, active: exact("/settings/usage") },
-  { to: "/settings/api-keys", label: "API keys and proxy", icon: KeyRound, active: exact("/settings/api-keys") },
+  { to: "/settings/access", label: "Access", icon: KeyRound, active: exact("/settings/access") },
   { to: "/settings/secrets", label: "Secrets", icon: LockKeyhole, active: exact("/settings/secrets") },
-  { to: "/settings/agent-access", label: "Agent access", icon: Bot, active: exact("/settings/agent-access") },
   { to: "/settings/policies", label: "Policies", icon: Shield, active: exact("/settings/policies") },
+  { to: "/settings/usage", label: "Usage", icon: BarChart3, active: exact("/settings/usage") },
   // Read-only and backed by the member-visible models list, so every
   // member sees it in both org and single-user mode.
   { to: "/settings/model-comparison", label: "Model comparison", icon: BarChart3, active: exact("/settings/model-comparison") },

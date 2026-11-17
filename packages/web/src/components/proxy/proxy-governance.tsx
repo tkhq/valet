@@ -1,6 +1,6 @@
 /**
  * Shared proxy governance controls: the gateway enable Switch and credential-
- * mode toggle. Used by both the personal `/settings/api-keys` page and the org
+ * mode toggle. Used by both the personal `/settings/access` page and the org
  * `/settings/organization/proxy` page. Renders as a set of `FieldRow` entries
  * to be placed inside a `Section` component.
  *

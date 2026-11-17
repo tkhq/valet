@@ -51,10 +51,16 @@ vi.mock("~/api/settings", () => ({
   }),
 }));
 vi.mock("~/components/settings/api-keys-section", () => ({ ApiKeysSection: () => <ScopeProbe label="keys" /> }));
-vi.mock("~/components/settings/proxy-section", () => ({ SettingsProxyPage: () => <ScopeProbe label="proxy" /> }));
+vi.mock("~/components/settings/proxy-section", () => ({
+  SettingsProxyPage: ({ children }: { children?: ReactNode }) => <><ScopeProbe label="proxy" />{children}</>,
+}));
+vi.mock("~/components/settings/agent-access-section", () => ({
+  AgentAccessSection: () => <ScopeProbe label="agents" />,
+  AgentSetupCard: () => <ScopeProbe label="agent setup" />,
+}));
 
 import { TeamSettingsShell } from "./settings.teams.$teamId";
-import { PersonalAccessPage } from "./settings.api-keys";
+import { PersonalAccessPage } from "./settings.access";
 
 beforeEach(() => {
   pathname = "/settings/teams/t1";
@@ -83,14 +89,14 @@ describe("team settings pages", () => {
   it("marks the tab that matches the path", () => {
     pathname = "/settings/teams/t1/access";
     render(<TeamSettingsShell teamId="t1" />);
-    expect(screen.getByRole("link", { name: "API keys and proxy" }).getAttribute("aria-current")).toBe("page");
+    expect(screen.getByRole("link", { name: "Access" }).getAttribute("aria-current")).toBe("page");
   });
 
   it("holds the team's Integrations and Usage beside its other settings", () => {
     pathname = "/settings/teams/t1/integrations";
     render(<TeamSettingsShell teamId="t1" />);
     expect(screen.getAllByRole("link").map((link) => link.textContent).filter((label) => label !== "Open team threads"))
-      .toEqual(["General", "Integrations", "Usage", "API keys and proxy", "Policies"]);
+      .toEqual(["General", "Integrations", "Usage", "Access", "Policies"]);
     expect(screen.getByRole("link", { name: "Integrations" }).getAttribute("aria-current")).toBe("page");
     expect(screen.getByRole("link", { name: "General" }).getAttribute("aria-current")).toBeNull();
   });
@@ -107,5 +113,6 @@ describe("personal pages", () => {
     render(<PinnedWorkspaceScope teamId="t1"><PersonalAccessPage /></PinnedWorkspaceScope>);
     expect(screen.getByText("keys: personal")).toBeTruthy();
     expect(screen.getByText("proxy: personal")).toBeTruthy();
+    expect(screen.getByText("agents: personal")).toBeTruthy();
   });
 });
