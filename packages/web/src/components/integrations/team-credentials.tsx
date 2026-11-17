@@ -63,8 +63,8 @@ function byService(rows: CredentialSummary[]): Array<{ service: string; rows: Cr
 }
 
 /**
- * Every account this team can act as, one entry per integration, shared by
- * Settings and Integrations. An integration lists the team's own connection
+ * Every account this team can act as, one entry per integration, on the
+ * team's Integrations tab. An integration lists the team's own connection
  * and each member's shared account. A team action uses the acting member's
  * own share first, then the team's connection, and asks before it uses
  * another member's account.
@@ -73,13 +73,11 @@ export function TeamCredentials({
   team,
   orgMembers,
   canMutate,
-  cards = false,
   children,
 }: {
   team: TeamSummary;
   orgMembers: OrgDirectoryUserWire[];
   canMutate: boolean;
-  cards?: boolean;
   /** Connected team rows that own their controls, such as 1Password, listed first. */
   children?: ReactNode;
 }) {
@@ -120,21 +118,16 @@ export function TeamCredentials({
     <div>
       {credsQ.isLoading && <LoadingRow label="Loading credentials…" className="py-2 text-xs" />}
       {credsQ.error && <ErrorRow>Could not load credentials. Reload the page.</ErrorRow>}
-      {!cards && rows.length > 0 && (
-        <p className="mt-1 text-xs text-muted">
-          Team actions use the acting member's own account first, then the team connection. Using another member's account asks them first.
-        </p>
-      )}
       {!credsQ.isLoading && !credsQ.error && rows.length === 0 && !children && (
         <EmptyRow>
           No connections added to this team yet. Connect an account for this team.
         </EmptyRow>
       )}
-      <ul aria-label="Team connections" className={cards ? "divide-y divide-line" : "mt-1 space-y-3"}>
+      <ul aria-label="Team connections" className="divide-y divide-line">
         {children}
         {byService(rows).map((group) => (
-          <li key={group.service} className={cards ? "py-3.5 first:pt-0.5 last:pb-0.5" : undefined}>
-            <div className={cards ? undefined : "py-2"}>
+          <li key={group.service} className="py-3.5 first:pt-0.5 last:pb-0.5">
+            <div>
               <CardHeading
                 title={group.service === "linear" ? "Linear MCP" : displayName(group.service)}
                 slug={group.service}

@@ -15,21 +15,24 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
  * without mounting a router. */
 function RouterLinkStub({
   to,
+  params,
   search,
   children,
   className,
 }: {
   to: string;
+  params?: Record<string, string>;
   search?: Record<string, string | undefined>;
   children: ReactNode;
   className?: string;
 }) {
-  const params = Object.entries(search ?? {}).filter(
+  const query = Object.entries(search ?? {}).filter(
     (entry): entry is [string, string] => entry[1] !== undefined,
   );
-  const qs = params.length > 0 ? `?${new URLSearchParams(params).toString()}` : "";
+  const qs = query.length > 0 ? `?${new URLSearchParams(query).toString()}` : "";
+  const path = to.replace(/\$(\w+)/g, (_, name: string) => params?.[name] ?? "");
   return (
-    <a href={`${to}${qs}`} className={className}>
+    <a href={`${path}${qs}`} className={className}>
       {children}
     </a>
   );
@@ -196,6 +199,7 @@ vi.mock("~/api/integrations", () => ({
 }));
 
 import { TeamsPanel } from "./teams-panel";
+import { TeamCredentials } from "~/components/integrations/team-credentials";
 
 const orgMembers: OrgDirectoryUserWire[] = [
   { userId: "u1", name: "One", email: "one@dev", avatarUrl: null },
@@ -208,10 +212,17 @@ const orgMembers: OrgDirectoryUserWire[] = [
   { userId: "u5", name: "Ada Lovelace", email: "ada@dev", avatarUrl: null },
 ];
 
+/** The team's own General tab, where the team is edited. */
 function openTeam() {
-  const view = render(<TeamsPanel orgMembers={orgMembers} />);
-  fireEvent.click(screen.getByRole("button", { name: "Expand Platform" }));
-  return view;
+  return render(<TeamsPanel orgMembers={orgMembers} teamId="team_1" />);
+}
+
+/** The team's connections, which its Integrations tab lists. */
+function openCredentials() {
+  const team = teamsData().teams[0]!;
+  const canMutate = orgRole === "admin" || callerRole === "admin";
+  const view = render(<TeamCredentials team={team} orgMembers={orgMembers} canMutate={canMutate} />);
+  return { ...view, rerender: () => view.rerender(<TeamCredentials team={team} orgMembers={orgMembers} canMutate={canMutate} />) };
 }
 
 describe("TeamsPanel — identity-provider provenance", () => {
@@ -600,8 +611,7 @@ describe("TeamsPanel — add-member picker", () => {
       email: `x${i}@dev`,
       avatarUrl: null,
     }));
-    render(<TeamsPanel orgMembers={[...orgMembers.slice(0, 2), ...many]} />);
-    fireEvent.click(screen.getByRole("button", { name: "Expand Platform" }));
+    render(<TeamsPanel orgMembers={[...orgMembers.slice(0, 2), ...many]} teamId="team_1" />);
     fireEvent.click(screen.getByRole("button", { name: /Add member/ }));
     expect(pickerOptions().getAllByRole("option")).toHaveLength(50);
     expect(screen.getByText(/10 more matches/)).toBeTruthy();
@@ -609,8 +619,7 @@ describe("TeamsPanel — add-member picker", () => {
 
   it("keeps the trigger mounted but inert when nobody is addable", () => {
     // u1 and u2 are both on the team, so nothing is addable.
-    render(<TeamsPanel orgMembers={orgMembers.slice(0, 2)} />);
-    fireEvent.click(screen.getByRole("button", { name: "Expand Platform" }));
+    render(<TeamsPanel orgMembers={orgMembers.slice(0, 2)} teamId="team_1" />);
     const trigger = screen.getByRole("button", { name: /Add member/ });
     expect(trigger.getAttribute("aria-disabled")).toBe("true");
     fireEvent.click(trigger);
@@ -643,7 +652,7 @@ describe("TeamsPanel — add-member picker", () => {
   });
 });
 
-describe("TeamsPanel — team credentials", () => {
+describe("TeamCredentials — team connections", () => {
   beforeEach(() => {
     callerRole = "admin";
     orgRole = "member";
@@ -659,7 +668,7 @@ describe("TeamsPanel — team credentials", () => {
   });
 
   it("names the empty place when the team has no credentials", () => {
-    openTeam();
+    openCredentials();
     expect(screen.getByText(/No connections added to this team yet/)).toBeTruthy();
   });
 
@@ -673,7 +682,7 @@ describe("TeamsPanel — team credentials", () => {
         referenceBroken: true,
       },
     ];
-    openTeam();
+    openCredentials();
     expect(screen.getByText("Linear MCP")).toBeTruthy();
     expect(screen.getByText("Shared by Two")).toBeTruthy();
     expect(screen.getByText("Broken")).toBeTruthy();
@@ -685,7 +694,7 @@ describe("TeamsPanel — team credentials", () => {
     teamCredentials = [
       { service: "linear", type: "oauth2", connectedAt: "2026-09-01T00:00:00Z" },
     ];
-    openTeam();
+    openCredentials();
     expect(screen.getByText("Team connection")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Disconnect Linear from Platform" })).toBeNull();
     expect(screen.queryByRole("button", { name: /Stop sharing/ })).toBeNull();
@@ -699,7 +708,7 @@ describe("TeamsPanel — team credentials", () => {
  * writes nothing. One route serves both rows, and they cost different things,
  * so each row kind has its own verb and its own note (`removalLabels`).
  */
-describe("TeamsPanel — removing a team credential", () => {
+describe("TeamCredentials — removing a team connection", () => {
   /** linear is stored on the team. slack is shared by Two. */
   const DIRECT = "Disconnect Linear from Platform";
   const SHARED = "Stop sharing Two's Slack with Platform";
@@ -725,7 +734,7 @@ describe("TeamsPanel — removing a team credential", () => {
     disconnectError = null;
   });
 
-  /** The panel must already be open: a second `openTeam()` would mount a
+  /** The panel must already be open: a second `openCredentials()` would mount a
    * second copy and make every row query ambiguous. */
   async function clickRemove(control: string) {
     fireEvent.click(screen.getByRole("button", { name: control }));
@@ -735,15 +744,15 @@ describe("TeamsPanel — removing a team credential", () => {
   /** The row button disables itself while a removal runs, so the dialog has
    * to open first and the pending state arrive on the next render. */
   async function dialogWhilePending(control: string) {
-    const view = openTeam();
+    const view = openCredentials();
     await clickRemove(control);
     disconnectPending = true;
-    view.rerender(<TeamsPanel orgMembers={orgMembers} />);
+    view.rerender();
     return screen.getByRole("dialog");
   }
 
   it("opens the dialog and removes nothing on the click alone", async () => {
-    openTeam();
+    openCredentials();
     const dialog = await clickRemove(DIRECT);
     expect(disconnectMutate).not.toHaveBeenCalled();
     expect(within(dialog).getByText("Disconnect Linear from Platform?")).toBeTruthy();
@@ -752,7 +761,7 @@ describe("TeamsPanel — removing a team credential", () => {
   it("spells the service the way Integrations does, in the title and the note", async () => {
     // The dialog named the raw service id three times, so one credential read
     // "Linear" on Integrations and in every API refusal, and "linear" here.
-    openTeam();
+    openCredentials();
     const dialog = await clickRemove(DIRECT);
     expect(within(dialog).getByText("Disconnect Linear from Platform?")).toBeTruthy();
     expect(within(dialog).getByText(/lose the team's own Linear connection/)).toBeTruthy();
@@ -762,7 +771,7 @@ describe("TeamsPanel — removing a team credential", () => {
   it("names the row that was clicked, not the first row", async () => {
     // One dialog serves the whole list, so it must read the row held in
     // state. A single boolean would name whichever row rendered first.
-    openTeam();
+    openCredentials();
     const dialog = await clickRemove(SHARED);
     expect(within(dialog).getByText("Stop sharing Two's Slack with Platform?")).toBeTruthy();
     expect(within(dialog).queryByText("Disconnect Linear from Platform?")).toBeNull();
@@ -772,7 +781,7 @@ describe("TeamsPanel — removing a team credential", () => {
     // "Disconnect slack" beside a row shared by Two read as though it would
     // drop Two's own connection. The Integrations share menu already calls
     // this action "Stop sharing" (`integrations/share-with-team.test.tsx`).
-    openTeam();
+    openCredentials();
     expect(screen.getByRole("button", { name: SHARED }).textContent).toBe("Stop sharing");
     expect(screen.queryByRole("button", { name: "Disconnect Slack from Platform" })).toBeNull();
 
@@ -788,7 +797,7 @@ describe("TeamsPanel — removing a team credential", () => {
   });
 
   it("keeps Disconnect for the team's own credential, and says how to get it back", async () => {
-    openTeam();
+    openCredentials();
     expect(screen.getByRole("button", { name: DIRECT }).textContent).toBe("Disconnect");
 
     const dialog = await clickRemove(DIRECT);
@@ -799,7 +808,7 @@ describe("TeamsPanel — removing a team credential", () => {
   });
 
   it("confirming removes with the team scope and id", async () => {
-    openTeam();
+    openCredentials();
     const dialog = await clickRemove(DIRECT);
     fireEvent.click(within(dialog).getByRole("button", { name: "Disconnect" }));
 
@@ -812,7 +821,7 @@ describe("TeamsPanel — removing a team credential", () => {
   });
 
   it("closes on success", async () => {
-    openTeam();
+    openCredentials();
     const dialog = await clickRemove(DIRECT);
     fireEvent.click(within(dialog).getByRole("button", { name: "Disconnect" }));
 
@@ -822,7 +831,7 @@ describe("TeamsPanel — removing a team credential", () => {
   });
 
   it("cancelling removes nothing and closes the dialog", async () => {
-    openTeam();
+    openCredentials();
     const dialog = await clickRemove(DIRECT);
     fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
 
@@ -833,7 +842,7 @@ describe("TeamsPanel — removing a team credential", () => {
   it("shows the server error in the dialog instead of swallowing it", async () => {
     disconnectError = new Error("Team not found.");
     disconnectVariables = { service: "linear" };
-    openTeam();
+    openCredentials();
     const dialog = await clickRemove(DIRECT);
     expect(within(dialog).getByText(/Team not found\./)).toBeTruthy();
   });
@@ -843,7 +852,7 @@ describe("TeamsPanel — removing a team credential", () => {
     // dialog opens on Linear's refusal before anything is clicked in it.
     disconnectError = new Error("Team not found.");
     disconnectVariables = { service: "linear" };
-    openTeam();
+    openCredentials();
 
     const other = await clickRemove(SHARED);
     expect(within(other).queryByText(/Team not found\./)).toBeNull();
@@ -861,11 +870,41 @@ describe("TeamsPanel — removing a team credential", () => {
 });
 
 describe("TeamsPanel — team settings page", () => {
-  it("drops the collapsible header the page already shows, and stays open", () => {
-    render(<TeamsPanel orgMembers={orgMembers} teamId="team_1" page />);
+  it("shows the team in Section cards, with no collapsible header and no connections", () => {
+    callerRole = "admin";
+    orgRole = "member";
+    render(<TeamsPanel orgMembers={orgMembers} teamId="team_1" />);
     expect(screen.queryByRole("button", { name: /^(Collapse|Expand) / })).toBeNull();
+    expect(screen.getAllByRole("heading", { level: 2 }).map((h) => h.textContent)).toEqual(["Name", "Members", "Defaults", "Slack"]);
     expect(screen.getByRole("region", { name: "Deletion requests" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Platform actions" })).toBeTruthy();
+    expect(screen.queryByRole("list", { name: "Team connections" })).toBeNull();
+    expect(screen.queryByLabelText("New team name")).toBeNull();
+  });
+});
+
+describe("TeamsPanel — organization list", () => {
+  it("links each team to its settings page and edits nothing in place", () => {
+    callerRole = "member";
+    orgRole = "admin";
+    render(<TeamsPanel orgMembers={orgMembers} />);
+    expect(screen.getByLabelText("New team name")).toBeTruthy();
+    const link = screen.getByRole("link", { name: /Platform/ });
+    expect(link.getAttribute("href")).toBe("/settings/teams/team_1");
+    expect(screen.queryByRole("button", { name: /^(Collapse|Expand) / })).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Members" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Add member/ })).toBeNull();
+    expect(screen.queryByRole("combobox", { name: "Default model" })).toBeNull();
+    expect(screen.queryByRole("list", { name: "Team connections" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Platform actions" })).toBeTruthy();
+  });
+
+  it("gives a plain member the link but no menu: requests start on the team page", () => {
+    callerRole = "member";
+    orgRole = "member";
+    render(<TeamsPanel orgMembers={orgMembers} />);
+    expect(screen.getByRole("link", { name: /Platform/ }).getAttribute("href")).toBe("/settings/teams/team_1");
+    expect(screen.queryByRole("button", { name: "Platform actions" })).toBeNull();
   });
 });
 
@@ -893,9 +932,9 @@ describe("TeamsPanel selected workspace", () => {
     selectedTeamsError = null;
   });
 
-  it("shows only the selected team, expanded, without creation controls", () => {
+  it("shows only the selected team, without creation controls", () => {
     render(<TeamsPanel orgMembers={orgMembers} teamId="team_2" />);
-    expect(screen.getByRole("button", { name: "Collapse Support" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Support actions" })).toBeTruthy();
     expect(screen.queryByText("Platform")).toBeNull();
     expect(screen.queryByLabelText("New team name")).toBeNull();
     fireEvent.focus(screen.getByRole("combobox", { name: "Default model" }));
@@ -906,7 +945,7 @@ describe("TeamsPanel selected workspace", () => {
   it("does not borrow admin permissions from another team", () => {
     selectedTeamsOverride = [team("team_1", "Platform"), team("team_2", "Support", "member")];
     render(<TeamsPanel orgMembers={orgMembers} teamId="team_2" />);
-    expect(screen.getByText("Support")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Support actions" })).toBeTruthy();
     expect(screen.getByRole("region", { name: "Deletion requests" }).getAttribute("data-can-manage")).toBe("false");
     expect(screen.queryByRole("combobox", { name: "Default model" })).toBeNull();
     expect(screen.queryByRole("button", { name: /Add member/ })).toBeNull();
@@ -948,7 +987,7 @@ describe("TeamsPanel selected workspace", () => {
     view.rerender(<TeamsPanel key="team_2" orgMembers={orgMembers} teamId="team_2" />);
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(deleteTeamMutate).not.toHaveBeenCalled();
-    expect(screen.getByRole("button", { name: "Collapse Support" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Support actions" })).toBeTruthy();
   });
 });
 
@@ -979,7 +1018,7 @@ describe("TeamsPanel — leaving a team's own page", () => {
 
   it("opens Profile once the team is deleted, so the page does not refuse a gone team", async () => {
     const user = userEvent.setup();
-    render(<TeamsPanel orgMembers={orgMembers} teamId="team_1" page />);
+    render(<TeamsPanel orgMembers={orgMembers} teamId="team_1" />);
     await deleteFromMenu(user);
     expect(navigate).toHaveBeenCalledWith({ to: "/settings/profile", replace: true });
   });
@@ -993,14 +1032,14 @@ describe("TeamsPanel — leaving a team's own page", () => {
   });
 
   it("opens Profile once you remove yourself from the team", () => {
-    render(<TeamsPanel orgMembers={orgMembers} teamId="team_1" page />);
+    render(<TeamsPanel orgMembers={orgMembers} teamId="team_1" />);
     fireEvent.click(screen.getByRole("button", { name: "Remove One from Platform" }));
     expect(removeMemberMutate).toHaveBeenCalledWith({ teamId: "team_1", userId: "u1" }, expect.anything());
     expect(navigate).toHaveBeenCalledWith({ to: "/settings/profile", replace: true });
   });
 
   it("stays after removing another member", () => {
-    render(<TeamsPanel orgMembers={orgMembers} teamId="team_1" page />);
+    render(<TeamsPanel orgMembers={orgMembers} teamId="team_1" />);
     fireEvent.click(screen.getByRole("button", { name: "Remove Two from Platform" }));
     expect(removeMemberMutate).toHaveBeenCalled();
     expect(navigate).not.toHaveBeenCalled();

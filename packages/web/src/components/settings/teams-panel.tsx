@@ -17,7 +17,6 @@ import {
   useTeamMembers,
   useTeams,
 } from "~/api/settings";
-import { TeamCredentials } from "~/components/integrations/team-credentials";
 import {
   Avatar,
   AvatarFallback,
@@ -41,7 +40,7 @@ import {
 import { FieldRow } from "~/components/settings/field-row";
 import { ModelCombobox } from "~/components/settings/model-combobox";
 import { ReasoningSelect } from "~/components/settings/reasoning-select";
-import { SubSection } from "~/components/settings/section";
+import { Section } from "~/components/settings/section";
 import { errorText } from "~/lib/error-text";
 import { formatDate } from "~/lib/format-when";
 import { fallbackLabel, isSizeTier, TIER_LABELS } from "~/lib/model-tiers";
@@ -69,11 +68,17 @@ const DELETE_TEAM_NOTE =
   "Org members themselves are not affected.";
 
 /**
- * Organization · Teams — the first-ever teams management UI over the
- * existing `/api/teams` router. List with inline create, per-team expand
- * revealing the member roster + add/remove/role-toggle, and delete-via-
- * confirm. All member display data (name/email/avatar) is cross-referenced
- * against the org directory (`useOrgDirectory()`, member-visible) since
+ * Teams over the `/api/teams` router, in two places.
+ *
+ * - **Organization · Teams** (no `teamId`): create a team, then one row per
+ *   team. A row is a link to that team's settings page, and an admin of the
+ *   team can delete it from the row's menu. The team is edited on its page,
+ *   never in the list.
+ * - **A team's General tab** (`teamId`): the team's name, members, defaults,
+ *   Slack home channel, and deletion requests, each a `Section`.
+ *
+ * All member display data (name/email/avatar) is cross-referenced against
+ * the org directory (`useOrgDirectory()`, member-visible) since
  * `TeamMemberSummary` on the wire is only `{userId, role}`.
  *
  * A team with `origin === "idp"` keeps its provenance badge, but its
@@ -82,27 +87,21 @@ const DELETE_TEAM_NOTE =
  *
  * A team with `origin === "config"` is declared in `valet.yaml`, and it is
  * deliberately treated differently. The file only asserts members, so the
- * member controls keep working and the panel keeps them. Only delete goes,
- * because the API refuses it: the next boot would recreate the team empty.
- * `CONFIG_MANAGED_NOTE` states the half a reader cannot see — that a restart
- * puts the declared members back.
+ * member controls keep working. Only delete goes, because the API refuses
+ * it: the next boot would recreate the team empty. `CONFIG_MANAGED_NOTE`
+ * states the half a reader cannot see — that a restart puts the declared
+ * members back.
  */
 export function TeamsPanel({
   orgMembers,
   teamId,
-  page = false,
 }: {
   orgMembers: OrgDirectoryUserWire[];
-  /** Pin the panel to the selected workspace, without team creation. */
+  /** The team whose General tab this is. Without it, the organization list. */
   teamId?: string;
-  /** The team's own settings page (`/settings/teams/$teamId`), which already
-   * names the team and links its threads: the row drops its collapsible
-   * header and stays open. */
-  page?: boolean;
 }) {
   const teamsQ = useTeams();
   const meQ = useMe();
-  const [expanded, setExpanded] = useState<string | null>(teamId ?? null);
   // Mirrors the API's canMutateTeam gate: team admin of that team, or org
   // admin. The API still enforces; this only hides controls that would 404.
   const orgAdmin = meQ.data?.orgRole === "admin";
@@ -124,20 +123,16 @@ export function TeamsPanel({
         </EmptyRow>
       )}
 
-      {ready && teamsQ.data && teams.length > 0 && (
-        <div className={page ? undefined : "divide-y divide-line border-t border-line"}>
+      {ready && teamId === undefined && teams.length > 0 && (
+        <ul className="divide-y divide-line border-t border-line">
           {teams.map((team) => (
-            <TeamRow
-              key={team.id}
-              team={team}
-              orgMembers={orgMembers}
-              canMutate={orgAdmin || team.callerRole === "admin"}
-              page={page}
-              open={page || expanded === team.id}
-              onToggle={() => setExpanded((cur) => (cur === team.id ? null : team.id))}
-            />
+            <TeamListRow key={team.id} team={team} canMutate={orgAdmin || team.callerRole === "admin"} />
           ))}
-        </div>
+        </ul>
+      )}
+
+      {ready && teamId !== undefined && teams[0] && (
+        <TeamGeneral key={teams[0].id} team={teams[0]} orgMembers={orgMembers} canMutate={orgAdmin || teams[0].callerRole === "admin"} />
       )}
     </div>
   );
@@ -192,135 +187,87 @@ function CreateTeamRow() {
   );
 }
 
-function TeamRow({
-  team,
-  orgMembers,
-  canMutate,
-  page,
-  open,
-  onToggle,
-}: {
+/** The team's provenance badges. `neutral` for a declared team, not the
+ * mirrored team's `accent`: its controls still work, so it must not read as
+ * equally locked. */
+function TeamBadges({ team }: { team: TeamSummary }) {
+  return (
+    <>
+      {team.origin === "idp" && <Badge variant="neutral" className="shrink-0">Identity provider</Badge>}
+      {team.origin === "config" && (
+        <Badge variant="neutral" className="shrink-0" title={CONFIG_MANAGED_NOTE}>Declared in valet.yaml</Badge>
+      )}
+    </>
+  );
+}
+
+/** One row of the organization list: a link to the team's settings page,
+ * and Delete for whoever administers the team. */
+function TeamListRow({ team, canMutate }: { team: TeamSummary; canMutate: boolean }) {
+  return (
+    <li className="flex flex-wrap items-center gap-3 py-3">
+      <Link
+        to="/settings/teams/$teamId"
+        params={{ teamId: team.id }}
+        className="flex min-h-11 min-w-0 flex-1 flex-wrap items-center gap-2 rounded-md hover:text-ink sm:min-h-0"
+      >
+        <span className="truncate text-sm font-medium text-ink">{team.name}</span>
+        <TeamBadges team={team} />
+        <span className="shrink-0 text-xs text-muted">
+          {team.memberCount} {team.memberCount === 1 ? "member" : "members"}
+        </span>
+        <span className="hidden shrink-0 text-xs text-muted sm:inline">Created {formatDate(team.createdAt)}</span>
+        <ChevronRight className="ml-auto h-4 w-4 shrink-0 text-muted" aria-hidden />
+      </Link>
+      {/* A member's deletion request needs the team's page, where its form lives. */}
+      {canMutate && <TeamActions team={team} canMutate />}
+    </li>
+  );
+}
+
+/**
+ * The team's actions menu: Delete for whoever administers the team, else
+ * Request deletion. Two gates, both required. `canMutate` is authorization;
+ * origin is provenance — the API refuses a delete on a declared team,
+ * because the next boot would recreate it empty. Delete is the only item
+ * there, and an empty menu is worse than no menu.
+ */
+function TeamActions({ team, canMutate, onDeleted, onRequestDeletion }: {
   team: TeamSummary;
-  orgMembers: OrgDirectoryUserWire[];
   canMutate: boolean;
-  page: boolean;
-  open: boolean;
-  onToggle: () => void;
+  onDeleted?: () => void;
+  /** Opens the request form. Only the team's page has one. */
+  onRequestDeletion?: () => void;
 }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const [deletionRequest, setDeletionRequest] = useState<string | null>(null);
   const deleteTeam = useDeleteTeam();
-  const navigate = useNavigate();
-  // On the team's own page, a team the caller deleted or left would read as
-  // "not a member" there. Profile is the settings landing page. Replace, so
-  // Back does not return to the gone team.
-  const leavePage = page ? () => void navigate({ to: "/settings/profile", replace: true }) : undefined;
-  const idpBacked = team.origin === "idp";
-  const declared = team.origin === "config";
-
+  if (team.origin === "config") return null;
   return (
-    <div className={page ? undefined : "py-3"}>
-      <div className="flex flex-wrap items-center gap-3">
-        {page ? (
-          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
-            {idpBacked && <Badge variant="neutral">Identity provider</Badge>}
-            {declared && <Badge variant="neutral" title={CONFIG_MANAGED_NOTE}>Declared in valet.yaml</Badge>}
-            <span className="text-xs text-muted">Created {formatDate(team.createdAt)}</span>
-          </div>
-        ) : (
-        <button
-          type="button"
-          onClick={onToggle}
-          aria-label={open ? `Collapse ${team.name}` : `Expand ${team.name}`}
-          aria-expanded={open}
-          className="flex min-h-11 min-w-0 basis-full flex-wrap sm:flex-1 sm:basis-auto items-center gap-2 text-left sm:min-h-0"
-        >
-          <ChevronRight
-            className={`h-4 w-4 shrink-0 text-muted transition-transform ${open ? "rotate-90" : ""}`}
-            aria-hidden
-          />
-          <span className="truncate text-sm font-medium text-ink">{team.name}</span>
-          {idpBacked && (
-            <Badge variant="neutral" className="shrink-0">
-              Identity provider
-            </Badge>
-          )}
-          {declared && (
-            // `neutral`, not the mirrored team's `accent`: this team's
-            // controls still work, so it must not read as equally locked.
-            <Badge variant="neutral" className="shrink-0" title={CONFIG_MANAGED_NOTE}>
-              Declared in valet.yaml
-            </Badge>
-          )}
-          <span className="shrink-0 text-xs text-muted">
-            {team.memberCount} {team.memberCount === 1 ? "member" : "members"}
-          </span>
-        </button>
-        )}
-        {!page && (
-          <span className="hidden shrink-0 text-xs text-muted sm:block">
-            Created {formatDate(team.createdAt)}
-          </span>
-        )}
-        {/* Two gates, both required. `canMutate` is authorization; origin is
-            provenance — the API refuses a delete on a mirrored team and on a
-            declared one, because the next boot would recreate a declared team
-            empty. Delete is the only item here, and an empty menu is worse
-            than no menu. */}
-        {!declared && (
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                aria-label={`${team.name} actions`}
-              >
-                <MoreHorizontal className="h-4 w-4" aria-hidden />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-              <DropdownMenuItem
-                className="text-danger-500"
-                onSelect={() => {
-                  // React Query holds `error` until the next mutate, so
-                  // without this the last refusal greets the next open.
-                  if (canMutate) {
-                    deleteTeam.reset();
-                    setConfirmDelete(true);
-                  } else {
-                    if (!open) onToggle();
-                    setDeletionRequest(`team:${team.id}`);
-                  }
-                }}
-              >
-                {canMutate ? "Delete team" : "Request deletion"}
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-        )}
-      </div>
-
-      {open && (
-        <div className={page ? "mt-6 space-y-10" : "ml-6 mt-3 space-y-8 border-l border-line pl-4"}>
-          {canMutate && !declared && <TeamName key={team.id} team={team} />}
-          <TeamMembers team={team} orgMembers={orgMembers} canMutate={canMutate} onSelfRemoved={leavePage} />
-          <TeamDefaults team={team} canMutate={canMutate} />
-          <TeamSlack key={team.id} team={team} canMutate={canMutate} />
-          {/* The team's own page has an Integrations tab for its connections. */}
-          {!page && <SubSection title="Connections">
-            <TeamCredentials team={team} orgMembers={orgMembers} canMutate={canMutate} />
-          </SubSection>}
-          <TeamDeletionRequests
-            key={`deletion-requests:${team.id}`}
-            teamId={team.id}
-            canManage={canMutate}
-            request={deletionRequest}
-            onRequestChange={setDeletionRequest}
-          />
-        </div>
-      )}
-
+    <>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button type="button" variant="ghost" size="sm" aria-label={`${team.name} actions`}>
+            <MoreHorizontal className="h-4 w-4" aria-hidden />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end">
+          <DropdownMenuItem
+            className="text-danger-500"
+            onSelect={() => {
+              // React Query holds `error` until the next mutate, so
+              // without this the last refusal greets the next open.
+              if (canMutate) {
+                deleteTeam.reset();
+                setConfirmDelete(true);
+              } else {
+                onRequestDeletion?.();
+              }
+            }}
+          >
+            {canMutate ? "Delete team" : "Request deletion"}
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
       <ConfirmDialog
         open={confirmDelete}
         onOpenChange={setConfirmDelete}
@@ -333,14 +280,50 @@ function TeamRow({
         onConfirm={() => deleteTeam.mutate(team.id, {
           onSuccess: () => {
             setConfirmDelete(false);
-            leavePage?.();
+            onDeleted?.();
           },
         })}
+      />
+    </>
+  );
+}
+
+/** A team's General tab: one `Section` per part, the same card anatomy as
+ * every other settings page. Connections are on the Integrations tab. */
+function TeamGeneral({ team, orgMembers, canMutate }: {
+  team: TeamSummary;
+  orgMembers: OrgDirectoryUserWire[];
+  canMutate: boolean;
+}) {
+  const [deletionRequest, setDeletionRequest] = useState<string | null>(null);
+  const navigate = useNavigate();
+  // A team the caller deleted or left would read as "not a member" here.
+  // Profile is the settings landing page. Replace, so Back does not return
+  // to the gone team.
+  const leavePage = () => void navigate({ to: "/settings/profile", replace: true });
+
+  return (
+    <div className="space-y-10">
+      <div className="flex flex-wrap items-center gap-2">
+        <TeamBadges team={team} />
+        <span className="text-xs text-muted">Created {formatDate(team.createdAt)}</span>
+        <div className="ml-auto">
+          <TeamActions team={team} canMutate={canMutate} onDeleted={leavePage} onRequestDeletion={() => setDeletionRequest(`team:${team.id}`)} />
+        </div>
+      </div>
+      {canMutate && team.origin !== "config" && <TeamName team={team} />}
+      <TeamMembers team={team} orgMembers={orgMembers} canMutate={canMutate} onSelfRemoved={leavePage} />
+      <TeamDefaults team={team} canMutate={canMutate} />
+      <TeamSlack team={team} canMutate={canMutate} />
+      <TeamDeletionRequests
+        teamId={team.id}
+        canManage={canMutate}
+        request={deletionRequest}
+        onRequestChange={setDeletionRequest}
       />
     </div>
   );
 }
-
 
 /**
  * The team default model and reasoning level (TKAI-255; reasoning added
@@ -381,11 +364,10 @@ function TeamDefaults({
     : "Organization default";
 
   return (
-    <SubSection
+    <Section
       title="Defaults"
       description="New runtimes in this team's workspace use these, unless the member who starts one has a personal default."
     >
-      <div className="divide-y divide-line">
         <FieldRow label="Model">
           {canMutate ? (
             <ModelCombobox
@@ -413,9 +395,8 @@ function TeamDefaults({
             </p>
           )}
         </FieldRow>
-      </div>
-      {patchTeam.error != null && <ErrorRow className="py-0 text-xs">{errorText(patchTeam.error)}</ErrorRow>}
-    </SubSection>
+      {patchTeam.error != null && <ErrorRow className="py-3 text-xs">{errorText(patchTeam.error)}</ErrorRow>}
+    </Section>
   );
 }
 
@@ -446,7 +427,7 @@ function TeamMembers({
   const addable = orgMembers.filter((m) => !memberIds.has(m.userId));
 
   return (
-    <SubSection
+    <Section
       title="Members"
       description={declared ? CONFIG_MANAGED_NOTE : undefined}
       actions={
@@ -465,12 +446,12 @@ function TeamMembers({
         <ErrorRow className="py-2 text-xs">Failed to load {teamName}'s members.</ErrorRow>
       )}
 
-      <ul className="space-y-1">
+      {memberRows.length > 0 && <ul>
         {memberRows.map((member) => {
           const identity = byId.get(member.userId);
           const name = identity?.name ?? identity?.email ?? member.userId;
           return (
-            <li key={member.userId} className="flex items-center gap-3 py-1">
+            <li key={member.userId} className="flex items-center gap-3 py-1.5">
               <Avatar size="sm">
                 <AvatarFallback>{name.slice(0, 1).toUpperCase()}</AvatarFallback>
               </Avatar>
@@ -506,12 +487,12 @@ function TeamMembers({
             </li>
           );
         })}
-      </ul>
+      </ul>}
 
       {addMember.error != null && (
-        <ErrorRow className="py-1 text-xs">Failed to add the member: {errorText(addMember.error)}</ErrorRow>
+        <ErrorRow className="py-3 text-xs">Failed to add the member: {errorText(addMember.error)}</ErrorRow>
       )}
-    </SubSection>
+    </Section>
   );
 }
 
@@ -702,7 +683,7 @@ function TeamName({ team }: { team: TeamSummary }) {
   useEffect(() => setName(team.name), [team.name]);
   const next = name.trim();
   return (
-    <SubSection title="Name">
+    <Section title="Name">
       <FieldRow label="Team name" error={patch.error ? errorText(patch.error) : undefined}>
         <div className="flex gap-2">
           <Input aria-label="Team name" value={name} onChange={(event) => setName(event.target.value)} />
@@ -714,7 +695,7 @@ function TeamName({ team }: { team: TeamSummary }) {
           </Button>
         </div>
       </FieldRow>
-    </SubSection>
+    </Section>
   );
 }
 
@@ -724,7 +705,7 @@ function TeamSlack({ team, canMutate }: { team: TeamSummary; canMutate: boolean 
   const patch = usePatchTeam();
   useEffect(() => setChannel(team.slackHomeChannelId ?? ""), [team.slackHomeChannelId]);
   return (
-    <SubSection
+    <Section
       title="Slack"
       description="Valet posts new team notifications in the home channel. Add the Valet bot to that channel first."
       actions={<Button variant="secondary" size="sm" onClick={() => setReplySetup(true)}>Set up Slack replies</Button>}
@@ -744,11 +725,11 @@ function TeamSlack({ team, canMutate }: { team: TeamSummary; canMutate: boolean 
           <p className="text-sm text-ink sm:pt-2">{team.slackHomeChannelId ?? "Not set"}</p>
         )}
       </FieldRow>
-      <div className="flex flex-wrap gap-x-4 gap-y-2 text-sm">
+      <div className="flex flex-wrap gap-x-4 gap-y-2 py-3.5 text-sm last:pb-0.5">
         <Link to="/presence" search={{ workspace: team.id }} className={textLinkClass}>Open Presence</Link>
         <Link to="/settings/notifications" className={textLinkClass}>My DM preferences</Link>
       </div>
       <LineEditor key={team.id} open={replySetup} onOpenChange={setReplySetup} mode={{ kind: "create", preselected: { team: { id: team.id, name: team.name } } }} />
-    </SubSection>
+    </Section>
   );
 }

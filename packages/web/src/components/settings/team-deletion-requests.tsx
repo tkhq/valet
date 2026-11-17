@@ -5,7 +5,7 @@ import type { TeamDeletionRequestSummary } from "@valet/api/wire";
 import { useMe } from "~/api/settings";
 import { useDecideTeamDeletionRequest, useSubmitTeamDeletionRequest, useTeamDeletionRequests, useTeamDeletionTargets } from "~/api/team-deletion-requests";
 import { Badge, type BadgeProps, Button, ConfirmDialog, Dialog, DialogContent, DialogFooter, EmptyRow, ErrorRow, Input, LoadingRow, SelectMenu, WorkList, WorkRow } from "~/components/primitives";
-import { SubSection } from "./section";
+import { Section } from "./section";
 import { errorText } from "~/lib/error-text";
 
 /** One list, newest first: a filter over a list that is almost always short only hides rows. */
@@ -45,7 +45,7 @@ function ScopedDeletionRequests({ teamId, canManage, request, onRequestChange }:
   useEffect(() => { if (!readable) setConfirmation(null); }, [readable]);
   const target = targets.data?.targets.find((t) => `${t.resourceType}:${t.resourceId}` === selected);
   const closeRequest = () => { setSelected(null); setReason(""); };
-  return <SubSection title="Deletion requests" description="Ask a team admin to delete a shared resource."
+  return <Section title="Deletion requests" description="Ask a team admin to delete a shared resource."
     actions={<Button variant="secondary" size="sm" disabled={!readable} onClick={() => { submit.reset(); setSelected(""); }}>Request deletion…</Button>}>
     {requests.isPending ? <LoadingRow label="Loading deletion requests…" /> : requests.error ?
       <ErrorRow>Could not load deletion requests. <Button onClick={() => void requests.refetch()}>Retry</Button></ErrorRow> :
@@ -97,7 +97,7 @@ function ScopedDeletionRequests({ teamId, canManage, request, onRequestChange }:
       onConfirm={() => decide.mutate({ id: confirmation.row.id, decision: confirmation.decision, note }, { onSuccess: () => setConfirmation(null) })} >
       <Input aria-label="Decision note" placeholder="Decision note (optional)" maxLength={2000} disabled={decide.isPending} value={note} onChange={(e) => setNote(e.target.value)} />
     </ConfirmDialog>}
-  </SubSection>;
+  </Section>;
 }
 
 function resourceTypeLabel(type: TeamDeletionRequestSummary["resourceType"]): string {

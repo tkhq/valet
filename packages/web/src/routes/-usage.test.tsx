@@ -17,7 +17,7 @@
  *   - the key setup callout links Personal → Access;
  *   - disabled-gateway notice renders.
  */
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { afterEach, describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 
 import type {
@@ -458,6 +458,7 @@ vi.mock("~/api/client", () => ({
 }));
 
 import { UsagePage } from "./usage";
+import { TeamUsageTab } from "./settings.teams.$teamId.usage";
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -989,6 +990,26 @@ describe("UsagePage — team workspace scope", () => {
     render(<UsagePage />);
     expect(lastProxyRequestsOpts?.enabled).toBe(false);
     expect(lastProxySettingsOpts?.enabled).toBe(false);
+  });
+});
+
+describe("TeamUsageTab", () => {
+  afterEach(() => {
+    teamsResult = { data: { teams: [] }, isLoading: false };
+  });
+
+  it("points an org admin who is not on the team to the organization's usage", () => {
+    teamsResult = { data: { teams: [{ id: "team-x", name: "Team X", callerRole: null }] }, isLoading: false };
+    render(<TeamUsageTab teamId="team-x" />);
+    expect(screen.getByText(/Only members of this team can see its usage/)).toBeTruthy();
+    expect(breakdownCalls).toEqual([]);
+  });
+
+  it("shows a member the team's spend", () => {
+    workspaceTeamId = "team-x";
+    teamsResult = { data: { teams: [{ id: "team-x", name: "Team X", callerRole: "member" }] }, isLoading: false };
+    render(<TeamUsageTab teamId="team-x" />);
+    expect(breakdownCalls.at(-1)?.slice(1, 3)).toEqual(["team", "team-x"]);
   });
 });
 

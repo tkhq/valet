@@ -754,7 +754,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
             ? "Only a team admin can delete this workflow. Use workflows.request_workflow_deletion to request admin review."
             : "Team workflow deletion requires a signed-in person in direct web chat. Ask a team admin there or open team settings.",
           data: { code: error.code, teamId: error.teamId,
-            reviewUrl: `/settings/organization/teams?teamId=${encodeURIComponent(error.teamId)}`,
+            reviewUrl: `/settings/teams/${encodeURIComponent(error.teamId)}`,
             ...(directActor ? { nextAction: "workflows.request_workflow_deletion" } : {}),
           },
         };
@@ -794,7 +794,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
         { orgId: owner.orgId, userId: owner.userId, teamId: workflow.ownerId }, "workflow", workflow_id, reason);
       return { success: true, data: {
         workflowId: workflow_id, deleted: false, requestId: request.id, status: request.status, created,
-        reviewUrl: `/settings/organization/teams?teamId=${encodeURIComponent(workflow.ownerId)}`,
+        reviewUrl: `/settings/teams/${encodeURIComponent(workflow.ownerId)}`,
       } };
     },
   });

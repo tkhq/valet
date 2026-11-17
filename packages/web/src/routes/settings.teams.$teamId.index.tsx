@@ -5,8 +5,8 @@ import { TeamSlackSetupCard } from "~/components/events/team-slack-setup";
 import { TeamsPanel } from "~/components/settings/teams-panel";
 
 /** A team's General tab: the Slack setup prompt until the team listens
- * somewhere, then members, defaults, and Slack home channel. Connections
- * are on the Integrations tab. */
+ * somewhere, then name, members, defaults, Slack home channel, and deletion
+ * requests. Connections are on the Integrations tab. */
 export const Route = createFileRoute("/settings/teams/$teamId/")({
   component: TeamGeneralTab,
 });
@@ -20,6 +20,6 @@ function TeamGeneralTab() {
   }
   return <div className="space-y-10">
     <TeamSlackSetupCard key={teamId} teamId={teamId} />
-    <TeamsPanel orgMembers={directory.data.users} teamId={teamId} page />
+    <TeamsPanel orgMembers={directory.data.users} teamId={teamId} />
   </div>;
 }

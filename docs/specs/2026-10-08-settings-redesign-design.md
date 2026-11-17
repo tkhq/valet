@@ -50,9 +50,10 @@ on these pages, not the switcher's.
 - **Access** joins API keys, proxy, and agent access for the personal
   workspace (2026-11-17).
 - **A team** opens `/settings/teams/$teamId`, a page with tabs: General (the
-  team panel: members, defaults, Slack home channel, connections), API keys and
-  proxy, and Policies. A draft on one team's tab does not carry to another
-  team's page.
+  team panel: name, members, defaults, Slack home channel, deletion
+  requests), Integrations, Secrets, Access, Policies, and Usage
+  (2026-11-17). A draft on one team's tab does not carry to another team's
+  page.
   Deleting the team, or removing yourself from it, on this page opens Profile.
 - **Organization** keeps every existing route. The rail shows four items, and
   each item's page shows a tab bar over the routes it groups:
@@ -115,6 +116,18 @@ scope holds only its own items.
   Secrets tab, and the organization's on Security and audit · Secrets.
   The three share one list and form (`SecretsSection`) with a scope
   target. The API decides who may change each scope (`canWrite`).
+- **Team pages.** A team's members and org admins open
+  `/settings/teams/$teamId`, the same rule team Policies uses. Each row in
+  Organization · Teams is a link to that page. The list has no inline
+  editor: create stays at the top of the list, Delete stays in an
+  administrator's row menu, and Request deletion moves to the team page,
+  where its form lives. `?teamId=` on the Teams page opens the team page,
+  so saved review notifications still land. Review notifications and
+  workflow deletion answers now link `/settings/teams/$teamId`. Team
+  General uses `Section` cards with `FieldRow`, the same anatomy as the
+  other settings pages. The usage API answers a team's spend to its
+  members only, so an org admin who is not on a team sees a pointer to
+  Organization Usage on that tab.
 
 ### 3. Visual language
 
@@ -328,7 +341,8 @@ Restart replay publishes the same completion event after it saves the result.
   organizations are off, MCP servers outside the organization route guard
   for an admin and the ask-an-admin notice for a member.
 - `-settings.team.test.tsx`: the team page pins its team, marks its tab,
-  refuses a team the caller is not on, and drops a draft when another of the
+  refuses a team the caller is not on unless the caller is an org admin, and
+  drops a draft when another of the
   caller's teams opens; the personal Access page pins personal
   scope.
 - `-settings.navigation.test.tsx`: rail links leave Organization Teams, and

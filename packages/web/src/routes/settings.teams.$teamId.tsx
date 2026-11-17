@@ -2,15 +2,15 @@ import { Link, Outlet, createFileRoute, useRouterState } from "@tanstack/react-r
 import { useOrg, useTeams } from "~/api/settings";
 import { ErrorRow, LinkTabs, LoadingRow, type AppPath, type LinkTab } from "~/components/primitives";
 import { ActiveTabLabel } from "~/components/settings/section";
-import { eligibleTeams } from "~/components/session/assistant-rail";
 import { normalizeSettingsPath } from "~/components/settings/settings-rail";
 import { PinnedWorkspaceScope } from "~/lib/workspace-scope";
 
 /**
  * `/settings/teams/$teamId` — one team's settings, chosen by name in the
  * rail rather than by the workspace switcher (settings-redesign spec,
- * decision 2). It is the team's one home: the sidebar's Settings row opens
- * it too. The tabs pin this team's scope, so the sections they render
+ * decision 2). It is the team's one home: the sidebar's Settings row and
+ * the team's row in Organization · Teams open it too. Its members and org
+ * admins may open it. The tabs pin this team's scope, so the sections they render
  * (`TeamsPanel`, Integrations, Secrets, Access, Policies, Usage) read it
  * through `useWorkspaceScope()` unchanged.
  */
@@ -30,7 +30,12 @@ export function TeamSettingsShell({ teamId }: { teamId: string }) {
 
   if (orgQ.isLoading || teamsQ.isLoading) return <LoadingRow label="Loading team settings…" />;
   if (teamsQ.error || orgQ.error) return <ErrorRow>Could not load your teams. Reload the page to try again.</ErrorRow>;
-  const team = eligibleTeams(teamsQ.data?.teams, orgQ.data?.features.organizations).find((t) => t.id === teamId);
+  // A member opens their own teams. An org admin opens every team in the
+  // org, as on team Policies: `GET /api/teams` lists them all for an admin.
+  const orgAdmin = orgQ.data?.callerRole === "admin";
+  const team = orgQ.data?.features.organizations === true
+    ? teamsQ.data?.teams.find((t) => t.id === teamId && (t.callerRole !== null || orgAdmin))
+    : undefined;
   if (!team) {
     return <ErrorRow>You are not a member of this team. Choose a team under Your teams.</ErrorRow>;
   }

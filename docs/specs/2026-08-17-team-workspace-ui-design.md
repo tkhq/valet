@@ -255,7 +255,7 @@ Profile, appearance, and other personal-only settings are omitted in team scope.
 Organization settings keep their existing routes and permission gates. Personal workspace settings remain unchanged.
 The scope redirect applies only to settings URLs. Primary navigation out of settings must reach its destination, even while the settings layout remains mounted during the transition.
 
-The team page reuses TeamsPanel with a selected team ID. It shows only that team, expanded, without the create-team form.
+The team page reuses TeamsPanel with a selected team ID. It shows only that team, expanded, without the create-team form. Since 2026-11-17 that is the only place a team is edited: Organization · Teams lists each team as a link to its page (`2026-10-08-settings-redesign-design.md`).
 Existing team-admin, org-admin, member, and managed-team restrictions apply. This change adds no roles or persona model.
 Switching workspace remounts the settings content, discarding drafts and confirmation dialogs before a different team can become their target.
 Unavailable teams show a recovery message instead of another team's controls.
