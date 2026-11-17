@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { findMisses, goldenText, groupMisses, insideRepo, keptFindings, missCase, missCaseId, reviewedBy } from "../src/review-misses.js";
+import { findMisses, goldenText, groupMisses, insideRepo, keptFindings, missCase, missCaseId, rejectedFindings, reviewedBy } from "../src/review-misses.js";
 import type { OutcomeRow, PullNode } from "../src/review-outcomes.js";
 
 const row = (over: Partial<OutcomeRow>): OutcomeRow => ({
@@ -58,6 +58,20 @@ describe("review misses", () => {
     });
     const rated = missCase(groupMisses([row({ severity: "medium", category: "security" })])[0] ?? first, "a", false);
     expect(rated).toMatchObject({ checks: [{ golden: [{ severity: "Medium", category: "security" }] }] });
+  });
+
+  it("collects our comments people rejected, never one our recheck withdrew, as rejected findings", () => {
+    const rows = [
+      row({ bot: "acme-review[bot]", commentId: 2, outcome: "rejected" }),
+      row({ bot: "acme-review[bot]", commentId: 3, outcome: "rejected", botStatus: "withdrawn" }),
+      row({ bot: "acme-review[bot]", commentId: 4 }),
+      row({ commentId: 5, outcome: "rejected" }),
+    ];
+    const rejected = rejectedFindings(rows, "acme-review");
+    expect(rejected.map((r) => r.commentId)).toEqual([2]);
+    const [g] = groupMisses(rejected);
+    const doc = missCase({ ...g, rows: [] }, "a", true, "rejected", rejected);
+    expect(doc).toMatchObject({ id: missCaseId(g, "rejected"), checks: [{ golden: [], rejected: [{ category: "bug" }] }] });
   });
 
   it("keeps our own addressed comments as kept cases, apart from misses", () => {

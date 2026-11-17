@@ -334,6 +334,13 @@ pnpm --filter @valet/eval review-misses --repo owner/name --since 2026-11-10 \
   `kept-` cases. They form a regression suite: a reviewer change that stops
   finding them loses recall that authors already valued. Pair it with
   `review-compare` before a change ships.
+- `--with-rejected` also writes our reviewer's comments that people
+  rejected (a thumbs-down, or a thread a person resolved with no code
+  change) as `rejected` findings. They join the kept case at the same
+  commit, or form a `rejected-` case of their own. `review_match` reports
+  `rejected` (repeated) of `rejected_total`, and `review-compare` holds a
+  candidate that likely repeats 5 points more of them. A comment our recheck
+  withdrew does not count: that was the model's call, not a person's.
 - Cases quote review comments. The command refuses an output directory
   inside the repo. Run the suite as a private suite (see "Private suites").
 

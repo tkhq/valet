@@ -28,6 +28,9 @@ export interface RunMetrics {
   fp: number;
   fn: number;
   costUsd: number;
+  /** Findings people rejected that the review repeated, of `rejectedTotal` (cases with `rejected` findings). */
+  rejected: number;
+  rejectedTotal: number;
 }
 
 /** The runs of one case, from one eval output. */
@@ -54,6 +57,8 @@ interface Totals {
   fn: number;
   reviews: number;
   costUsd: number;
+  rejected: number;
+  rejectedTotal: number;
 }
 
 export interface Comparison {
@@ -64,11 +69,13 @@ export interface Comparison {
   recallDiff: { mean: number; low: number; high: number; pLoss: number };
   /** Candidate over base, false findings per review. */
   fpRatio: { mean: number; low: number; high: number; pRise: number };
+  /** Candidate minus base, share of rejected findings repeated. Absent when no case lists rejected findings. */
+  rejectedDiff?: { mean: number; low: number; high: number; pRise: number };
   costRatio: number;
   verdict: "ship" | "hold" | "inconclusive";
   reasons: string[];
-  /** Cases where the two sides found a different number of golden issues or false findings, largest change first. */
-  changed: { id: string; tp: number; fp: number }[];
+  /** Cases where the two sides found a different number of golden issues, false findings or repeated rejected findings, largest change first. */
+  changed: { id: string; tp: number; fp: number; rejected: number }[];
   /** Cases in only one of the two files. They are left out of the comparison. */
   unmatched: string[];
 }
@@ -93,7 +100,7 @@ export function parseEvalOutput(text: string): CaseRuns {
     const perRun = e.sampling?.metricsPerRun ?? (review ? [review] : []);
     if (perRun.length === 0) continue;
     const costs = e.sampling?.costPerRun ?? perRun.map(() => (e.costUsd ?? 0) / perRun.length);
-    out.set(e.caseId, perRun.map((m, i) => ({ tp: m.tp ?? 0, fp: m.fp ?? 0, fn: m.fn ?? 0, costUsd: costs[i] ?? 0 })));
+    out.set(e.caseId, perRun.map((m, i) => ({ tp: m.tp ?? 0, fp: m.fp ?? 0, fn: m.fn ?? 0, costUsd: costs[i] ?? 0, rejected: m.rejected ?? 0, rejectedTotal: m.rejected_total ?? 0 })));
   }
   return out;
 }
@@ -115,13 +122,15 @@ export function objectEnd(text: string, start: number): number {
 }
 
 function totals(runs: RunMetrics[][]): Totals {
-  const t: Totals = { tp: 0, fp: 0, fn: 0, reviews: 0, costUsd: 0 };
+  const t: Totals = { tp: 0, fp: 0, fn: 0, reviews: 0, costUsd: 0, rejected: 0, rejectedTotal: 0 };
   for (const c of runs) {
     for (const r of c) {
       t.tp += r.tp;
       t.fp += r.fp;
       t.fn += r.fn;
       t.costUsd += r.costUsd;
+      t.rejected += r.rejected;
+      t.rejectedTotal += r.rejectedTotal;
       t.reviews += 1;
     }
   }
@@ -131,6 +140,7 @@ function totals(runs: RunMetrics[][]): Totals {
 const recallOf = (t: Totals): number => (t.tp + t.fn === 0 ? 0 : t.tp / (t.tp + t.fn));
 const fpPerReview = (t: Totals): number => (t.reviews === 0 ? 0 : t.fp / t.reviews);
 const costPerReview = (t: Totals): number => (t.reviews === 0 ? 0 : t.costUsd / t.reviews);
+const rejectedRate = (t: Totals): number => (t.rejectedTotal === 0 ? 0 : t.rejected / t.rejectedTotal);
 
 /** A small seeded generator, so a comparison gives the same answer on every run. */
 function mulberry32(seed: number): () => number {
@@ -162,6 +172,7 @@ export function compareRuns(base: CaseRuns, candidate: CaseRuns, rule: ShipRule 
   const rand = mulberry32(rule.seed);
   const recallDiffs: number[] = [];
   const fpRatios: number[] = [];
+  const rejectedDiffs: number[] = [];
   for (let s = 0; s < rule.resamples; s++) {
     const pick = ids.map(() => Math.floor(rand() * ids.length));
     const sb = totals(pick.map((i) => b[i]));
@@ -169,7 +180,9 @@ export function compareRuns(base: CaseRuns, candidate: CaseRuns, rule: ShipRule 
     recallDiffs.push(recallOf(sc) - recallOf(sb));
     const fb = fpPerReview(sb);
     fpRatios.push(fb === 0 ? (fpPerReview(sc) === 0 ? 1 : Infinity) : fpPerReview(sc) / fb);
+    rejectedDiffs.push(rejectedRate(sc) - rejectedRate(sb));
   }
+  rejectedDiffs.sort((x, y) => x - y);
   recallDiffs.sort((x, y) => x - y);
   fpRatios.sort((x, y) => x - y);
   const pLoss = recallDiffs.filter((d) => d < -rule.recallMargin).length / recallDiffs.length;
@@ -178,11 +191,16 @@ export function compareRuns(base: CaseRuns, candidate: CaseRuns, rule: ShipRule 
   const fbAll = fpPerReview(bt);
   const fpRatio = { mean: fbAll === 0 ? (fpPerReview(ct) === 0 ? 1 : Infinity) : fpPerReview(ct) / fbAll, low: quantile(fpRatios, 0.05), high: quantile(fpRatios, 0.95), pRise };
   const costRatio = costPerReview(bt) === 0 ? 1 : costPerReview(ct) / costPerReview(bt);
+  // A rejected finding coming back is the false positive people already pushed back on: hold a rise like a recall loss.
+  const rejectedDiff = bt.rejectedTotal > 0
+    ? { mean: rejectedRate(ct) - rejectedRate(bt), low: quantile(rejectedDiffs, 0.05), high: quantile(rejectedDiffs, 0.95), pRise: rejectedDiffs.filter((d) => d > rule.recallMargin).length / rejectedDiffs.length }
+    : undefined;
 
   const reasons: string[] = [];
   const pct = (x: number): string => `${Math.round(x * 100)}%`;
   if (pLoss > rule.risk) reasons.push(`recall: ${pct(pLoss)} chance of losing more than ${Math.round(rule.recallMargin * 100)} points (limit ${pct(rule.risk)})`);
   if (pRise > rule.risk) reasons.push(`false findings: ${pct(pRise)} chance of rising more than ${pct(rule.fpMargin)} (limit ${pct(rule.risk)})`);
+  if (rejectedDiff && rejectedDiff.pRise > rule.risk) reasons.push(`rejected findings: ${pct(rejectedDiff.pRise)} chance the review repeats ${Math.round(rule.recallMargin * 100)} points more of them (limit ${pct(rule.risk)})`);
   if (costRatio > rule.costBudget) reasons.push(`cost: ${costRatio.toFixed(2)}x the base per review (limit ${rule.costBudget.toFixed(2)}x)`);
   const wide = recallDiff.high - recallDiff.low > 0.2;
   if (wide) reasons.push(`recall interval is ${Math.round((recallDiff.high - recallDiff.low) * 100)} points wide: add cases or runs`);
@@ -192,13 +210,13 @@ export function compareRuns(base: CaseRuns, candidate: CaseRuns, rule: ShipRule 
     .map((id, i) => {
       const tb = totals([b[i]]);
       const tc = totals([c[i]]);
-      return { id, tp: tc.tp - tb.tp, fp: tc.fp - tb.fp };
+      return { id, tp: tc.tp - tb.tp, fp: tc.fp - tb.fp, rejected: tc.rejected - tb.rejected };
     })
-    .filter((x) => x.tp !== 0 || x.fp !== 0)
+    .filter((x) => x.tp !== 0 || x.fp !== 0 || x.rejected !== 0)
     .sort((x, y) => Math.abs(y.tp) * 10 + Math.abs(y.fp) - (Math.abs(x.tp) * 10 + Math.abs(x.fp)));
 
   const withRates = (t: Totals) => ({ ...t, recall: recallOf(t), precision: t.tp + t.fp === 0 ? 0 : t.tp / (t.tp + t.fp) });
-  return { cases: ids.length, base: withRates(bt), candidate: withRates(ct), recallDiff, fpRatio, costRatio, verdict, reasons, changed, unmatched };
+  return { cases: ids.length, base: withRates(bt), candidate: withRates(ct), recallDiff, fpRatio, ...(rejectedDiff ? { rejectedDiff } : {}), costRatio, verdict, reasons, changed, unmatched };
 }
 
 export function formatComparison(c: Comparison): string {
@@ -212,11 +230,14 @@ export function formatComparison(c: Comparison): string {
     "",
     `recall diff ${pct(c.recallDiff.mean)} points (90% interval ${pct(c.recallDiff.low)} to ${pct(c.recallDiff.high)})`,
     `false findings per review ${c.fpRatio.mean.toFixed(2)}x (90% interval ${c.fpRatio.low.toFixed(2)}x to ${c.fpRatio.high.toFixed(2)}x)`,
+    ...(c.rejectedDiff
+      ? [`rejected findings repeated: base ${c.base.rejected}/${c.base.rejectedTotal}, candidate ${c.candidate.rejected}/${c.candidate.rejectedTotal}; diff ${pct(c.rejectedDiff.mean)} points (90% interval ${pct(c.rejectedDiff.low)} to ${pct(c.rejectedDiff.high)})`]
+      : []),
     `cost per review ${c.costRatio.toFixed(2)}x`,
     "",
     `VERDICT: ${c.verdict.toUpperCase()}${c.reasons.length ? ` (${c.reasons.join("; ")})` : ""}`,
   ];
-  if (c.changed.length > 0) lines.push("", "Cases that changed (candidate minus base, all runs):", ...c.changed.map((x) => `  ${x.id}: tp ${x.tp >= 0 ? "+" : ""}${x.tp}, fp ${x.fp >= 0 ? "+" : ""}${x.fp}`));
+  if (c.changed.length > 0) lines.push("", "Cases that changed (candidate minus base, all runs):", ...c.changed.map((x) => `  ${x.id}: tp ${x.tp >= 0 ? "+" : ""}${x.tp}, fp ${x.fp >= 0 ? "+" : ""}${x.fp}${x.rejected !== 0 ? `, rejected repeated ${x.rejected > 0 ? "+" : ""}${x.rejected}` : ""}`));
   if (c.unmatched.length > 0) lines.push("", `Left out (in one file only): ${c.unmatched.join(", ")}`);
   return lines.join("\n");
 }

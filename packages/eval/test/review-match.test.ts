@@ -88,6 +88,14 @@ describe("review_match", () => {
     expect(result.metrics).toMatchObject({ tp: 1, "draft:tp": 1, "draft:fn": 1 });
   });
 
+  it("counts the rejected findings a review repeats, once each", async () => {
+    const matcher = buildReviewMatcher({ llm: fakeLlm(["Negative slicing crashes", "Negative index again", "Unused import of os"]) });
+    const rejected: ReviewMatchCheck = { type: "review_match", golden: [], rejected: [{ comment: "Negative slicing is fine here", category: "bug" }, { comment: "Rename the variable", category: "style" }] };
+    const result = await matcher(rejected, trajectory(REVIEW));
+    expect(result.metrics).toMatchObject({ tp: 0, fn: 0, rejected: 1, rejected_total: 2 });
+    expect((await matcher(check, trajectory(REVIEW))).metrics).not.toHaveProperty("rejected");
+  });
+
   it("profileMetrics counts only the profile's categories", () => {
     expect(profileMetrics(check, "all", [0, 2], 3)).toEqual({ tp: 2, fp: 3, fn: 1 });
     expect(profileMetrics(check, "strict", [0, 2], 3)).toEqual({ tp: 1, fp: 3, fn: 1 });
@@ -118,6 +126,13 @@ describe("pull_request cases", () => {
     pull_request: { repo: "sentry", remote: "https://example.com/r.git", base: "a", head: "b", title: "t" },
     checks: [{ type: "review_match", golden: GOLDEN }],
   };
+
+  it("parse a case that holds only rejected findings, and refuse one with neither list", () => {
+    const rejectedOnly = { ...base, checks: [{ type: "review_match", golden: [], rejected: [{ comment: "Intended", category: "bug" }] }] };
+    const c = parseEvalCase(rejectedOnly, "x.yaml");
+    expect(c.checks[0]).toMatchObject({ golden: [], rejected: [{ comment: "Intended", category: "bug" }] });
+    expect(() => parseEvalCase({ ...base, checks: [{ type: "review_match", golden: [], rejected: [] }] }, "x.yaml")).toThrow(CaseValidationError);
+  });
 
   it("parse without turns", () => {
     const c = parseEvalCase(base, "x.yaml");

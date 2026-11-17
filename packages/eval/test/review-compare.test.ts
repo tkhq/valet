@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { compareRuns, parseEvalOutput, type CaseRuns, type RunMetrics } from "../src/review-compare.js";
 
-const run = (tp: number, fp: number, fn: number, costUsd = 0.1): RunMetrics => ({ tp, fp, fn, costUsd });
+const run = (tp: number, fp: number, fn: number, costUsd = 0.1, rejected = 0, rejectedTotal = 0): RunMetrics => ({ tp, fp, fn, costUsd, rejected, rejectedTotal });
 const suite = (n: number, make: (i: number) => RunMetrics[]): CaseRuns => new Map(Array.from({ length: n }, (_, i) => [`case-${i}`, make(i)]));
 
 describe("parseEvalOutput", () => {
@@ -28,6 +28,17 @@ describe("parseEvalOutput", () => {
 });
 
 describe("compareRuns", () => {
+  it("holds a candidate that repeats more of the findings people rejected", () => {
+    const base = suite(60, () => [run(1, 1, 1, 0.1, 0, 1), run(1, 1, 1, 0.1, 0, 1)]);
+    const candidate = suite(60, (i) => [run(1, 1, 1, 0.1, i % 2, 1), run(1, 1, 1, 0.1, i % 2, 1)]);
+    const c = compareRuns(base, candidate);
+    expect(c.rejectedDiff?.mean).toBeCloseTo(0.5);
+    expect(c.verdict).toBe("hold");
+    expect(c.reasons.join()).toMatch(/rejected findings/);
+    expect(compareRuns(base, base).rejectedDiff?.mean).toBe(0);
+    expect(compareRuns(suite(3, () => [run(1, 0, 0)]), suite(3, () => [run(1, 0, 0)])).rejectedDiff).toBeUndefined();
+  });
+
   it("ships a candidate that keeps recall and lowers false findings", () => {
     const base = suite(60, () => [run(1, 2, 1), run(1, 2, 1), run(1, 2, 1)]);
     const candidate = suite(60, () => [run(1, 1, 1), run(1, 1, 1), run(1, 1, 1)]);

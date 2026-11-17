@@ -278,26 +278,32 @@ function parseCheck(raw: unknown, i: number, source: string): Check {
       if (kind !== undefined && !(REVIEW_CASE_KINDS as readonly string[]).includes(kind)) {
         throw new CaseValidationError(source, `\`${at}.kind\` must be one of: ${REVIEW_CASE_KINDS.join(", ")}`);
       }
-      // A control or setup PR has no planted defect, so it may list none.
-      const mayBeEmpty = kind === "control" || kind === "setup";
+      const comments = (list: unknown[], name: string): GoldenComment[] =>
+        list.map((g, gi) => {
+          if (!isRecord(g) || typeof g.comment !== "string" || typeof g.category !== "string") {
+            throw new CaseValidationError(source, `\`${at}.${name}[${gi}]\` needs string \`comment\` and \`category\``);
+          }
+          return {
+            comment: g.comment,
+            category: g.category,
+            ...(typeof g.severity === "string" ? { severity: g.severity } : {}),
+            ...(g.cross_repo === true ? { cross_repo: true } : {}),
+            ...(typeof g.fix === "string" ? { fix: g.fix } : {}),
+          };
+        });
+      if (raw.rejected !== undefined && !Array.isArray(raw.rejected)) {
+        throw new CaseValidationError(source, `\`${at}.rejected\` must be an array of {comment, category}`);
+      }
+      const parsedRejected = Array.isArray(raw.rejected) ? comments(raw.rejected, "rejected") : [];
+      // A control or setup PR has no planted defect, and a case may hold only findings people rejected.
+      const mayBeEmpty = kind === "control" || kind === "setup" || parsedRejected.length > 0;
       if (!Array.isArray(golden) || (golden.length === 0 && !mayBeEmpty)) {
         throw new CaseValidationError(
           source,
-          `\`${at}.golden\` must be a non-empty array of {comment, category}. Only a \`kind: control\` or \`kind: setup\` case may leave it empty.`,
+          `\`${at}.golden\` must be a non-empty array of {comment, category}. Only a \`kind: control\` or \`kind: setup\` case, or one with \`rejected\` findings, may leave it empty.`,
         );
       }
-      const parsedGolden: GoldenComment[] = golden.map((g, gi) => {
-        if (!isRecord(g) || typeof g.comment !== "string" || typeof g.category !== "string") {
-          throw new CaseValidationError(source, `\`${at}.golden[${gi}]\` needs string \`comment\` and \`category\``);
-        }
-        return {
-          comment: g.comment,
-          category: g.category,
-          ...(typeof g.severity === "string" ? { severity: g.severity } : {}),
-          ...(g.cross_repo === true ? { cross_repo: true } : {}),
-          ...(typeof g.fix === "string" ? { fix: g.fix } : {}),
-        };
-      });
+      const parsedGolden = comments(golden, "golden");
       const profile = optString("profile");
       if (profile !== undefined && !(REVIEW_PROFILES as readonly string[]).includes(profile)) {
         throw new CaseValidationError(source, `\`${at}.profile\` must be one of: ${REVIEW_PROFILES.join(", ")}`);
@@ -311,6 +317,7 @@ function parseCheck(raw: unknown, i: number, source: string): Check {
       return {
         type,
         golden: parsedGolden,
+        ...(parsedRejected.length > 0 ? { rejected: parsedRejected } : {}),
         ...(kind !== undefined ? { kind: kind as ReviewCaseKind } : {}),
         ...(profile !== undefined ? { profile: profile as ReviewProfileName } : {}),
         ...(minRecall !== undefined ? { min_recall: minRecall } : {}),
