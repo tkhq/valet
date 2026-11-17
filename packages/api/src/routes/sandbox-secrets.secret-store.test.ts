@@ -341,6 +341,7 @@ describe("finding saved secrets", () => {
     expect((await (await find("team key", token)).text()).trim()).toBe("saved\tsecret://team/team-1/TEAM_KEY");
     expect((await (await find("key team", token)).text()).trim()).toBe("saved\tsecret://team/team-1/TEAM_KEY");
     expect((await (await find("team password", token)).text()).trim()).toBe("");
+    expect((await (await find("--", token)).text()).trim()).toBe("");
   });
 
   it("matches a name case-insensitively and prints no value", async () => {

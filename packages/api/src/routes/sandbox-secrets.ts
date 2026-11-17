@@ -402,7 +402,8 @@ sandboxSecretsRouter.post("/find", async (c) => {
 });
 
 /**
- * Saved secrets whose name contains the query (any name when it is null), as
+ * Saved secrets whose name contains every word of the query (any name when
+ * the query is null; none when it has no letter or digit), as
  * `secret://` references tagged `saved`. Only scopes the session may read are
  * listed, with the same `mayRead` rule `/resolve` applies, so every line is a
  * reference `run` accepts here: a team session sees its team and the company,
@@ -430,7 +431,7 @@ async function findSavedSecrets(
     if (!(await store.mayRead(ctx, scope))) continue;
     for (const row of await store.list(ctx, scope)) {
       const name = row.name.toLowerCase();
-      if (words === null || words.every((word) => name.includes(word))) {
+      if (words === null || (words.length > 0 && words.every((word) => name.includes(word)))) {
         lines.push(`saved\t${row.reference}`);
       }
     }
