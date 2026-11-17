@@ -37,7 +37,7 @@
 import { IntegrationDetails } from "./integration-details";
 import { useState } from "react";
 import type { PluginServiceSummary, PluginSummary, ToolPermissionWire } from "@valet/api/wire";
-import { Badge, Button, ConfirmDialog } from "~/components/primitives";
+import { Badge, Button, ConfirmDialog, ManagedNote } from "~/components/primitives";
 import { useCredentials, useDisconnectCredential } from "~/api/integrations";
 import { errorText } from "~/lib/error-text";
 import { Link } from "@tanstack/react-router";
@@ -421,11 +421,7 @@ function ServiceBlock({
   const identityLink = useServiceIdentityLink(service.service);
   const pairing = orgProvided && identityLink.link?.channelReady ? identityLink.link : null;
   const orgProvidedNote =
-    orgProvided && !pairing && !identityLink.isLoading ? (
-      <p className="text-xs leading-relaxed text-muted">
-        Provided by your organization. An admin manages it in Settings → Organization.
-      </p>
-    ) : undefined;
+    orgProvided && !pairing && !identityLink.isLoading ? <ManagedNote scope="org" askAdmin /> : undefined;
 
   const connectionDetails = <>
       {/* The org note reads on a disconnected card too — "your organisation
@@ -464,7 +460,7 @@ function ServiceBlock({
         slug={slug}
         description={description}
         state={badge ? <Badge variant={badge.variant}>{badge.label}</Badge> : undefined}
-        meta={[orgProvided ? "Managed by your organization" : "Your account", meta].filter(Boolean).join(" · ")}
+        meta={[orgProvided ? "Organization account" : "Your account", meta].filter(Boolean).join(" · ")}
         right={controls}
       />
       {connectionDetails}

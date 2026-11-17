@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Label, Select, Spinner } from "~/components/primitives";
+import { Label, ManagedNote, Select, Spinner } from "~/components/primitives";
 import { Section } from "~/components/settings/section";
 import { useOrg, usePatchOrgSettings } from "~/api/settings";
 import { apiErrorMessage } from "~/api/policies";
@@ -70,8 +70,9 @@ export function CompactionSection() {
           </div>
           <p className="text-xs text-muted">
             A thread over the window is summarized when it goes idle, shortly before its prompt cache expires, or right
-            after a Slack or unattended turn.{isAdmin ? "" : " Only an org admin can change this."}
+            after a Slack or unattended turn.
           </p>
+          {!isAdmin && <ManagedNote scope="org" askAdmin />}
           {error && <p className="text-xs text-danger-500">{error}</p>}
         </div>
       )}

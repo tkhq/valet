@@ -163,8 +163,8 @@ disconnect), but sessions stop receiving the tools.
   transport ready, the tile carries the member's own step instead: the
   pairing block (`identity-link-block.tsx`). A linked account reads
   "Linked as <externalId>" with Unlink. Providers with no identity link get
-  the note "Provided by your organization. An admin manages it in Settings →
-  Organization." A leftover user credential keeps its Disconnect.
+  the managed note "Managed by your organization. Ask an admin to change
+  it." A leftover user credential keeps its Disconnect.
 - The pairing block's entry points are gated by the `IdentityLinkStatus`
   flags:
   - **DM me on <provider>** (`codeDelivery`) — `POST

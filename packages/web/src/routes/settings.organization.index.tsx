@@ -11,6 +11,7 @@ import {
   ErrorRow,
   Input,
   LoadingRow,
+  ManagedNote,
   Switch,
 } from "~/components/primitives";
 import { useOrg, usePatchOrg, usePatchOrgSettings } from "~/api/settings";
@@ -86,7 +87,7 @@ export function OrganizationGeneralPage() {
             hint={
               orgQ.data.callerRole === "admin"
                 ? "Off: every shared document link requires a logged-in member of your org, and existing public links go back to requiring login. On: members can open an individual link to anyone who has it, with no login."
-                : "Off: every shared document link requires a logged-in member of your org. Only an org admin can change this."
+                : "Off: every shared document link requires a logged-in member of your org."
             }
           >
             <div className="flex items-center gap-3">
@@ -100,6 +101,7 @@ export function OrganizationGeneralPage() {
                 <p className="text-xs text-danger-500">{patchOrgSettings.error.message}</p>
               )}
             </div>
+            {orgQ.data.callerRole !== "admin" && <ManagedNote scope="org" askAdmin className="mt-1.5" />}
           </FieldRow>
 
           {orgQ.data.callerRole === "admin" && (

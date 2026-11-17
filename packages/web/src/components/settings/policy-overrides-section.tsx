@@ -2,7 +2,7 @@ import { useState } from "react";
 import { MODE_LABELS, RISK_LABELS } from "./policy-presentation";
 import { Trash2 } from "lucide-react";
 import type { ActionPolicyOverrideWire, PutPolicyOverrideRequest, ApprovalModeWire, RiskLevelWire } from "@valet/api/wire";
-import { Badge, Button, ConfirmDialog, Label, Select } from "~/components/primitives";
+import { Badge, Button, ConfirmDialog, Label, ManagedNote, Select } from "~/components/primitives";
 import { Section } from "~/components/settings/section";
 import {
   apiErrorMessage,
@@ -118,7 +118,7 @@ export function PolicyOverridesEditor({ overrides, title, description, canEdit, 
         {rowError && <p className="pb-2 text-xs text-danger-500">{rowError}</p>}
       </Section>
 
-      {!canEdit && <p className="text-sm text-muted">Only team admins can change overrides and revoke grants.</p>}
+      {!canEdit && <ManagedNote scope="team" askAdmin />}
       <ConfirmDialog open={selected !== null && canEdit} onOpenChange={open => { if (!open) setSelected(null); }}
         title="Delete override?" description="Remove this override and use the remaining policy rules." confirmLabel="Delete override"
         pending={deleting} error={rowError} onConfirm={() => {

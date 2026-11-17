@@ -111,7 +111,7 @@ describe("OrgRouteGuard", () => {
       </OrgRouteGuard>,
     );
     expect(
-      screen.getByText("Organization settings are managed by your org admins"),
+      screen.getByText("Managed by your organization. Ask an admin to change it."),
     ).toBeTruthy();
     expect(screen.queryByTestId("org-content")).toBeNull();
   });

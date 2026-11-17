@@ -156,6 +156,12 @@ Settings matches the thread UI:
   `rounded-2xl bg-ink-wash` group divided by hairlines. `FieldRow` keeps the
   label on the left and the control on the right.
 - No boxed cards inside a section. A group with no rows is hidden.
+- A setting that a higher scope or the viewer's role locks stays on the
+  page, disabled. `ManagedNote` (`components/primitives/managed-note.tsx`)
+  sits next to it: a lock icon and "Managed by your organization." or
+  "Managed by your team.", with "Ask an admin to change it." when the viewer
+  cannot change it. It is presentation only. The API still decides who can
+  write.
 
 ### 4. One place per thing
 
@@ -205,8 +211,8 @@ switcher.
   summary move to a line under the row. The name truncates before the pill
   does.
 - A row is a link to `?service=<plugin>`, which opens the plugin's details
-  in a modal panel: who owns the connection (Your account, or Managed by your
-  organization), its reach, the account, pairing, repair notes, the controls,
+  in a modal panel: who owns the connection (Your account, or Organization
+  account), its reach, the account, pairing, repair notes, the controls,
   and the tools.
 - The panel groups the tools by risk: Read (low), Write (medium), and High
   risk (high and critical). Each tool shows its name, one line of
@@ -214,7 +220,7 @@ switcher.
   effective value from `GET /api/me/tool-permissions`. An untouched tool is
   tagged Default, an org or team rule names its owner, and your own choice is
   tagged Custom with a Reset. A mode that an org or team rule forbids is
-  disabled, and the tool says "Set by your organization" (or team). Each group
+  disabled, and the tool shows the managed note for its organization or team. Each group
   has a Set all, and the panel has "Reset all to defaults". No control allows
   every tool at once. A change writes through `PUT` or `DELETE
   /api/me/policy-overrides` (Allow is `allow`, Ask first is

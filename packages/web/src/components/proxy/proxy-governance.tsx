@@ -4,11 +4,11 @@
  * `/settings/organization/proxy` page. Renders as a set of `FieldRow` entries
  * to be placed inside a `Section` component.
  *
- * `editable={true}`  — interactive Switch + mode chips (org admin / single-user)
- * `editable={false}` — read-only status line + "Managed by your organization admins."
+ * `editable={false}` shows the same controls disabled, with a managed note.
+ * Single-user mode and an org admin get `editable={true}`.
  */
 import { useProxySettings, useSetProxyEnabled, useSetProxyMode } from "~/api/proxy-usage";
-import { FilterChips, Switch } from "~/components/primitives";
+import { FilterChips, ManagedNote, Switch } from "~/components/primitives";
 import { FieldRow } from "~/components/settings/field-row";
 
 const MODES = [
@@ -37,21 +37,6 @@ export function ProxyGovernance({ editable }: ProxyGovernanceProps) {
   const mode = settingsQ.data?.mode ?? "centralized";
   const currentMode = MODES.find((m) => m.id === mode);
 
-  if (!editable) {
-    const gatewayLabel = enabled ? "On" : "Off";
-    const modeLabel = mode === "centralized" ? "Centralized mode" : "Pass-through mode";
-    return (
-      <FieldRow label="Gateway">
-        <div className="space-y-1">
-          <p className="text-sm text-ink">
-            {`Gateway: ${gatewayLabel} · ${modeLabel}`}
-          </p>
-          <p className="text-xs text-muted">Managed by your organization admins.</p>
-        </div>
-      </FieldRow>
-    );
-  }
-
   return (
     <>
       {/* Gateway on/off */}
@@ -67,9 +52,10 @@ export function ProxyGovernance({ editable }: ProxyGovernanceProps) {
         <Switch
           checked={enabled}
           onCheckedChange={(v) => setEnabled.mutate(v)}
-          disabled={setEnabled.isPending}
+          disabled={!editable || setEnabled.isPending}
           aria-label={enabled ? "Gateway enabled" : "Gateway disabled"}
         />
+        {!editable && <ManagedNote scope="org" askAdmin className="mt-1.5" />}
       </FieldRow>
 
       {/* Credential mode */}
@@ -78,12 +64,12 @@ export function ProxyGovernance({ editable }: ProxyGovernanceProps) {
         hint={currentMode?.desc}
         error={setMode.isError ? setMode.error?.message : undefined}
       >
-        <div title={!enabled ? "Enable the gateway first" : undefined}>
+        <div title={editable && !enabled ? "Enable the gateway first" : undefined}>
           <FilterChips
             label="Credential mode"
             value={mode}
             onChange={(next) => setMode.mutate(next)}
-            options={MODES.map((m) => ({ value: m.id, label: m.label, disabled: setMode.isPending || !enabled }))}
+            options={MODES.map((m) => ({ value: m.id, label: m.label, disabled: !editable || setMode.isPending || !enabled }))}
           />
         </div>
       </FieldRow>

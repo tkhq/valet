@@ -58,6 +58,6 @@ describe("CompactionSection", () => {
     orgData = { callerRole: "member", compactionWindowTokens: null };
     render(<CompactionSection />);
     expect(screen.getByLabelText("Compaction window")).toHaveProperty("disabled", true);
-    expect(screen.getByText(/Only an org admin can change this/)).toBeTruthy();
+    expect(screen.getByText("Managed by your organization. Ask an admin to change it.")).toBeTruthy();
   });
 });

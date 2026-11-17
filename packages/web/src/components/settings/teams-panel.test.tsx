@@ -296,14 +296,15 @@ describe("TeamsPanel — team default model (TKAI-255)", () => {
     });
   });
 
-  it("plain member sees the value read-only, no combobox", () => {
+  it("plain member sees the value in a disabled combobox, with the managed note", () => {
     callerRole = "member";
     orgRole = "member";
     teamDefaultModel = "anthropic/claude-sonnet-4-5";
     openTeam();
-    expect(screen.queryByRole("combobox", { name: "Default model" })).toBeNull();
-    // Curated catalog entry → friendly label, not the raw id.
-    expect(screen.getByText("Sonnet 4.5")).toBeTruthy();
+    expect(screen.getByRole("combobox", { name: "Default model" })).toHaveProperty("disabled", true);
+    // The combobox's own label, the same one an admin reads, not the raw id.
+    expect(screen.getByDisplayValue("Claude Sonnet 4.5")).toBeTruthy();
+    expect(screen.getByText("Managed by your team. Ask an admin to change it.")).toBeTruthy();
     // The hint reaches members too — they are the ones whose sessions the
     // setting shapes, and whose personal default wins.
     expect(screen.getByText(/personal default/)).toBeTruthy();
@@ -314,8 +315,8 @@ describe("TeamsPanel — team default model (TKAI-255)", () => {
     orgRole = "member";
     teamDefaultModel = "custom_1/llama-3";
     openTeam();
-    expect(screen.getByText("Llama 3")).toBeTruthy();
-    expect(screen.queryByText("custom_1/llama-3")).toBeNull();
+    expect(screen.getByDisplayValue("Llama 3")).toBeTruthy();
+    expect(screen.queryByDisplayValue("custom_1/llama-3")).toBeNull();
   });
 
   it("plain member with no team override reads the org fallback for model and reasoning", () => {
@@ -323,8 +324,8 @@ describe("TeamsPanel — team default model (TKAI-255)", () => {
     orgRole = "member";
     openTeam();
     // The model label names the tier unset falls to: Small with no org default tier.
-    expect(screen.getByText("Small (Organization default)")).toBeTruthy();
-    expect(screen.getByText("Organization default")).toBeTruthy();
+    expect(screen.getByPlaceholderText("Small (Organization default)")).toBeTruthy();
+    expect(screen.getByDisplayValue("Organization default")).toBeTruthy();
   });
 
   it("team admin picks a reasoning level → PATCH with the level", () => {
@@ -354,13 +355,12 @@ describe("TeamsPanel — team default model (TKAI-255)", () => {
     });
   });
 
-  it("plain member sees the reasoning value read-only, no select", () => {
+  it("plain member sees the reasoning value in a disabled select", () => {
     callerRole = "member";
     orgRole = "member";
     teamDefaultReasoning = "high";
     openTeam();
-    expect(screen.queryByLabelText("Reasoning")).toBeNull();
-    expect(screen.getByText("High")).toBeTruthy();
+    expect(screen.getByDisplayValue("High")).toHaveProperty("disabled", true);
   });
 });
 
@@ -947,7 +947,7 @@ describe("TeamsPanel selected workspace", () => {
     render(<TeamsPanel orgMembers={orgMembers} teamId="team_2" />);
     expect(screen.getByRole("button", { name: "Support actions" })).toBeTruthy();
     expect(screen.getByRole("region", { name: "Deletion requests" }).getAttribute("data-can-manage")).toBe("false");
-    expect(screen.queryByRole("combobox", { name: "Default model" })).toBeNull();
+    expect(screen.getByRole("combobox", { name: "Default model" })).toHaveProperty("disabled", true);
     expect(screen.queryByRole("button", { name: /Add member/ })).toBeNull();
   });
 

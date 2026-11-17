@@ -9,7 +9,7 @@ import type {
   PolicyAppliesInWire,
   RiskLevelWire,
 } from "@valet/api/wire";
-import { Badge, Button, ConfirmDialog, Input, Label, Select, Switch, Time } from "~/components/primitives";
+import { Badge, Button, ConfirmDialog, Input, Label, ManagedNote, Select, Switch, Time } from "~/components/primitives";
 import { ServiceActionCombobox } from "./service-action-combobox";
 import { Section } from "~/components/settings/section";
 import { usePlugins } from "~/api/integrations";
@@ -122,7 +122,7 @@ export function PoliciesSection({ teamId, canEdit = true, variant = "full" }: { 
           <PolicyRow key={p.id} policy={p} teamId={teamId} canEdit={canEdit} showConditions={variant === "advanced"} />
         ))}
       </Section>
-      {teamId !== undefined && !canEdit && <p className="text-sm text-muted">Only team admins can change policies.</p>}
+      {teamId !== undefined && !canEdit && <ManagedNote scope="team" askAdmin />}
       {teamId !== undefined && pluginsQ.error && <p role="alert">Could not load the action catalog. Reload to try again.</p>}
       {canEdit && <NewPolicyForm plugins={plugins} teamId={teamId} />}
     </div>

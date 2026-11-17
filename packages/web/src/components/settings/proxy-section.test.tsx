@@ -5,8 +5,8 @@
  *   - the Create proxy key button is present (OnboardingPanel rendered);
  *   - in single-user mode (`features.organizations` false/absent), ProxyGovernance
  *     is editable — the Switch is present;
- *   - in org mode (`features.organizations` true), ProxyGovernance is read-only —
- *     no Switch, "Managed by your organization admins." text is shown;
+ *   - in org mode (`features.organizations` true), ProxyGovernance shows its
+ *     controls disabled with the managed note;
  *   - the "Step 1 — Gateway status" heading from OnboardingPanel's pre-creation
  *     view is absent (showGatewayStatus=false), while ProxyGovernance's own
  *     gateway text IS shown.
@@ -187,20 +187,13 @@ describe("SettingsProxyPage — org mode (read-only ProxyGovernance)", () => {
     };
   });
 
-  it("does not show the Switch control in org mode", () => {
-    render(<SettingsProxyPage />);
-    expect(screen.queryByRole("switch")).toBeNull();
-  });
-
-  it("shows 'Managed by your organization admins.' text in org mode", () => {
-    render(<SettingsProxyPage />);
-    expect(screen.getByText("Managed by your organization admins.")).toBeTruthy();
-  });
-
-  it("shows gateway status summary text in org mode", () => {
+  it("shows the Switch disabled with the managed note in org mode", () => {
     settingsResult = { data: { enabled: true, mode: "centralized" }, isLoading: false };
     render(<SettingsProxyPage />);
-    expect(screen.getByText("Gateway: On · Centralized mode")).toBeTruthy();
+    const gateway = screen.getByRole("switch", { name: "Gateway enabled" });
+    expect(gateway.hasAttribute("disabled")).toBe(true);
+    expect(gateway.getAttribute("aria-checked")).toBe("true");
+    expect(screen.getByText("Managed by your organization. Ask an admin to change it.")).toBeTruthy();
   });
 });
 
@@ -252,18 +245,19 @@ describe("shared personal and team onboarding", () => {
     expect(teamCreate).not.toHaveBeenCalled();
     expect(personalKeyHook).not.toHaveBeenCalled();
     expect(screen.getByText(/Only a team admin or an organization admin can create a shared key/)).toBeTruthy();
-    expect(screen.queryByRole("switch")).toBeNull();
+    expect(screen.getByRole("switch").hasAttribute("disabled")).toBe(true);
     orgData = { data: { callerRole: "admin", features: { organizations: true } }, isLoading: false };
     rerender(<SettingsProxyPage />);
     expect(screen.getByRole("button", { name: "Create proxy key" }).getAttribute("aria-disabled")).toBeNull();
-    expect(screen.queryByRole("switch")).toBeNull();
+    expect(screen.getByRole("switch").hasAttribute("disabled")).toBe(true);
   });
 
   it("uses the real new team key in pass-through snippets while preserving organization mode", () => {
     teamId = "team-1";
     settingsResult = { data: { enabled: false, mode: "passthrough" }, isLoading: false };
     render(<SettingsProxyPage />);
-    expect(screen.getByText("Gateway: Off · Pass-through mode")).toBeTruthy();
+    expect(screen.getByRole("switch", { name: "Gateway disabled" }).hasAttribute("disabled")).toBe(true);
+    expect(screen.getByRole("button", { name: "Pass-through" }).getAttribute("aria-pressed")).toBe("true");
     fireEvent.click(screen.getByRole("button", { name: "Create proxy key" }));
     act(() => teamCreate.mock.calls[0][2].onSuccess({ name: "proxy-key", key: "vlt_pass" }));
     expect(screen.getByText(/export VALET_PROXY_KEY=vlt_pass/)).toBeTruthy();

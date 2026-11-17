@@ -17,8 +17,8 @@ import { OnboardingPanel } from "~/components/usage/OnboardingPanel";
  * both proxy parts, so a failure shows once.
  *
  * Any user can generate a proxy key and see setup snippets. When the org has
- * `features.organizations` enabled, governance controls are read-only
- * (managed by admins); in single-user mode they are interactive.
+ * `features.organizations` enabled, governance controls show disabled with
+ * a managed note; in single-user mode they are interactive.
  */
 export function SettingsProxyPage({ setupIntro, children }: { setupIntro?: ReactNode; children?: ReactNode }) {
   const { teamId } = useWorkspaceScope();

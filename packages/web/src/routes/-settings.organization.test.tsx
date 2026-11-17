@@ -330,7 +330,7 @@ describe("OrganizationGeneralPage", () => {
     const toggle = screen.getByRole("switch", { name: "Allow public artifact links" });
     fireEvent.click(toggle);
     expect(patchOrgSettingsMutate).not.toHaveBeenCalled();
-    expect(screen.getByText(/Only an org admin can change this/)).toBeTruthy();
+    expect(screen.getByText("Managed by your organization. Ask an admin to change it.")).toBeTruthy();
   });
 
   it("confirming the disable-gate dialog PATCHes the gate off and navigates to profile", async () => {
