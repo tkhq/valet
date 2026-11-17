@@ -21,7 +21,10 @@ vi.mock("@tanstack/react-router", () => ({
     );
   },
   useRouterState: () => pathname,
+  useRouter: () => ({ history: { push: historyPush } }),
 }));
+
+const historyPush = vi.fn();
 
 let pathname = "/settings/profile";
 let orgData: { callerRole: "admin" | "member"; features: { organizations: boolean }; plugins: Array<{ name: string; enabledForCaller: boolean }>; loadedPlugins?: string[] } | undefined;
@@ -34,6 +37,7 @@ vi.mock("~/api/settings", () => ({
 
 import { PinnedWorkspaceScope } from "~/lib/workspace-scope";
 import { ORG_SECTIONS, SettingsRail, orgSectionFor } from "./settings-rail";
+import { rememberAppPath } from "~/lib/last-app-path";
 
 beforeEach(() => {
   linkProps.length = 0;
@@ -55,6 +59,16 @@ function groupLabels(): string[] {
 }
 
 describe("SettingsRail", () => {
+  it("links back to the last app page, not to a settings page", async () => {
+    rememberAppPath("/chat", "/chat?thread=abc");
+    rememberAppPath("/settings/access", "/settings/access");
+    render(<SettingsRail />);
+    const back = within(rail()).getByRole("link", { name: "Back to app" });
+    expect(back.getAttribute("href")).toBe("/chat?thread=abc");
+    await userEvent.click(back);
+    expect(historyPush).toHaveBeenCalledWith("/chat?thread=abc");
+  });
+
   it("lists every scope, with teams by name", () => {
     render(<SettingsRail />);
     expect(groupLabels()).toEqual(["Account", "Personal", "Your teams", "Organization"]);

@@ -24,6 +24,7 @@ import { useChatKeybindings } from "~/hooks/use-chat-keybindings";
 import { useAttentionPing } from "~/lib/use-attention-ping";
 import { unlock } from "~/lib/notification-sound";
 import { UI_STRESS_PATH, UiStressShell, uiStressEnabled } from "~/dev/ui-stress/gate";
+import { isSettingsPath, rememberAppPath } from "~/lib/last-app-path";
 
 interface RouterContext {
   queryClient: QueryClient;
@@ -67,7 +68,7 @@ function NotFound() {
  * (`AppDrawer`) on every page instead.
  */
 function sidebarForPath(pathname: string) {
-  if (pathname === "/settings" || pathname.startsWith("/settings/")) return null;
+  if (isSettingsPath(pathname)) return null;
   return <AssistantRail />;
 }
 
@@ -107,8 +108,13 @@ function RootLayout() {
     return () => window.removeEventListener("storage", changed);
   }, []);
   const pathname = useRouterState({ select: (s) => s.location.pathname });
+  const href = useRouterState({ select: (s) => s.location.href });
   const mobile = useMobileLayout();
   const isPublic = isPublicPath(pathname);
+  // The settings rail's "Back to app" link returns to this page.
+  useEffect(() => {
+    if (!isPublic) rememberAppPath(pathname, href);
+  }, [isPublic, pathname, href]);
 
   if (isPublic) {
     return (

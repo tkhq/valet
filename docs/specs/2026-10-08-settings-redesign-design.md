@@ -139,6 +139,11 @@ scope holds only its own items.
   or the team's page. One function, `spaceSettingsTarget`
   (`lib/space-settings.ts`), holds that rule for the sidebar row and for
   the `/usage` and `/integrations` redirects.
+- **Back to app.** Settings has no app sidebar, so the rail starts with a
+  "Back to app" link. It opens the last app page the person saw, with its
+  search and hash (`lib/last-app-path.ts`). The root layout records that
+  page on each navigation outside Settings. The value lives in memory, so
+  after a reload into Settings the link opens Home.
 
 ### 3. Visual language
 

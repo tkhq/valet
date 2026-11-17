@@ -1,5 +1,6 @@
-import { Link, useRouterState } from "@tanstack/react-router";
+import { Link, useRouter, useRouterState } from "@tanstack/react-router";
 import {
+  ArrowLeft,
   Bell,
   Blocks,
   Building2,
@@ -21,6 +22,7 @@ import { Button, DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownM
 import { eligibleTeams } from "~/components/session/assistant-rail";
 import { useResponsiveOverlay } from "~/hooks/use-responsive-overlay";
 import { cn } from "~/lib/cn";
+import { lastAppPath } from "~/lib/last-app-path";
 
 /**
  * The settings shell's left rail (settings-redesign spec, decision 2). It
@@ -38,6 +40,9 @@ import { cn } from "~/lib/cn";
  *   existing routes (`ORG_SECTIONS`). A plain member sees Teams only: the
  *   1Password page holds nothing a member can act on, and their own token
  *   is on Integrations.
+ *
+ * "Back to app" sits above the groups and returns to the last app page
+ * (`lastAppPath`), or Home after a reload into Settings.
  *
  * Active state is computed from the pathname (via `cn`'s `twMerge`) rather
  * than TanStack's `activeProps`, which only concatenates class strings.
@@ -227,6 +232,7 @@ export function SettingsRail() {
 
   return (
     <nav aria-label="Settings" className="w-full shrink-0 text-sm sm:w-56">
+      <BackToApp />
       <div className="sm:hidden">
         <DropdownMenu open={sectionMenu.open} onOpenChange={sectionMenu.setOpen}>
           <DropdownMenuTrigger asChild>
@@ -259,6 +265,28 @@ export function SettingsRail() {
         {groups.map((group) => <RailGroup key={group.label} {...group} pathname={pathname} />)}
       </div>
     </nav>
+  );
+}
+
+/** A plain anchor with the real href, so a modified click opens a new tab;
+ * a plain click navigates in place. The href is a stored path with search,
+ * which the typed `Link` does not take. */
+function BackToApp() {
+  const router = useRouter();
+  const href = lastAppPath();
+  return (
+    <a
+      href={href}
+      onClick={(event) => {
+        if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+        event.preventDefault();
+        router.history.push(href);
+      }}
+      className="mb-3 flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-muted transition-colors hover:bg-ink-wash hover:text-ink sm:mb-5"
+    >
+      <ArrowLeft className="h-4 w-4 shrink-0" aria-hidden />
+      Back to app
+    </a>
   );
 }
 
