@@ -265,6 +265,29 @@ pnpm --filter @valet/eval review-outcomes --repo owner/name --since 2026-11-10 \
   commit, so a verifier replay can use the rows as cases. Keep rows from
   private repositories out of the repo.
 
+### Ship a reviewer change
+
+`src/review-compare.ts` decides whether a reviewer change may ship. Run the
+dev branch and the change on the same cases, on the same day, with the same
+`--runs`, each with `--json`. Then compare the two files:
+
+```bash
+pnpm --filter @valet/eval review-compare --base /tmp/base.json --candidate /tmp/candidate.json
+```
+
+- It pairs the cases and resamples them 5,000 times (a paired bootstrap).
+- It prints pooled recall, false findings per review and cost per review
+  for each side, with 90% intervals for the differences.
+- Verdict `ship`: at most a 10% chance that recall falls more than 5 points,
+  at most a 10% chance that false findings per review rise more than 10%,
+  and mean cost per review at most 1.25 times the base. The flags
+  `--recall-margin`, `--fp-margin` and `--cost-budget` change the limits.
+- Verdict `inconclusive`: the recall interval is wider than 20 points. Add
+  cases or runs.
+- Verdict `hold` sets exit code 2, so a script can stop on it.
+- It lists the cases that changed, largest change first. Read those
+  reviews before you trust a verdict.
+
 ## Compare models
 
 ```bash
