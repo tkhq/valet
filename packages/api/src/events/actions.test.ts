@@ -112,7 +112,8 @@ describe("eventsActionPlugin", () => {
     expect(resultProblems(problems)).toEqual([expect.objectContaining({ id: "filter", payloadMetadata: { channel: "C1" } })]);
     expect(await tool("events.list_problems").execute({ text: "private" }, scheduled)).toMatchObject({ success: false });
     expect(await tool("events.set_subscription_presence").execute({ subscription_id: "team-rule", presence: { displayName: "Bot" } }, scheduled)).toMatchObject({ success: false });
-    expect(await tool("events.list_event_logs").execute({}, scheduled)).toMatchObject({ success: false });
+    // The team's run reads its own lines' receipts.
+    expect(await tool("events.list_event_logs").execute({}, scheduled)).toMatchObject({ success: true, data: { receipts: [] } });
     // Another team's principal id is not this team's run.
     expect(await tool("events.list_subscriptions").execute({}, context("team:other-team", { owner: { type: "team", id: "presence-team" } }))).toMatchObject({ success: false });
     expect(await tool("events.list_problems").execute({}, context("team:other-team", { owner: { type: "team", id: "presence-team" } }))).toMatchObject({ success: false });
@@ -531,16 +532,34 @@ describe("eventsActionPlugin", () => {
     const result = await list().execute({}, context("not-a-member"));
     expect(result).toMatchObject({ success: false, error: "You are not a member of this organization." });
   });
-  it("keeps receipt access out of member and shared transcripts", async () => {
+  it("shows a member or a team only the receipts its own lines decided on", async () => {
+    const now = Date.now();
+    await db.insert(teams).values({ id: "receipt-team", orgId: ORG, name: "Team", createdAt: now });
+    await db.insert(teamMembers).values({ teamId: "receipt-team", userId: "member", role: "member" });
+    const decision = (id: string, ownerType: string, ownerId: string) => ({ id, ownerType, ownerId, target: "assistant", outcome: "matched" });
+    await db.insert(eventReceipts).values([
+      { id: "mine", orgId: ORG, service: "slack", createdAt: now, updatedAt: now, metadata: { channelId: "C1" },
+        stages: [{ stage: "match", outcome: "ok", detail: "line other-line matched", at: now }],
+        subscriptions: [decision("my-line", "user", "member"), decision("other-line", "user", "someone")] },
+      { id: "team", orgId: ORG, service: "slack", createdAt: now - 1, updatedAt: now, subscriptions: [decision("team-line", "team", "receipt-team")] },
+      { id: "others", orgId: ORG, service: "slack", createdAt: now - 2, updatedAt: now, metadata: { channelId: "CPRIVATE" }, subscriptions: [decision("x", "user", "someone")] },
+    ]);
     const logs = eventsActionPlugin(db).actions.find(entry => entry.id === "events.list_event_logs")!;
-    for (const ctx of [
-      context("member", { owner: { type: "user", id: "member" } }),
-      context("admin", { owner: { type: "team", id: "team" } }),
-      context("admin", { owner: { type: "user", id: "admin" }, sharedTranscript: true }),
-      context("admin"),
-    ]) {
-      expect(await logs.execute({}, ctx)).toMatchObject({ success: false });
-    }
+    const ids = (result: { data?: unknown }) => ((result.data as { receipts?: Array<{ id: string }> })?.receipts ?? []).map(r => r.id);
+
+    const personal = await logs.execute({}, context("member", { owner: { type: "user", id: "member" } }));
+    expect(ids(personal)).toEqual(["mine"]);
+    // Another workspace's decision and stage detail stay hidden.
+    expect(JSON.stringify(personal)).not.toContain("other-line");
+    expect(personal).toMatchObject({ data: { receipts: [{ subscriptions: [{ id: "my-line" }], stages: [{ detail: "" }] }] } });
+
+    expect(ids(await logs.execute({}, context("member", { owner: { type: "team", id: "receipt-team" } })))).toEqual(["team"]);
+    expect(ids(await logs.execute({}, context("team:receipt-team", { owner: { type: "team", id: "receipt-team" }, sessionPurpose: "workflow" })))).toEqual(["team"]);
+    // An admin in a shared or team transcript gets the same workspace view, not every receipt.
+    expect(ids(await logs.execute({}, context("admin", { owner: { type: "user", id: "admin" }, sharedTranscript: true })))).toEqual([]);
+    expect(ids(await logs.execute({}, context("admin", { owner: { type: "user", id: "admin" } })))).toEqual(["mine", "team", "others"]);
+    // A person off the team cannot read its receipts.
+    expect(await logs.execute({}, context("admin", { owner: { type: "team", id: "receipt-team" } }))).toMatchObject({ success: false });
   });
 
   it("scopes receipt logs by organization and retention and sanitizes metadata", async () => {

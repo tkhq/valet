@@ -247,7 +247,7 @@ child's stored channel origin after a cache eviction. Valet treats these results
 as member-visible, omits text and bot ID, and rejects those filters even when
 the acting member is an admin. If the action context has no owner, Valet also
 fails closed and applies the shared-transcript rules. The existing admin-only
-`slack_interaction_unmatched` rule follows this private-session boundary. These
+`slack_interaction_unmatched` rule follows this private-session boundary. `events.list_event_logs` reads receipts on the same boundary (2026-11-17): an organization admin in a private turn reads every receipt. Anyone else, including a team session and a team's unattended run, reads only receipts that one of their own or their team's lines decided on. Those receipts keep only that workspace's decisions, and their stages drop detail, which can name another workspace's line. These
 fields have no separate retention clock: they follow the existing
 `event_drop_log` lifecycle; this feature adds neither a second store nor an
 event-payload retention path.

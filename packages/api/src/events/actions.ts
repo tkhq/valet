@@ -15,7 +15,7 @@ import type { EventSubscriptionTargetWire } from "../wire/types.js";
 import { FILTER_OPS } from "./match.js";
 import { validateSubscriptionWrite } from "./subscription-write.js";
 import { proposalId, proposalResult } from "./proposals.js";
-import { receiptWire, RECEIPT_RETENTION_DAYS } from "./receipts.js";
+import { receiptForOwner, receiptWire, RECEIPT_RETENTION_DAYS } from "./receipts.js";
 import { readStoredTarget } from "./target-names.js";
 
 const DEFAULT_LIMIT = 25;
@@ -490,28 +490,39 @@ export function eventsActionPlugin(
     name: "Inspect event processing logs",
     description: "Read incoming event metadata, classification stages, subscription decisions, and linked event IDs. " +
       "Use events.list_problems for failures before receipt creation. Use workflows.get_run and workflows.get_node_result for workflow execution failures. " +
-      "Receipts are retained for up to 7 days; an absent receipt does not prove the provider sent an event. Requires an organization admin in a private, non-channel session.",
+      "Receipts are retained for up to 7 days; an absent receipt does not prove the provider sent an event. " +
+      "An organization admin in a private, non-channel session sees every receipt. Anyone else sees the receipts that their own or their team's subscriptions decided on.",
     riskLevel: "low",
     execute: async ({ receipt_id, event_key, channel, since, until, limit }, ctx) => {
       if (ctx.externalSender) return EXTERNAL_SENDER;
       const userId = ctx.actor?.id ?? ctx.userId;
-      if (!userId || !ctx.orgId || transcriptIsShared(ctx)) return { success: false, error: "Event receipt logs require an organization admin in a private, non-channel session." };
-      const [membership] = await db.select({ role: orgMembers.role }).from(orgMembers)
-        .where(and(eq(orgMembers.orgId, ctx.orgId), eq(orgMembers.userId, userId))).limit(1);
-      if (membership?.role !== "admin") return { success: false, error: "Organization admin required." };
+      if (!userId || !ctx.orgId) return { success: false, error: "Sign in as an organization member to read event receipts." };
       if (!timestampIsSafe(since) || !timestampIsSafe(until) || (since !== undefined && until !== undefined && since > until)) {
         return { success: false, error: "Use safe epoch-millisecond timestamps with since earlier than or equal to until." };
       }
-      const conditions = [eq(eventReceipts.orgId, ctx.orgId), gte(eventReceipts.createdAt, Date.now() - RECEIPT_RETENTION_DAYS * 86400000)];
-      if (receipt_id !== undefined) conditions.push(eq(eventReceipts.id, receipt_id));
-      if (event_key !== undefined) conditions.push(eq(eventReceipts.eventKey, event_key));
-      if (channel !== undefined) conditions.push(sql`${eventReceipts.metadata}->>'channelId' = ${channel}`);
-      if (since !== undefined) conditions.push(gte(eventReceipts.createdAt, since));
-      if (until !== undefined) conditions.push(lte(eventReceipts.createdAt, until));
-      const pageLimit = Math.min(MAX_LIMIT, Math.max(1, Math.trunc(limit ?? DEFAULT_LIMIT)));
-      const rows = await db.select().from(eventReceipts).where(and(...conditions))
-        .orderBy(desc(eventReceipts.createdAt), desc(eventReceipts.id)).limit(pageLimit + 1);
-      return { success: true, data: { receipts: rows.slice(0, pageLimit).map(receiptWire), hasMore: rows.length > pageLimit, retentionDays: RECEIPT_RETENTION_DAYS } };
+      const orgId = ctx.orgId;
+      const read = async (tx: AppQueryable, scope?: { ownerType: "user" | "team"; ownerId: string }): Promise<PluginActionResult> => {
+        const conditions = [eq(eventReceipts.orgId, orgId), gte(eventReceipts.createdAt, Date.now() - RECEIPT_RETENTION_DAYS * 86400000)];
+        // A workspace reads only receipts one of its own lines decided on.
+        if (scope) conditions.push(sql`EXISTS (SELECT 1 FROM jsonb_array_elements(${eventReceipts.subscriptions}) d
+          WHERE d->>'ownerType' = ${scope.ownerType} AND d->>'ownerId' = ${scope.ownerId})`);
+        if (receipt_id !== undefined) conditions.push(eq(eventReceipts.id, receipt_id));
+        if (event_key !== undefined) conditions.push(eq(eventReceipts.eventKey, event_key));
+        if (channel !== undefined) conditions.push(sql`${eventReceipts.metadata}->>'channelId' = ${channel}`);
+        if (since !== undefined) conditions.push(gte(eventReceipts.createdAt, since));
+        if (until !== undefined) conditions.push(lte(eventReceipts.createdAt, until));
+        const pageLimit = Math.min(MAX_LIMIT, Math.max(1, Math.trunc(limit ?? DEFAULT_LIMIT)));
+        const rows = await tx.select().from(eventReceipts).where(and(...conditions))
+          .orderBy(desc(eventReceipts.createdAt), desc(eventReceipts.id)).limit(pageLimit + 1);
+        const receipts = rows.slice(0, pageLimit).map(receiptWire).map((r) => scope ? receiptForOwner(r, scope) : r);
+        return { success: true, data: { receipts, hasMore: rows.length > pageLimit, retentionDays: RECEIPT_RETENTION_DAYS, ...(scope ? { scope: `${scope.ownerType} subscriptions` } : {}) } };
+      };
+      if (!transcriptIsShared(ctx)) {
+        const [membership] = await db.select({ role: orgMembers.role }).from(orgMembers)
+          .where(and(eq(orgMembers.orgId, orgId), eq(orgMembers.userId, userId))).limit(1);
+        if (membership?.role === "admin") return read(db);
+      }
+      return withSubscriptionScope(ctx, "read", (tx, scope) => read(tx, scope));
     },
   });
   return { service: "events", description: "Diagnose event delivery, propose disabled subscriptions, turn plugin handler lines on or off, and set the reply appearance on existing workspace subscriptions.", actions: [listProblems, listLogs, proposeSubscription, listSubscriptions, setSubscriptionPresence, setSubscriptionEnabled] };
