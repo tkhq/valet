@@ -13,6 +13,7 @@
  *   --concurrency <n>    cases in flight at once (default 1)
  *   --verify-model <spec> model for code-review verifiers (default: --model)
  *   --verify             check each code-review finding with a verifier (default: off)
+ *   --run-checks         verifiers of high and critical findings run a test or type check (needs --verify)
  *   --review-passes <n>  independent code-review passes per case (default 1)
  *   --review-focus <list> extra focused code-review passes: failure,concurrency,tests
  *   --focus-min-confidence <x> drop focused-pass findings rated below x (0-1)
@@ -119,6 +120,7 @@ async function main(): Promise<number> {
     ...(opts.reasoning !== undefined ? { reasoning: opts.reasoning } : {}),
     ...(opts.verifyModel !== undefined ? { verifyModel: opts.verifyModel } : {}),
     ...(opts.verify !== undefined ? { verify: opts.verify } : {}),
+    ...(opts.runChecks ? { runChecks: true } : {}),
     ...(opts.reviewPasses !== undefined ? { reviewPasses: opts.reviewPasses } : {}),
     ...(opts.reviewFocus !== undefined ? { reviewFocus: opts.reviewFocus } : {}),
     ...(opts.focusMinConfidence !== undefined ? { focusMinConfidence: opts.focusMinConfidence } : {}),

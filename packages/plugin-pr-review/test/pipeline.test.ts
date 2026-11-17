@@ -239,6 +239,20 @@ describe("runReviewPipeline", () => {
     expect(models).toEqual({ review: undefined, "verify:0": "openai/gpt-5.6-terra" });
   });
 
+  it("asks only the verifiers of high and critical findings to run a check with runChecks", async () => {
+    const { dir, base, head } = repo();
+    const prompts: Record<string, string> = {};
+    const run: AgentRunner = async (spec) => {
+      prompts[spec.label] = spec.prompt;
+      if (spec.label === "review") await submit(spec, "submit_review", { summary: "s", confidence: 3, findings: [{ ...finding("High one"), severity: "high" }, { ...finding("Low one"), line: 2, severity: "low" }] });
+      return { outcome: "completed" };
+    };
+    await runReviewPipeline({ workspace: dir, base, head, title: "t", body: "", verify: true, runChecks: true }, run);
+    const verifiers = Object.entries(prompts).filter(([label]) => label.startsWith("verify:")).map(([, p]) => p);
+    expect(verifiers.find((p) => p.includes("High one"))).toContain("## Run a check");
+    expect(verifiers.find((p) => p.includes("Low one"))).not.toContain("## Run a check");
+  });
+
   it("diffs from the merge-base when the base branch moved on", async () => {
     const { dir, base, head } = repo();
     const g = (...args: string[]): string => execFileSync("git", args, { cwd: dir, encoding: "utf8" }).trim();

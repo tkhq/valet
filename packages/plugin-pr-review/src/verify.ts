@@ -88,6 +88,8 @@ export interface VerifierSpecOptions {
   context?: string;
   /** provider/model for the verifier. Unset: the host's model. */
   model?: string;
+  /** Add the "Run a check" section (`runChecks`, high and critical findings). */
+  runCheck?: boolean;
 }
 
 export interface VerifierPromptInput {
@@ -214,6 +216,7 @@ export async function createVerifierSpec(opts: VerifierSpecOptions): Promise<Ver
     diff,
     ...(opts.context !== undefined ? { context: opts.context } : {}),
     ...(opts.recheckFrom !== undefined ? { recheckFrom: opts.recheckFrom } : {}),
+    ...(opts.runCheck ? { runCheck: true } : {}),
   });
 
   return {

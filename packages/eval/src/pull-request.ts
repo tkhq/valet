@@ -199,6 +199,7 @@ async function reviewInWorkspace(
       body: spec.body ?? (spec.number !== undefined ? await pullRequestBody(spec.remote, spec.number) : ""),
       verify,
       ...(opts.verifyModel !== undefined ? { verifyModel: opts.verifyModel } : {}),
+      ...(opts.runChecks ? { runChecks: true } : {}),
       ...(opts.reviewPasses !== undefined ? { passes: opts.reviewPasses } : {}),
       ...(opts.reviewFocus !== undefined ? { focuses: opts.reviewFocus } : {}),
       ...(opts.focusMinConfidence !== undefined ? { focusMinConfidence: opts.focusMinConfidence } : {}),

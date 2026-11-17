@@ -60,6 +60,8 @@ export interface SuiteOptions {
   verifyModel?: string;
   /** Code-review verification for every case. Unset: each case's `pull_request.verify`. */
   verify?: boolean;
+  /** Code-review verifiers of high and critical findings run a check (`runChecks`). */
+  runChecks?: boolean;
   /** Independent code-review passes per case. */
   reviewPasses?: number;
   /** One extra focused code-review pass per entry (failure, concurrency, tests). */
@@ -200,6 +202,7 @@ export async function runSuite(cases: EvalCase[], opts: SuiteOptions): Promise<S
                 ...(opts.reasoning !== undefined ? { reasoning: opts.reasoning } : {}),
                 ...(opts.verifyModel !== undefined ? { verifyModel: opts.verifyModel } : {}),
                 ...(opts.verify !== undefined ? { verify: opts.verify } : {}),
+                ...(opts.runChecks ? { runChecks: true } : {}),
                 ...(opts.reviewPasses !== undefined ? { reviewPasses: opts.reviewPasses } : {}),
                 ...(opts.reviewFocus !== undefined ? { reviewFocus: opts.reviewFocus } : {}),
                 ...(opts.focusMinConfidence !== undefined ? { focusMinConfidence: opts.focusMinConfidence } : {}),

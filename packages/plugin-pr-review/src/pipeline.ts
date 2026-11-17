@@ -68,6 +68,8 @@ export interface PipelineOptions extends ReviewerSpecOptions {
   verifyConcurrency?: number;
   /** provider/model for the verifiers. Unset: the reviewer's model. */
   verifyModel?: string;
+  /** Verifiers of high and critical findings run the narrowest check that exercises the claim (the line's `runChecks`). */
+  runChecks?: boolean;
   /** Independent reviewer passes, merged by location before verification. Default 1. */
   passes?: number;
   /** One extra focused pass per entry, run beside the general passes and merged the same way. */
@@ -196,6 +198,7 @@ export async function runReviewPipeline(input: PipelineOptions, run: AgentRunner
           label: `verify:${index}`,
           ...(rules ? { context: rules } : {}),
           ...(opts.verifyModel !== undefined ? { model: opts.verifyModel } : {}),
+          ...(opts.runChecks && (draft.findings[index].severity === "high" || draft.findings[index].severity === "critical") ? { runCheck: true } : {}),
         });
         const result = await run(spec);
         const finding = draft.findings[index];

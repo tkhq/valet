@@ -214,7 +214,8 @@ team, through review feedback.
   exercises the trigger refutes it as misread. The verifier never installs a
   toolchain: a repository whose stock sandbox lacks one (Go or Rust, for
   example) needs it in its bake (`.valet/prebuild.yaml`) first. Measure it
-  with paired replay before a live line turns it on.
+  with paired replay before a live line turns it on: the eval takes
+  `--verify --run-checks`.
 - **A finding with no trigger or evidence goes to the summary.** The eval
   reviewer's `submit_review` refuses a finding with an empty trigger or with
   no `path:line` reference in its evidence. The reviewer child answers with

@@ -42,6 +42,8 @@ export interface CliOptions {
   verifyModel?: string;
   /** Code-review verification on or off for every case. Unset: each case's `pull_request.verify`. */
   verify?: boolean;
+  /** Code-review verifiers of high and critical findings run a check (`runChecks`). */
+  runChecks?: boolean;
   /** Independent code-review passes per case. */
   reviewPasses?: number;
   /** One extra focused code-review pass per entry (failure, concurrency, tests). */
@@ -80,6 +82,7 @@ export function parseCliArgs(argv: string[]): CliOptions {
       concurrency: { type: "string" },
       "verify-model": { type: "string" },
       verify: { type: "boolean", default: false },
+      "run-checks": { type: "boolean", default: false },
       "review-passes": { type: "string" },
       "review-focus": { type: "string" },
       "focus-min-confidence": { type: "string" },
@@ -183,6 +186,7 @@ export function parseCliArgs(argv: string[]): CliOptions {
     ...(concurrency !== undefined ? { concurrency } : {}),
     ...(values["verify-model"] !== undefined ? { verifyModel: values["verify-model"] } : {}),
     ...(values.verify ? { verify: true } : {}),
+    ...(values["run-checks"] ? { runChecks: true } : {}),
     ...(reviewPasses !== undefined ? { reviewPasses } : {}),
     ...(reviewFocus !== undefined ? { reviewFocus } : {}),
     ...(focusMinConfidence !== undefined ? { focusMinConfidence } : {}),
