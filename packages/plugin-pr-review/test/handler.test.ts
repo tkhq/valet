@@ -306,15 +306,11 @@ class FakeThreads implements PluginThreads {
   }
 }
 
-const finding = (over: Partial<Finding>): Finding => ({
-  path: "a.ts",
-  line: 5,
-  severity: "high",
-  category: "bug",
-  title: "Null deref in parse",
-  body: "An empty input makes parse read undefined.",
-  ...over,
-});
+const finding = (over: Partial<Finding>): Finding => {
+  const f: Finding = { path: "a.ts", line: 5, severity: "high", category: "bug", title: "Null deref in parse", body: "An empty input makes parse read undefined.", ...over };
+  // Each finding gets its own trigger and evidence, so consolidation does not merge distinct findings.
+  return { trigger: `the input behind ${f.title}`, evidence: `${f.path}:${f.line} shows ${f.title}`, ...f };
+};
 
 const verdict = (v: Verdict["verdict"], over: Partial<Verdict> = {}): Verdict => ({
   located_code: "line 5",
@@ -462,6 +458,31 @@ describe("review-pull-request handler", () => {
     expect(gh.comments.map((c) => c.line)).toEqual([5]);
   });
 
+  it("lists a finding with no trigger or no path:line evidence in the summary only, and keeps it there", async () => {
+    const gh = new FakeGitHub();
+    const store = new FakeStore();
+    const answers = scripted(reviewOf([
+      finding({ title: "Null deref in parse" }),
+      finding({ line: 9, severity: "medium", title: "Retry may loop", trigger: "", evidence: "" }),
+      finding({ line: 12, severity: "low", title: "Timeout looks short", evidence: "the timeout seems low" }),
+    ]), {});
+    const handler = createReviewHandler({ fetch: gh.fetch });
+    await handler.handle(event("ev1", "github.pull_request.opened"), context(new FakeThreads(answers), store, { contextBudget: 0 }));
+
+    const [review] = [...gh.reviews.values()];
+    expect(gh.comments.map((c) => c.line)).toEqual([5]);
+    expect(review.body).toContain("Findings without a trigger or code evidence (2)");
+    expect(review.body).toContain("Retry may loop (no evidence)");
+    expect(review.body).not.toContain("Findings the verifier could not confirm");
+    expect(store.pointers()?.findings).toContainEqual({ id: "f2", path: "a.ts", line: 9, status: "open", unsupported: true });
+
+    // A later review keeps it in the summary, under the same heading.
+    await handler.handle(event("ev2", MANUAL_REVIEW_EVENT, { requestedBy: "user-1" }), context(new FakeThreads(answers), store, { contextBudget: 0 }));
+    const body = gh.reviews.get(review.id)?.body ?? "";
+    expect(body).toContain("Findings without a trigger or code evidence (2)");
+    expect(gh.comments.map((c) => c.line)).toEqual([5]);
+  });
+
   it("edits the same review on the next push, marks fixed findings and reviews only new commits", async () => {
     const gh = new FakeGitHub();
     const store = new FakeStore();
@@ -575,6 +596,22 @@ describe("review-pull-request handler", () => {
     expect(gh.comments[0].body).not.toContain("Fixed in");
     expect(gh.writes).toContain(`unresolve ${commentId}`);
     expect(store.pointers()?.findings).toMatchObject([{ id: "f1", status: "open", line: 6, commentId }]);
+  });
+
+  it("does not reopen the inline thread of a fixed finding for a repeat with no evidence", async () => {
+    const gh = new FakeGitHub();
+    const store = new FakeStore();
+    const handler = createReviewHandler({ fetch: gh.fetch });
+    await handler.handle(event("ev1"), context(new FakeThreads(scripted(reviewOf([finding({})]), {})), store));
+    const commentId = gh.comments[0].id;
+    gh.head = H2;
+    await handler.handle(event("ev2"), context(new FakeThreads(scripted(reviewOf([]), { "Null deref in parse": verdict("refuted") })), store));
+
+    gh.head = "3".repeat(40);
+    await handler.handle(event("ev3"), context(new FakeThreads(scripted(reviewOf([finding({ line: 6, evidence: "" })]), {})), store));
+    expect(gh.resolved.has(commentId)).toBe(true);
+    expect(gh.writes).not.toContain(`unresolve ${commentId}`);
+    expect(store.pointers()?.findings).toContainEqual({ id: "f2", path: "a.ts", line: 6, status: "open", unsupported: true });
   });
 
   it.each(["comment", "thread"])("retries a failed %s edit before recording a finding as resolved", async (failure) => {
@@ -1280,7 +1317,7 @@ describe("review-pull-request handler stages", () => {
   it("puts the context pack in the reviewer's prompt and notes each stage in the plugin thread", async () => {
     const gh = new FakeGitHub();
     gh.contentsAt[BASE] = { "AGENTS.md": "Always validate parse input.\n" };
-    const threads = new FakeThreads(scripted(reviewOf([finding({ title: "Null deref in parse", evidence: "a.ts:5 reads input[0]" }), finding({ line: 6, title: "Parse reads past the input", evidence: "a.ts:5" })]), {}));
+    const threads = new FakeThreads(scripted(reviewOf([finding({ title: "Null deref in parse", evidence: "a.ts:5 reads input[0]", trigger: "an empty input" }), finding({ line: 6, title: "Parse reads past the input", evidence: "a.ts:5", trigger: "an empty input" })]), {}));
     threads.checkout = repoOf({ "AGENTS.md": "Always validate parse input.\n", "a.ts": "export function parse() {}\n" });
     await createReviewHandler({ fetch: gh.fetch }).handle(event("ev1", "github.pull_request.opened"), context(threads, new FakeStore()));
 

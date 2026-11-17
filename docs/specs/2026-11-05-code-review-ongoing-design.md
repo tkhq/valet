@@ -205,6 +205,14 @@ team, through review feedback.
   findings post inline at high or critical severity. Below that, the summary
   lists them under "Findings the verifier could not confirm", with no inline
   comment. The pointer keeps `unconfirmed`, so later reviews keep them there.
+- **A finding with no trigger or evidence goes to the summary.** The eval
+  reviewer's `submit_review` refuses a finding with an empty trigger or with
+  no `path:line` reference in its evidence. The reviewer child answers with
+  JSON, so nothing refuses it there. The handler applies the same check
+  (`evidenceProblems`) with or without `verify`. The summary lists such a
+  finding under "Findings without a trigger or code evidence", with no inline
+  comment, and the pointer keeps `unsupported`. In live reviews, authors
+  almost never acted on such findings.
 - **The verifier must try to refute before it confirms.** It looks for
   formatter and CI config, module versions and release rules, library
   behavior, and whether the trigger is reachable, and records the search. A
