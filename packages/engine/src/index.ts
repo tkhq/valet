@@ -461,3 +461,4 @@ export { MAX_IMAGE_BYTES, IMAGE_FORMATS, imageDecoder, validateImage, imageAttac
 export { MODEL_RESPONSE_METADATA_KEY, modelResponseMetadata, readModelResponseMetadata } from "./model-response.js";
 export { sniffImageMediaType, isSafeSvg, validatedImageMediaType, correctImageBlocks, type ImageMediaType } from "./image-media-type.js";
 export { projectTurnProgress, readTurnProgress, readLatestTurnProgress } from "./turn-progress.js";
+export * from "./authorization/index.js";
