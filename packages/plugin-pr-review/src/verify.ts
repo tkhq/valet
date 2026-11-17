@@ -103,6 +103,8 @@ export interface VerifierPromptInput {
   context?: string;
   /** Recheck of a finding posted on an earlier commit whose code has since changed. */
   recheckFrom?: string;
+  /** Ask the verifier to run the narrowest test or type check that exercises the claim (`runChecks`, high and critical findings). */
+  runCheck?: boolean;
   /** The last line: how to hand back the verdict. Default: call submit_verdict. */
   finish?: string;
 }
@@ -112,6 +114,20 @@ export interface VerifierPromptInput {
  * description, diff, rules) and the claim. Pure, so a host without a local
  * checkout (the plugin handler) sends the same prompt as `createVerifierSpec`.
  */
+/**
+ * For a high or critical claim on a line with `runChecks`: run code before
+ * deciding, where the sandbox can. No leading review tool documents this
+ * step; it turns a plausible claim into a reproduced one, or refutes it.
+ */
+export const RUN_CHECK_SECTION = [
+  "## Run a check",
+  "This claim is high severity. If the repository can build or test here, run the narrowest check that exercises the claim before you decide: a type check of the changed package, the existing test closest to the code, or a short scratch test in `.valet-check/` at the repository root that calls the code with the trigger.",
+  "- Find the toolchain first, for example `command -v go cargo node pnpm python3`. Do not install a toolchain. Do not install packages when that takes more than a few minutes.",
+  "- Spend at most 5 minutes on checks in all. Do not edit tracked files: write scratch files in `.valet-check/` only.",
+  "- Put the command and the decisive output lines in evidence or counter_evidence.",
+  "- A run that shows the claimed wrong result confirms the claim. A passing run of a test that exercises the trigger refutes it as misread. If nothing can run, decide from the code as usual, and say so in evidence.",
+].join("\n");
+
 export function buildVerifierPrompt(input: VerifierPromptInput): string {
   const f = input.finding;
   return [
@@ -121,6 +137,8 @@ export function buildVerifierPrompt(input: VerifierPromptInput): string {
     `BASE commit: ${input.base}`,
     `HEAD commit: ${input.head} (checked out)`,
     ...(input.context?.trim() ? ["", "## Rules the reviewer had", "These come from the repository owner and the team. A claim that cites one of them is checked against the rule as written.", input.context.trim()] : []),
+    "",
+    ...(input.runCheck ? ["", RUN_CHECK_SECTION] : []),
     "",
     "## Claim to check",
     input.recheckFrom !== undefined

@@ -205,6 +205,16 @@ team, through review feedback.
   findings post inline at high or critical severity. Below that, the summary
   lists them under "Findings the verifier could not confirm", with no inline
   comment. The pointer keeps `unconfirmed`, so later reviews keep them there.
+- **Execution checks (`runChecks`, default off).** For a high or critical
+  claim, the verifier prompt adds "Run a check". If the sandbox has the
+  toolchain, the verifier runs the narrowest type check, existing test, or
+  scratch test in `.valet-check/` that exercises the claim, for at most 5
+  minutes. It puts the command and the decisive output in its evidence. A
+  run that shows the wrong result confirms the claim. A passing test that
+  exercises the trigger refutes it as misread. The verifier never installs a
+  toolchain: a repository whose stock sandbox lacks one (Go or Rust, for
+  example) needs it in its bake (`.valet/prebuild.yaml`) first. Measure it
+  with paired replay before a live line turns it on.
 - **A finding with no trigger or evidence goes to the summary.** The eval
   reviewer's `submit_review` refuses a finding with an empty trigger or with
   no `path:line` reference in its evidence. The reviewer child answers with

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { ToolContext } from "@valet/engine";
-import { buildReviewPrompt, FOCUS_PROMPTS, REVIEWER_SYSTEM_PROMPT, anchorProblems, evidenceProblems, buildVerifierPrompt, claimDiff, createReviewerSpec, createVerifierSpec, lineCount, decideFinding, mergeFindings, quoteInFile, runReviewPipeline, type AgentRunner, type AgentSpec } from "../src/index.js";
+import { buildReviewPrompt, FOCUS_PROMPTS, REVIEWER_SYSTEM_PROMPT, anchorProblems, evidenceProblems, buildVerifierPrompt, RUN_CHECK_SECTION, claimDiff, createReviewerSpec, createVerifierSpec, lineCount, decideFinding, mergeFindings, quoteInFile, runReviewPipeline, type AgentRunner, type AgentSpec } from "../src/index.js";
 
 function repo(): { dir: string; base: string; head: string } {
   const dir = mkdtempSync(join(tmpdir(), "pr-review-pipeline-"));
@@ -390,6 +390,14 @@ describe("buildVerifierPrompt", () => {
     expect(remote).not.toContain("## Rules the reviewer had");
     expect(remote).toContain("posted this claim on commit abc");
     expect(remote.endsWith("Answer in JSON.")).toBe(true);
+    expect(remote).not.toContain("## Run a check");
+  });
+
+  it("asks for a run only when runCheck is set, before the claim", () => {
+    const prompt = buildVerifierPrompt({ title: "t", body: "", base: "b", head: "h", finding: finding("Division by zero"), diff: "", runCheck: true });
+    expect(prompt).toContain(RUN_CHECK_SECTION);
+    expect(prompt.indexOf("## Run a check")).toBeLessThan(prompt.indexOf("## Claim to check"));
+    expect(RUN_CHECK_SECTION).toContain(".valet-check/");
   });
 });
 

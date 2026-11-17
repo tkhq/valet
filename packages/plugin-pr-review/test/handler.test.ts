@@ -378,6 +378,17 @@ describe("review-pull-request handler", () => {
     expect([...gh.reviews.values()][0].body).toContain("Open findings (1)");
   });
 
+  it("asks the verifier to run a check only for high and critical findings with runChecks on", async () => {
+    const gh = new FakeGitHub();
+    const threads = new FakeThreads(
+      scripted(reviewOf([finding({ title: "Null deref in parse", severity: "high" }), finding({ line: 9, title: "Unclear name", severity: "medium" })]), {}),
+    );
+    await createReviewHandler({ fetch: gh.fetch }).handle(event("ev1", "github.pull_request.opened"), context(threads, new FakeStore(), { verify: true, runChecks: true, contextBudget: 0 }));
+    const prompts = threads.spawned.filter((s) => s.req.role === "pr-verifier").map((s) => s.req.prompt);
+    expect(prompts.find((p) => p.includes("Null deref in parse"))).toContain("## Run a check");
+    expect(prompts.find((p) => p.includes("Unclear name"))).not.toContain("## Run a check");
+  });
+
   it("posts one review with inline and summary findings on the first push", async () => {
     const gh = new FakeGitHub();
     const store = new FakeStore();

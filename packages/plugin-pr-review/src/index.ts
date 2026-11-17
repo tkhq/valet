@@ -26,6 +26,7 @@ export {
 } from "./pipeline.js";
 export {
   buildVerifierPrompt,
+  RUN_CHECK_SECTION,
   claimDiff,
   createVerifierSpec,
   decideFinding,

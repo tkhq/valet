@@ -68,6 +68,10 @@ export const ReviewSettingsSchema = Type.Object(
       default: false,
       description: "Record each review in the plugin thread only. Nothing is posted on GitHub.",
     }),
+    runChecks: Type.Boolean({
+      default: false,
+      description: "With verify on, the verifier of a high or critical finding runs the narrowest test or type check that exercises it, when the sandbox has the toolchain, before it decides. Rechecks do the same.",
+    }),
     verify: Type.Boolean({
       default: false,
       description: "Check each new finding in its own verifier child before posting. Rechecks of earlier findings run either way.",
@@ -303,7 +307,8 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
   const packReady = new Promise<void>((resolve) => { packSeen = resolve; });
   const claimInput = (f: Finding) => {
     const context = verifierRules(settings.instructions, packText);
-    return { title: pr.title, body: pr.body ?? "", base: mergeBase, head, finding: f, diff: claimDiff(prDiff, f.path), ...(context ? { context } : {}) };
+    const runCheck = settings.runChecks && (f.severity === "high" || f.severity === "critical");
+    return { title: pr.title, body: pr.body ?? "", base: mergeBase, head, finding: f, diff: claimDiff(prDiff, f.path), ...(context ? { context } : {}), ...(runCheck ? { runCheck } : {}) };
   };
 
   // 1. Recheck open findings whose files changed. Only a grounded refutation
