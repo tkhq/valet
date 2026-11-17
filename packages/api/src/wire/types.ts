@@ -3849,6 +3849,8 @@ export interface CodeReviewOutcomeWire {
   repo: string;
   /** The host build that posted the findings. Absent for findings from a build that did not know its sha. */
   build?: string;
+  /** Findings a shadow line recorded without posting: its latest review of each pull request. */
+  shadow?: true;
   /** Findings recorded, open or closed. */
   posted: number;
   /** Findings whose pull request merged: the base of the rates. */

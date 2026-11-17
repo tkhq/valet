@@ -215,13 +215,16 @@ it("reports finding outcomes per repository and build, counting merged pull requ
   await mine.put("findings", "acme/site#7/f3", record("f3", "aaa1111", { result: "addressed", merged: false }));
   await mine.put("findings", "acme/site#7/f4", record("f4", "aaa1111"));
   await mine.put("findings", "acme/site#7/f5", record("f5", "bbb2222", { result: "rejected", merged: true }));
+  await mine.put("findings", "acme/site#7/s1", { ...record("s1", "aaa1111", { result: "ignored", merged: true }), placement: "shadow", shadow: true });
   await pluginStore(api.providers.db, "pr-review").team("team-1").put("findings", "acme/site#9/f1", record("f1", "ccc3333", { result: "addressed", merged: true }));
 
   const res = await fetch(`${api.baseUrl}/api/code-review/outcomes`);
   expect(res.status).toBe(200);
   const { outcomes } = await res.json() as ListCodeReviewOutcomesResponse;
-  const byBuild = new Map(outcomes.map(o => [o.build, o]));
+  const live = outcomes.filter(o => !o.shadow);
+  const byBuild = new Map(live.map(o => [o.build, o]));
   expect(byBuild.get("aaa1111")).toMatchObject({ repo: "acme/site", posted: 4, merged: 2, addressed: 1, rejected: 0, ignored: 1 });
+  expect(outcomes.filter(o => o.shadow)).toMatchObject([{ build: "aaa1111", shadow: true, posted: 1, merged: 1, ignored: 1 }]);
   expect(byBuild.get("bbb2222")).toMatchObject({ posted: 1, merged: 1, rejected: 1 });
   expect(byBuild.has("ccc3333")).toBe(false);
 

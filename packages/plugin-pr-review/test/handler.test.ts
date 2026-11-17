@@ -259,8 +259,8 @@ class FakeStore implements ScopedPluginStore {
     const items = [...this.docs.entries()].filter(([k]) => k.startsWith(head)).sort(([a], [b]) => a.localeCompare(b)).map(([, d]) => d as PluginStoreDoc<T>);
     return { items, nextCursor: null };
   }
-  async delete(): Promise<boolean> {
-    return false;
+  async delete(collection: string, key: string): Promise<boolean> {
+    return this.docs.delete(`${collection}/${key}`);
   }
   pointers(): PullPointers | undefined {
     return this.docs.get(`pulls/${SLUG}`)?.doc as PullPointers | undefined;
@@ -1134,7 +1134,7 @@ describe("review-pull-request handler", () => {
     }
   });
 
-  it("records a shadow review in the plugin thread and writes nothing to GitHub or the store", async () => {
+  it("records a shadow review in the plugin thread and writes nothing to GitHub and no pointers", async () => {
     const gh = new FakeGitHub();
     const store = new FakeStore();
     const threads = new FakeThreads(scripted(reviewOf([finding({}), finding({ line: 99, title: "Past the end" })]), {}));
@@ -1192,6 +1192,30 @@ describe("review-pull-request handler", () => {
     expect(threads.records[0].body).toContain("Null deref in parse");
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("concurrency reviewer skipped"), expect.stringContaining("child_cap"));
     warn.mockRestore();
+  });
+
+  it("keeps a shadow line's latest findings as records and gives them outcomes on close", async () => {
+    const gh = new FakeGitHub();
+    const store = new FakeStore();
+    const shadowRecords = () => [...store.docs.entries()].filter(([k]) => k.startsWith(`findings/${SLUG}/`)).map(([, d]) => d.doc as FindingRecord);
+    gh.contentsAt[H1] = { "a.ts": editedA(0) };
+    const first = new FakeThreads(scripted(reviewOf([finding({}), finding({ line: 9, title: "Retry may loop" })]), {}));
+    await createReviewHandler({ fetch: gh.fetch }).handle(event("ev1"), { ...context(first, store, { shadow: true, contextBudget: 0 }), build: "abc1234" });
+    expect(shadowRecords().map((r) => [r.id, r.placement, r.shadow, r.build])).toEqual([["s1", "shadow", true, "abc1234"], ["s2", "shadow", true, "abc1234"]]);
+
+    // The next push replaces the set with the latest shadow review.
+    gh.head = H2;
+    gh.contentsAt[H2] = { "a.ts": editedA(0) };
+    const second = new FakeThreads(scripted(reviewOf([finding({ line: 5, title: "Null deref in parse" })]), {}));
+    await createReviewHandler({ fetch: gh.fetch }).handle(event("ev2"), context(second, store, { shadow: true, contextBudget: 0 }));
+    expect(shadowRecords().map((r) => [r.id, r.title, r.head])).toEqual([["s1", "Null deref in parse", H2]]);
+
+    gh.head = "3".repeat(40);
+    gh.merged = true;
+    gh.contentsAt["3".repeat(40)] = { "a.ts": editedA(5) };
+    await createReviewHandler({ fetch: gh.fetch }).handle(event("ev3", "github.pull_request.closed"), context(second, store, { shadow: true, contextBudget: 0 }));
+    expect(shadowRecords().map((r) => [r.id, r.outcome?.result, r.outcome?.merged])).toEqual([["s1", "addressed", true]]);
+    expect(second.spawned.some((c) => c.req.role === "pr-learner")).toBe(false);
   });
 
   it("shadow-reviews a merged pull request at the given commit", async () => {

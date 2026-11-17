@@ -31,7 +31,7 @@ import {
   type PostedFinding,
 } from "./render.js";
 import { ReviewSchema, type Finding, type Review } from "./types.js";
-import { classifyOutcome, FINDINGS_COLLECTION, newRecords, pullRecords, writeRecords } from "./records.js";
+import { classifyOutcome, FINDINGS_COLLECTION, newRecords, pullRecords, replaceShadowRecords, writeRecords } from "./records.js";
 import { anchorProblems, evidenceProblems, lineCount } from "./review.js";
 import { buildVerifierPrompt, claimDiff, decideFinding, refutationCitesRules, refutationGrounded, VerdictSchema, type Verdict } from "./verify.js";
 import { packRules } from "./context/pack.js";
@@ -248,12 +248,12 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
   const head = pr.head.sha;
   const manual = manualReviewOptions(event);
   if (event.key === "github.pull_request.closed") {
-    if (settings.shadow) return log(slug, "skipped: a shadow line records no outcomes and does not learn");
     await recordOutcomes(ctx, gh, pr, { slug, repoName });
+    if (settings.shadow) return log(slug, "skipped learning: a shadow line does not learn");
     if (!settings.learn) return log(slug, "skipped learning: learning is off for this line");
     return learnFromPullRequest(event, ctx, gh, pr, settings, { slug, repoName, number: target.number });
   }
-  if (settings.shadow || manual?.shadow) return shadowReview(event, ctx, gh, pr, settings, { slug, repoName, commit: manual?.commit });
+  if (settings.shadow || manual?.shadow) return shadowReview(event, ctx, gh, pr, settings, { slug, repoName, number: target.number, commit: manual?.commit });
   if (pr.state !== "open") return log(slug, `skipped: the pull request is ${pr.state}`);
   if (pr.draft && !settings.reviewDrafts) return log(slug, "skipped: draft pull request");
 
@@ -928,7 +928,7 @@ async function shadowReview(
   gh: GitHubClient,
   pr: PullRequest,
   settings: ReviewSettings,
-  where: { slug: string; repoName: string; commit: string | undefined },
+  where: { slug: string; repoName: string; number: number; commit: string | undefined },
 ): Promise<void> {
   const { slug, repoName } = where;
   const checkout = where.commit ?? (pr.merged && pr.merge_commit_sha ? pr.merge_commit_sha : pr.head.sha);
@@ -963,6 +963,14 @@ async function shadowReview(
     renderShadowReview({ slug, commit: checkout, summary: draft.summary, confidence: draft.confidence, findings: shown, hidden: draft.findings.length - shown.length, rules: [...rules].sort() }),
     { dispatchId: dispatch("shadow-record") },
   );
+  // A shadow line on an open pull request records what it would have posted, so its outcomes compare with the live line's.
+  if (pr.state === "open" && where.commit === undefined) {
+    const records = newRecords({
+      repo: repoName, number: where.number, slug, head: checkout, ...(ctx.build ? { build: ctx.build } : {}), rules: [...rules].sort(),
+      posted: shown.map((f, i) => ({ finding: { ...f, id: `s${i + 1}` }, placement: "shadow" as const })),
+    });
+    await replaceShadowRecords(ctx.store, slug, records).catch((err: unknown) => console.warn(`pr-review ${slug}: could not record ${records.length} shadow finding(s)`, err));
+  }
   log(slug, `shadow review of ${checkout.slice(0, 7)} recorded in the plugin thread: ${shown.length} finding(s)`);
 }
 

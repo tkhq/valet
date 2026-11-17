@@ -20,7 +20,7 @@ import type { PostedFinding } from "./render.js";
 export const FINDINGS_COLLECTION = "findings";
 
 /** Where the finding was posted: an inline comment, the summary's outside-the-diff list, or a summary-only tier. */
-export type FindingPlacement = "inline" | "outside" | "unconfirmed" | "unsupported";
+export type FindingPlacement = "inline" | "outside" | "unconfirmed" | "unsupported" | "shadow";
 export type FindingOutcome = "addressed" | "rejected" | "ignored";
 
 export interface FindingRecord {
@@ -46,6 +46,8 @@ export interface FindingRecord {
   /** Rule notes and learned lessons in the reviewer's pack. */
   rules: string[];
   commentId?: number;
+  /** A shadow line's finding: recorded, never posted. A shadow line keeps only its latest review of a pull request. */
+  shadow?: true;
   outcome?: {
     result: FindingOutcome;
     /** False for a pull request closed without a merge. Rates count merged pull requests only. */
@@ -96,6 +98,15 @@ export function newRecords(input: {
 export function classifyOutcome(facts: { changed: boolean; disagreed: boolean }): FindingOutcome {
   if (facts.changed) return "addressed";
   return facts.disagreed ? "rejected" : "ignored";
+}
+
+/**
+ * Replace a shadow line's records for one pull request with its latest
+ * review. Keys are `<slug>/s<n>`, apart from posted findings' `<slug>/f<n>`.
+ */
+export async function replaceShadowRecords(store: ScopedPluginStore, slug: string, records: FindingRecord[]): Promise<void> {
+  for (const old of await pullRecords(store, slug)) if (old.record.shadow && old.record.outcome === undefined) await store.delete(FINDINGS_COLLECTION, old.key);
+  for (const [i, r] of records.entries()) await store.put(FINDINGS_COLLECTION, recordKey(slug, `s${i + 1}`), { ...r, id: `s${i + 1}`, shadow: true as const });
 }
 
 export async function writeRecords(store: ScopedPluginStore, slug: string, records: FindingRecord[]): Promise<void> {

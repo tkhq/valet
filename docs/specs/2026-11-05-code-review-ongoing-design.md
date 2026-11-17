@@ -273,9 +273,17 @@ The handler also measures its own reviews, with no eval run.
    The outcome also says whether the pull request merged. This runs on every
    line except a shadow line, with learning on or off, and a second close
    keeps the first outcome.
-3. A failure to write a record or an outcome is logged and never fails the
+3. A shadow line records what it would have posted on an open pull
+   request, as keys `<slug>/s<n>` marked `shadow`. Each shadow review
+   replaces the line's earlier records for that pull request, so the set is
+   its latest review. On close, a shadow line gives its records outcomes too.
+   They can be `addressed` or `ignored`, never `rejected`: nobody reacts to a
+   finding nobody saw. Compare a shadow line with the live line on the same
+   pull requests through the share of findings addressed.
+4. A failure to write a record or an outcome is logged and never fails the
    review or the learning pass.
 
 `GET /api/code-review/outcomes` sums the records of the selected workspace
-per repository and build. Rates count merged pull requests only. The Code
+per repository, build, and live or shadow line. Rates count merged pull
+requests only. The Code
 review page shows each row as "Review outcomes" with the address rate.

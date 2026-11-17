@@ -234,6 +234,7 @@ codeReviewRouter.get("/outcomes", async (c) => {
   const rows = await db.select({
     repo: sql<string>`${doc}->>'repo'`,
     build: sql<string | null>`${doc}->>'build'`,
+    shadow: sql<boolean>`coalesce((${doc}->>'shadow')::boolean, false)`,
     posted: sql<number>`count(*)::int`,
     merged: sql<number>`count(*) filter (where ${merged})::int`,
     addressed: result("addressed"),
@@ -243,9 +244,9 @@ codeReviewRouter.get("/outcomes", async (c) => {
   }).from(pluginStore).where(and(
     eq(pluginStore.plugin, PR_REVIEW_PLUGIN), eq(pluginStore.scopeType, owner.type), eq(pluginStore.scopeId, owner.id),
     eq(pluginStore.collection, FINDINGS_COLLECTION),
-  )).groupBy(sql`${doc}->>'repo'`, sql`${doc}->>'build'`).orderBy(desc(sql`max(${doc}->>'at')`)).limit(MAX_OUTCOME_ROWS);
+  )).groupBy(sql`${doc}->>'repo'`, sql`${doc}->>'build'`, sql`coalesce((${doc}->>'shadow')::boolean, false)`).orderBy(desc(sql`max(${doc}->>'at')`)).limit(MAX_OUTCOME_ROWS);
   const outcomes: CodeReviewOutcomeWire[] = rows.map((r) => ({
-    repo: r.repo, ...(r.build ? { build: r.build } : {}), posted: r.posted, merged: r.merged,
+    repo: r.repo, ...(r.build ? { build: r.build } : {}), ...(r.shadow ? { shadow: true as const } : {}), posted: r.posted, merged: r.merged,
     addressed: r.addressed, rejected: r.rejected, ignored: r.ignored, lastPostedAt: r.lastPostedAt,
   }));
   return c.json({ outcomes } satisfies ListCodeReviewOutcomesResponse);

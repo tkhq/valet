@@ -6,7 +6,8 @@ import { errorText } from "~/lib/error-text";
  * What authors did with Valet's findings, per repository and build. The
  * address rate is the share of findings on merged pull requests whose
  * flagged lines changed before the merge. It compares builds and
- * repositories; it is not a precision score.
+ * repositories; it is not a precision score. A shadow line's row counts
+ * the findings it would have posted in its latest review of each pull request.
  */
 export function ReviewOutcomes({ outcomes, loading, error }: {
   outcomes: CodeReviewOutcomeWire[] | undefined;
@@ -22,7 +23,7 @@ export function ReviewOutcomes({ outcomes, loading, error }: {
             No outcomes yet. When a reviewed pull request closes, Valet records what happened to each finding.
           </div>
         )
-        : outcomes.map((o) => <OutcomeRow key={`${o.repo}:${o.build ?? ""}`} outcome={o} />)}
+        : outcomes.map((o) => <OutcomeRow key={`${o.repo}:${o.build ?? ""}:${o.shadow ? "shadow" : "live"}`} outcome={o} />)}
     </WorkSection>
   );
 }
@@ -32,7 +33,12 @@ function OutcomeRow({ outcome: o }: { outcome: CodeReviewOutcomeWire }) {
   return (
     <WorkRow
       title={o.repo}
-      badge={rate !== undefined ? <Badge variant="neutral">{`${rate}% addressed`}</Badge> : undefined}
+      badge={(
+        <>
+          {o.shadow && <Badge variant="accent">Shadow</Badge>}
+          {rate !== undefined && <Badge variant="neutral">{`${rate}% addressed`}</Badge>}
+        </>
+      )}
       time={Date.parse(o.lastPostedAt)}
       detail={(
         <>
