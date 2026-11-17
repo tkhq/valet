@@ -394,7 +394,8 @@ describe("api integration: claims acceptance scenario", () => {
     expect(c6Platform.status).toBe("delivered");
     const [platformThread] = await landings(u, c6Platform.id);
     if (!platformThread) throw new Error("platform's mention landed nowhere");
-    expect(await threadKey(u, platformThread)).toBe(`sub:M-platform:${c6Platform.id}`);
+    // A mention keys its thread by its Slack conversation.
+    expect(await threadKey(u, platformThread)).toMatch(/^sub:M-platform:slack:C900:\d+\.\d+$/);
     const c6Turns = await queuedWith(u, "who owns db-2?");
     expect(c6Turns).toHaveLength(2);
     expect(c6Turns).toEqual(expect.arrayContaining([expect.objectContaining(tInc), expect.objectContaining(platformThread)]));

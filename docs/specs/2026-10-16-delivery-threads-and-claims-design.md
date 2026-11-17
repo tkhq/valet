@@ -97,7 +97,8 @@ named in each step.
 | T7 | `u-001` archives `Platform CI`. A failure arrives. | The delivery dead-letters with `Pick another thread in Presence.` R4 reports the problem. No thread is created or reopened. |
 | T8 | `u-001` archives the `ENG triage` thread. An update on `ENG-42` arrives. | The `ENG triage` thread reopens and holds the delivery. |
 | T9 | Create schedule S1 with a prompt, policy `own`, name `Morning summary`. It fires twice. | One thread with key `schedule:<S1>` and title `Morning summary` holds both prompts. |
-| T10 | Create R2: `slack.app_mention` in `C900`, policy `new`, `follow: true`. A mention arrives in a new Slack thread `X`. A reply arrives in `X`. | The mention opens one thread with key `sub:<R2>:<deliveryId>`, and a `followed_threads` row binds `X` to it. The reply lands in that thread through the binding. |
+| T10 | Create R2: `slack.app_mention` in `C900`, policy `new`, `follow: true`. A mention arrives in a new Slack thread `X`. A reply arrives in `X`. | The mention opens one thread with key `sub:<R2>:slack:C900:<X>`, and a `followed_threads` row binds `X` to it. The reply lands in that thread through the binding. |
+| T12 | Create R5: `slack.message` in `C900`, policy `new`, no `follow`. A root message `X` arrives, then two replies in `X`, then a root message `Y`. | One thread with key `sub:<R5>:slack:C900:<X>` holds the root and both replies, titled by the root's summary. `Y` opens its own thread with key `sub:<R5>:slack:C900:<Y>`. |
 | T11 | Patch R2 to `existing` with a thread from another user. | The patch is refused with `This thread belongs to another owner. Pick a thread in your workspace.` |
 
 Universe for Scenario C: the event wakeups spec's Scenario E universe after
@@ -205,7 +206,7 @@ The resolver is a pure function:
 resolveDestination(input) -> Destination
 input = {
   owner, rule: { id, kind: "subscription" | "schedule", name, policy, follow },
-  event?: { id, deliveryId, key, summary, subjects, naturalSubject, conversational },
+  event?: { id, deliveryId, conversationKey?, key, summary, subjects, naturalSubject, conversational },
   fireAt?: number,
   binding: { sessionId, threadId } | null,     // conversation binding
   claim: { sessionId, threadId, waiterId } | null,
@@ -228,7 +229,8 @@ Destination =
 
    | mode | key | title |
    |---|---|---|
-   | `new`, subscription | `sub:<ruleId>:<deliveryId>` | the event summary, at most 80 characters |
+   | `new`, subscription, channel origin | `sub:<ruleId>:<conversationKey>` | the first delivery's event summary, at most 80 characters |
+   | `new`, subscription, no channel origin | `sub:<ruleId>:<deliveryId>` | the event summary, at most 80 characters |
    | `new`, schedule | `schedule:<ruleId>:<fireAt>` | the schedule name and the fire date |
    | `subject` | `subject:<naturalSubject>` | the plugin's subject label (Part D) |
    | `own`, subscription | `sub:<ruleId>` | the rule name |
@@ -236,12 +238,17 @@ Destination =
    | `existing` | the stored target | unchanged |
 
    `subject` keys carry no rule id: every rule of one owner that groups by
-   the same subject shares one thread.
+   the same subject shares one thread. `conversationKey` is the channel
+   origin's thread key, `slack:<channel>:<threadTs>`. A root message's
+   `threadTs` is its own `ts`, and a reply's is its root's, so a Slack
+   thread's root and replies share one `new` thread. A third-party bot
+   post (`slack.bot_message`) has no channel origin, so each post keeps its
+   own thread.
 3. A `key` destination MUST resolve to a thread only at delivery time, with
    `ensureFreshThread`, which gains a `title` for a thread it creates. A
    `skip` and a dead-letter MUST create no thread.
-4. An archived thread found by key (`own`, `subject`) MUST reopen on
-   delivery. A `target` destination from `existing` whose thread is
+4. An archived thread found by key (`own`, `subject`, and `new` for a
+   channel conversation) MUST reopen on delivery. A `target` destination from `existing` whose thread is
    archived, deleted, or outside the owner's live runtime MUST dead-letter
    with `Pick another thread in Presence.` and MUST NOT fall
    back to another mode.
@@ -434,7 +441,8 @@ event wakeups spec Part A.
   resolution runs at delivery, after the destination kind is known.
   Vectors: C1, C8, T7.
 - **INV-D4 A retry never creates a second thread.** Mechanism: `new` keys
-  derive from the delivery id or fire time. Before it resolves a
+  derive from the delivery's conversation, its id, or the fire time, so a
+  retry of one delivery resolves the same key. Before it resolves a
   destination, every delivery with an `event:<deliveryId>` or
   `schedule:<id>:<slot>` dispatch id recovers an admission with that id
   from any session of the owner. A retry after a policy edit selects
@@ -528,10 +536,11 @@ event wakeups spec Part A.
 - **Explicit `own` or `existing` on a channel rule.** A rule that matches
   channel messages and sets `own` or `existing` puts several Slack
   conversations in one thread that can reply to each of them. This is the
-  owner's choice. The default (Part A step 3) keys a thread per delivery
-  (`sub:<rule>:<deliveryId>`). With `follow: true`, later replies in that
-  Slack thread reach the same assistant thread through the binding.
-  Without `follow`, each matching message opens its own thread.
+  owner's choice. The default (Part A step 3) keys a thread per Slack
+  conversation (`sub:<rule>:<conversationKey>`). With `follow: true`, later
+  replies in that Slack thread reach the same assistant thread through the
+  binding. Without `follow`, each reply that the rule matches lands in its
+  root's thread by key.
 - **Channel privacy follows content.** Every Slack-sourced assistant
   delivery records its channel on the thread it lands in, in engine thread
   `metadata.slackChannels`, and on a team execution's governing thread. A
@@ -657,6 +666,14 @@ event wakeups spec Part A.
   text, so the web treats both texts as the pin problem (`isPinProblem`).
   The subject refusal (Part A step 4) changed for the same reason.
 
+- **New mode groups by Slack conversation (2026-11-16).** The first version
+  keyed every `new` subscription delivery by its delivery id. Only a
+  following mention rule writes a `followed_threads` binding, so a message
+  rule opened a new Valet thread for each reply in one Slack thread, and
+  the assistant answered each reply without the earlier ones. A delivery
+  with a channel origin now keys by the origin's thread key. A binding
+  still outranks the policy. Valet's own Slack posts carry its bot id, and
+  the Slack trigger drops them, so its replies never wake the rule.
 - **A bot post reads as a channel message.** The Slack transport gives a
   `slack.bot_message` no reply origin, so the first version read it as a
   reaction and keyed it `subject:slack:<team>/<channel>`. Every alert in a
@@ -680,5 +697,5 @@ event wakeups spec Part A.
 - Workflow triggers UI: assistant-prompt schedules carry a thread policy
   (Part A step 2).
 
-- **Unattended turns follow the policy's thread keys (2026-10-20).** dev-v2 #972 marks every turn a person did not type on a delivery thread as unattended (`isAutomatedDeliveryThread`, the host's `automatedThread`). The rule names the keys this policy writes: `sub:<rule>`, `sub:<rule>:<delivery>`, `schedule:<rule>`, `schedule:<rule>:<fire>`, and `subject:<natural subject>`, and keeps `events` and `slack-events:<channel>` for rows written before the policy. A pinned existing thread keeps its own key, so a person's thread is never marked. A policy key does not prove that nobody waits: a Slack mention under an absent policy lands on `sub:<rule>:<delivery>`, and the dispatcher leaves `unattended` unset for a channel conversation. So `deliverToAssistantThread` records `conversational: true` in thread metadata (`Thread.setMetadataFlag`, through the one metadata patch path) when it lands a delivery without `unattended` on a key the rule covers (`isAutomatedThreadKey` in `automated-threads.ts`: `sub:`, `schedule:`, `subject:`, `events`, and `slack-events:<channel>`). A pinned thread and a `slack:` thread never read the flag, so the delivery writes no metadata there. The host passes thread metadata to `automatedThread`, and a policy thread marked conversational is attended from then on, even if an unattended delivery opened it. A turn that carries the unattended delivery flag still refuses questions. The legacy `events` and `slack-events:<channel>` threads stay automated, because a mention never landed there.
+- **Unattended turns follow the policy's thread keys (2026-10-20).** dev-v2 #972 marks every turn a person did not type on a delivery thread as unattended (`isAutomatedDeliveryThread`, the host's `automatedThread`). The rule names the keys this policy writes: `sub:<rule>`, `sub:<rule>:<delivery>`, `sub:<rule>:<conversation>`, `schedule:<rule>`, `schedule:<rule>:<fire>`, and `subject:<natural subject>`, and keeps `events` and `slack-events:<channel>` for rows written before the policy. A pinned existing thread keeps its own key, so a person's thread is never marked. A policy key does not prove that nobody waits: a Slack mention under an absent policy lands on `sub:<rule>:<conversation>`, and the dispatcher leaves `unattended` unset for a channel conversation. So `deliverToAssistantThread` records `conversational: true` in thread metadata (`Thread.setMetadataFlag`, through the one metadata patch path) when it lands a delivery without `unattended` on a key the rule covers (`isAutomatedThreadKey` in `automated-threads.ts`: `sub:`, `schedule:`, `subject:`, `events`, and `slack-events:<channel>`). A pinned thread and a `slack:` thread never read the flag, so the delivery writes no metadata there. The host passes thread metadata to `automatedThread`, and a policy thread marked conversational is attended from then on, even if an unattended delivery opened it. A turn that carries the unattended delivery flag still refuses questions. The legacy `events` and `slack-events:<channel>` threads stay automated, because a mention never landed there.
 - **Rule threads run deliveries without their history (2026-11-09).** An unattended delivery on a rule's own thread (`sub:<rule>`, `schedule:<rule>`) or on the legacy `events` firehose admits its queue item with `FRESH_CONTEXT_KEY` (`deliveryRunsWithoutHistory` in `automated-threads.ts`). The turn's requests carry the system prompt, the tools, the delivery, and what the turn adds, but not the thread's earlier turns; its entries still join the thread. These threads collect one job per delivery, and a delivery an hour or more after the last one missed the prompt cache, so carrying the history re-wrote up to the 200k compaction budget at the cache-write rate on every delivery. A rule that needs state across deliveries keeps it in memory or reads it with tools; a routine's signal also names the previous fire time. A thread marked `conversational`, a `subject:` thread, and a `slack-events:<channel>` thread keep their history, because their earlier turns are about the same pull request, issue, or conversation. A pinned existing thread keeps its history too. Limit: after a fresh-context turn, the context meter and the turn-end budget check read that turn's reported usage until a full turn reports again; the overflow check before each request still estimates the whole transcript.

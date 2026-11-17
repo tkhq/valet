@@ -196,5 +196,35 @@
       "claim": { "sessionId": "sess-sched-claim", "threadId": "thread-sched-claim", "waiterId": "wk-5" }
     },
     "expected": { "kind": "skip", "reason": "claimed by thread thread-sched-claim" }
+  },
+  {
+    "name": "policy new on a channel conversation keys by the rule and the conversation: the root message",
+    "input": {
+      "rule": { "id": "rule-msg", "kind": "subscription", "name": "Deploy questions", "policy": { "mode": "new" } },
+      "event": { "deliveryId": "del-root", "conversationKey": "slack:C1:1712345678.000100", "summary": "How do I deploy?", "naturalSubject": null, "conversational": true },
+      "binding": null,
+      "claim": null
+    },
+    "expected": { "kind": "key", "key": "sub:rule-msg:slack:C1:1712345678.000100", "title": "How do I deploy?", "reason": "policy_new" }
+  },
+  {
+    "name": "policy new keys a reply in the same Slack thread to the root's key",
+    "input": {
+      "rule": { "id": "rule-msg", "kind": "subscription", "name": "Deploy questions", "policy": { "mode": "new" } },
+      "event": { "deliveryId": "del-reply", "conversationKey": "slack:C1:1712345678.000100", "summary": "Same question for staging", "naturalSubject": null, "conversational": true },
+      "binding": null,
+      "claim": null
+    },
+    "expected": { "kind": "key", "key": "sub:rule-msg:slack:C1:1712345678.000100", "title": "Same question for staging", "reason": "policy_new" }
+  },
+  {
+    "name": "a conversation binding still wins over a new policy with a conversation key",
+    "input": {
+      "rule": { "id": "rule-msg", "kind": "subscription", "name": "Deploy questions", "policy": { "mode": "new" } },
+      "event": { "deliveryId": "del-bound", "conversationKey": "slack:C1:1712345678.000100", "summary": "Follow-up", "naturalSubject": null, "conversational": true },
+      "binding": { "sessionId": "sess-f", "threadId": "thread-f", "via": "follow" },
+      "claim": null
+    },
+    "expected": { "kind": "target", "sessionId": "sess-f", "threadId": "thread-f", "reason": "conversation_follow" }
   }
 ]

@@ -263,7 +263,9 @@ export function eventDeliveryRunId(deliveryId: string): string {
  * reads as:
  *
  * - `new` for a channel message (a mention, a person's message, a DM, or a
- *   bot post), so each Slack conversation keeps its own assistant thread.
+ *   bot post), so each Slack conversation keeps its own assistant thread:
+ *   `resolveDestination` keys it by the origin's thread key. A bot post has
+ *   no origin, so each post keeps its own thread.
  * - `subject` for another Slack event with a channel (a reaction, a channel
  *   lifecycle event), so each channel keeps its own thread and a private
  *   channel's gate covers only that channel's thread. With no natural
@@ -1183,6 +1185,7 @@ export class EventDispatcher {
       }) },
       event: {
         deliveryId,
+        ...(origin !== null ? { conversationKey: origin.threadKey } : {}),
         summary: event.summary,
         naturalSubject,
         conversational: isConversationalEvent(bindingEvent, origin, found),

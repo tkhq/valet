@@ -19,14 +19,7 @@ import type {
 } from "@valet/api/wire";
 import { deliveryStatusLine } from "~/components/events/delivery-copy";
 import { zoneLongName } from "~/lib/time-zones";
-import {
-  displayThreadPolicy,
-  ownOptionLabel,
-  subjectKindForKeys,
-  subjectOptionLabel,
-  type RuleKind,
-  type SubjectKind,
-} from "./thread-policy-copy";
+import { displayThreadPolicy, newOptionLabel, subjectKindForKeys } from "./thread-policy-copy";
 
 /** Thread titles by thread id. A thread that is not here reads as a generic name. */
 export type ThreadTitles = Readonly<Record<string, { title: string | null | undefined }>>;
@@ -38,29 +31,6 @@ type Catalog = GetWorkflowTriggerCatalogResponse["catalog"];
 
 /** What the event words read from a catalog: each entry's key and description. */
 type EventDescriptions = ReadonlyArray<{ entries: ReadonlyArray<{ key: string; description?: string }> }>;
-
-/**
- * Where a line's or a routine's deliveries land, as one phrase for the editor's **Where**.
- * `threadTitle` names an `existing` thread; without it the phrase falls back
- * to a generic name.
- */
-export function whereLabel(
-  policy: AssistantThreadPolicy,
-  subjectKind: SubjectKind | null,
-  ruleKind: RuleKind,
-  threadTitle?: string,
-): string {
-  switch (policy.mode) {
-    case "new":
-      return "A new thread each time";
-    case "subject":
-      return subjectOptionLabel(subjectKind);
-    case "own":
-      return ownOptionLabel(ruleKind);
-    case "existing":
-      return hasText(threadTitle) ? `The thread ${threadTitle}` : "The thread you picked";
-  }
-}
 
 function hasText(value: string | null | undefined): value is string {
   return value !== undefined && value !== null && value.trim().length > 0;
@@ -665,7 +635,7 @@ export function presenceDoesParts(sub: EventSubscriptionWire, workflows: Workflo
   const policy = displayThreadPolicy(target, sub.eventKeys);
   switch (policy.mode) {
     case "new":
-      return [text(replies(sub) ? "reply in a new thread" : "work in a new thread each time")];
+      return [text(replies(sub) ? "reply in a new thread" : `work in a${newOptionLabel(sub.eventKeys).slice(1)}`)];
     case "subject":
       return [text(`work in one thread per ${subjectKindForKeys(sub.eventKeys) ?? "place"}`)];
     case "own":

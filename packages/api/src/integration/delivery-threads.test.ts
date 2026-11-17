@@ -568,7 +568,7 @@ describe("api integration: delivery threads acceptance scenario", () => {
     for (const slot of fireAt) expect(await landings(api, `schedule:${s1}:${slot}`)).toEqual([{ sessionId: morning[0]?.sessionId, threadId: morning[0]?.id }]);
 
     // T10: R2 follows mentions in C900. A mention in a new Slack thread X
-    // opens one thread per delivery and binds X to it; a reply in X lands
+    // opens one thread keyed by X and binds X to it; a reply in X lands
     // there through the binding.
     const r2 = await createRule(api, {
       name: "C900 mentions",
@@ -582,7 +582,7 @@ describe("api integration: delivery threads acceptance scenario", () => {
     });
     const t10 = await settled(api, r2, 1);
     const mention = await landingOf(api, t10[0]);
-    expect(mention.key).toBe(`sub:${r2}:${t10[0]?.id}`);
+    expect(mention.key).toBe(`sub:${r2}:slack:C900:${threadX}`);
     expect(await findFollowedThread(p.db, { orgId: ORG, channelType: "slack", channelId: "C900", threadTs: threadX }))
       .toMatchObject({ ownerType: "user", ownerId: USER, sessionId: mention.sessionId, threadId: mention.id });
     const replyText = "the deploy finished at 09:10";
@@ -602,13 +602,37 @@ describe("api integration: delivery threads acceptance scenario", () => {
     expect(refused.status).toBe(400);
     expect(await refused.json()).toEqual({ error: CROSS_OWNER });
     expect((await deliveriesOf(api, r2)).length).toBe(1);
+
+    // T12: R5 works on messages in C900 with no follow. A root message Y and
+    // two replies in Y land in one thread; a second root Z opens its own.
+    const r5 = await createRule(api, {
+      name: "C900 messages",
+      eventKeys: ["slack.message"],
+      filters: [{ field: "channel", op: "eq", value: "C900" }],
+      target: { kind: "assistant", thread: { mode: "new" } },
+    });
+    const message = (text: string, ts: string, threadTs?: string) => postSlack(api, {
+      type: "message", channel: "C900", channel_type: "channel", user: "U001", text, team: SLACK_TEAM, ts,
+      ...(threadTs !== undefined ? { thread_ts: threadTs } : {}),
+    });
+    const threadY = `${++slackTs}.000100`;
+    await message("how do I roll back?", threadY);
+    await message("same question for staging", `${++slackTs}.000100`, threadY);
+    await message("and for prod", `${++slackTs}.000100`, threadY);
+    const threadZ = `${++slackTs}.000100`;
+    await message("who owns db-2?", threadZ);
+    const t12 = await settled(api, r5, 4);
+    const landed = await Promise.all(t12.map((d) => landingOf(api, d)));
+    expect(new Set(landed.slice(0, 3).map((t) => t.key))).toEqual(new Set([`sub:${r5}:slack:C900:${threadY}`]));
+    expect(landed[3]?.key).toBe(`sub:${r5}:slack:C900:${threadZ}`);
+    expect(await threadsLike(api, `sub:${r5}%`)).toHaveLength(2);
   }, 120_000);
 
-  it("moves a team follow off an archived thread when the conversation is mentioned again", async () => {
+  it("reopens a team follow's archived thread when the conversation is mentioned again", async () => {
     const api = await bootUniverse();
     const p = api.providers;
     const team = await createTeam(p.db, { orgId: ORG, name: "Ops", creatorUserId: USER });
-    // A team rule with no stored policy opens one thread per mention.
+    // A team rule with no stored policy opens one thread per Slack conversation.
     const now = Date.now();
     await p.db.insert(eventSubscriptions).values({
       id: "sub-team-mentions", orgId: ORG, ownerType: "team", ownerId: team.id, name: "Ops mentions",
@@ -632,11 +656,16 @@ describe("api integration: delivery threads acceptance scenario", () => {
       type: "app_mention", channel: "C900", user: "U001", text: `<@${BOT_USER}> any news?`,
       ts: again, thread_ts: conversation, team: SLACK_TEAM, event_ts: again,
     });
+    // The conversation's key finds the archived thread, which reopens (Part B
+    // step 4), and the binding stays on it, so no reply dead-letters.
     const second = await landingOf(api, (await settled(api, "sub-team-mentions", 2))[1]);
-    expect(second.id).not.toBe(first.id);
-    expect(await findFollowedThread(p.db, followKey)).toMatchObject({ createdBy: USER, sessionId: second.sessionId, threadId: second.id });
+    expect(second.id).toBe(first.id);
+    const [reopened] = await p.db.select({ archivedAt: sessionThreads.archivedAt }).from(sessionThreads)
+      .where(and(eq(sessionThreads.sessionId, second.sessionId), eq(sessionThreads.id, second.id)));
+    expect(reopened?.archivedAt ?? null).toBeNull();
+    expect(await findFollowedThread(p.db, followKey)).toMatchObject({ sessionId: second.sessionId, threadId: second.id });
 
-    // A later reply follows the binding to the new thread.
+    // A later reply follows the binding to the reopened thread.
     const replyText = "rollback finished at 10:02";
     await postSlack(api, {
       type: "message", channel: "C900", channel_type: "channel", user: "U001", text: replyText, team: SLACK_TEAM,

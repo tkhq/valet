@@ -731,7 +731,9 @@ Pass criterion: all steps, in one run, from a clean start.
 5. **Where**: the thread policies as cards with one explanation line each:
    `One thread per <pull request | issue | channel>` (`Each pull request
    gets its own thread; every event for it lands there.`), `A new thread
-   each time` (`Every event starts fresh.`), `Its own thread` (`One running
+   each time` (`Every event starts fresh.`) or, for a line on Slack
+   conversations, `A new thread per Slack conversation` (`A Slack message
+   and its replies share one thread.`), `Its own thread` (`One running
    thread for this line.`), and `The <title> thread` (`An existing thread
    you pick. If it is archived, this line stops until you pick another.`)
    with the thread picker inline (`Pick a thread` until one is

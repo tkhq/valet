@@ -30,7 +30,6 @@ import {
   routineRowParts,
   routineSentence,
   routineSentenceParts,
-  whereLabel,
   scheduleZone,
   type RoutineLike,
 } from "./sentences";
@@ -105,7 +104,7 @@ describe("presenceSentence <do>", () => {
     // Work on it on a mention stores no follow.
     const work = sub({ filters: [incidents], target: { kind: "assistant", thread: { mode: "new" } } });
     expect(presenceSentence(work, catalog, workflows, threads)).toBe(
-      "When you mention Valet in #incidents, work in a new thread each time.",
+      "When you mention Valet in #incidents, work in a new thread per Slack conversation.",
     );
     expect(presenceAction(work, workflows)).toBe("work on it");
     const reply = sub({ filters: [incidents], target: { kind: "assistant", follow: true, thread: { mode: "new" } } });
@@ -760,22 +759,6 @@ describe("activitySentenceParts", () => {
     const parts = activitySentenceParts(check, [delivery({ id: "d-a" }), delivery({ id: "d-b" })]);
     expect(parts.outcomes.map((o) => [o.key, partsText(o.parts)])).toEqual([["d-a", "delivered"], ["d-b", "delivered"]]);
     expect(activitySentenceParts(check, null).outcomes.map((o) => o.key)).toEqual(["none"]);
-  });
-});
-
-describe("whereLabel", () => {
-  it("labels each mode", () => {
-    expect(whereLabel({ mode: "new" }, "channel", "presence")).toBe("A new thread each time");
-    expect(whereLabel({ mode: "subject" }, "pull request", "presence")).toBe("One thread per pull request");
-    expect(whereLabel({ mode: "own" }, null, "presence")).toBe("Its own thread");
-    expect(whereLabel({ mode: "own" }, null, "routine")).toBe("This routine's thread");
-    expect(whereLabel({ mode: "existing", sessionId: "s", threadId: "t" }, null, "routine", "Deploys"))
-      .toBe("The thread Deploys");
-  });
-
-  it("falls back when the picked thread has no known title", () => {
-    expect(whereLabel({ mode: "existing", sessionId: "s", threadId: "t" }, null, "presence"))
-      .toBe("The thread you picked");
   });
 });
 

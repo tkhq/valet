@@ -36,6 +36,10 @@ export interface DestinationInput {
   rule: { id: string; kind: "subscription" | "schedule"; name: string; policy: AssistantThreadPolicy };
   event?: {
     deliveryId: string;
+    /** The channel conversation the event belongs to: its origin's thread
+     * key, such as `slack:C1:1712345678.000100`. A root message and its
+     * replies share it. Absent for an event with no channel origin. */
+    conversationKey?: string;
     summary: string;
     naturalSubject: { subject: string; label: string } | null;
     conversational: boolean;
@@ -53,14 +57,17 @@ function ownDestination(rule: DestinationInput["rule"]): KeyDestination {
   return { kind: "key", key, title: rule.name, reason: "policy_own" };
 }
 
-/** The `new`-mode destination for a subscription: one key per delivery. */
+/** The `new`-mode destination for a subscription: one key per channel
+ * conversation, so a Slack thread's root and replies share one thread, and
+ * one key per delivery for an event with no conversation. The first
+ * delivery's summary titles the thread (`seedThreadTitle` keeps it). */
 function newSubscriptionDestination(rule: DestinationInput["rule"], event: DestinationInput["event"]): Destination {
   if (event === undefined) {
     throw new Error("A new-mode destination for an event needs the event.");
   }
   return {
     kind: "key",
-    key: `sub:${rule.id}:${event.deliveryId}`,
+    key: `sub:${rule.id}:${event.conversationKey ?? event.deliveryId}`,
     title: summaryTitle(event.summary),
     reason: "policy_new",
   };

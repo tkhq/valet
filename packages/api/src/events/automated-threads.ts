@@ -8,7 +8,8 @@ export const EVENTS_THREAD_KEY = "events";
 /**
  * A thread only automated deliveries write to. The thread policy lands a
  * delivery on a key it owns: `sub:<rule>` (a rule's own thread),
- * `sub:<rule>:<delivery>` (a new thread per event), `schedule:<rule>` and
+ * `sub:<rule>:<conversation>` or `sub:<rule>:<delivery>` (a new thread per
+ * Slack conversation, else per event), `schedule:<rule>` and
  * `schedule:<rule>:<fire>` (a routine's threads), or `subject:<natural
  * subject>` (one thread per pull request, issue, or channel). Rows written
  * before the policy sit on the owner's `events` firehose or a Slack
@@ -19,7 +20,7 @@ export const EVENTS_THREAD_KEY = "events";
  * one of these. A task such a turn delegates can still ask in the inbox.
  *
  * A policy key does not prove that nobody waits. A Slack mention under an
- * absent policy lands on `sub:<rule>:<delivery>`, and the person who
+ * absent policy lands on `sub:<rule>:<conversation>`, and the person who
  * mentioned the assistant answers its questions there. An attended delivery
  * marks its thread `CONVERSATIONAL_THREAD_KEY` (`deliverToAssistantThread`),
  * and a marked policy thread is a conversation from then on. The legacy
