@@ -352,3 +352,11 @@ Limits: a command that receives a value through `valet-secrets run` can print or
 ### Turnkey provider
 
 `services/secret-store/turnkey.ts`. Two ordinary, non-root Turnkey users act for Valet: the provisioner (`valet-root`) creates sub-organizations and imports or deletes secrets, and the broker (`valet-broker`) exports. Their policies in the deployment organization come from root-authorized bootstrap (`docs/environment-variables.md`). Each personal space is a sub-organization: the provisioner creates it with both users as roots at threshold 1, adds one policy for each, then sets a 2-of-2 root quorum, so neither key alone can bypass a policy there. Labels become static properties, and the read context becomes the export's request context. The export policies compare the two, so an export with the wrong context fails in Turnkey. These checks catch Valet mistakes; they are not a boundary against a stolen broker key, which writes its own context.
+
+### Differences from the product design (2026-10-29)
+
+The product design for Turnkey secrets comes before this spec. The implementation differs from it in three places:
+
+1. References use `secret://`, not `turnkey://`, and `op://` references to 1Password still resolve. The product design moves every secret to Turnkey in one release and rejects every other prefix. Valet keeps 1Password so that existing setups continue to work.
+2. There is no `pnpm valet turnkey import` command. Org admins save company secrets in Settings, Secrets.
+3. A personal sub-organization has no human root user. Its roots are `valet-root` and `valet-broker` at a 2-of-2 quorum. The product design left this choice to the implementation spec.
