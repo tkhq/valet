@@ -529,9 +529,9 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
   // first, so a retry neither posts duplicates nor mistakes our resolution for
   // a person's dismissal. Pending bodies exist only until the batch completes.
   await save(next);
-  await finishPendingUpdates(gh, next, save, ctx.signal);
-
   // 9. Record each new finding, so its outcome can be measured when the PR closes.
+  // Record before the edits to earlier comments: a throw there must not lose
+  // records of findings already posted, and a retry skips this reviewed head.
   const records = newRecords({
     repo: repoName,
     number: target.number,
@@ -546,6 +546,7 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
     ],
   });
   await writeRecords(ctx.store, slug, records).catch((err: unknown) => console.warn(`pr-review ${slug}: could not record ${records.length} finding(s) for outcome measurement`, err));
+  await finishPendingUpdates(gh, next, save, ctx.signal);
   log(slug, `reviewed ${head.slice(0, 7)} (${from ? "follow-up" : "full"}): ${posted.length} new, ${fixed.filter((r) => !r.withdrawn).length} fixed, ${fixed.filter((r) => r.withdrawn).length} withdrawn, ${reopened.length} reopened, ${stillOpen.length} still open`);
 }
 

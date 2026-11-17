@@ -633,6 +633,9 @@ describe("review-pull-request handler", () => {
     }));
 
     await expect(handler.handle(event("ev2"), context(second, store))).rejects.toThrow("Temporary");
+    // The new finding posted before the failed edit already has its record.
+    const titles = [...store.docs.entries()].filter(([k]) => k.startsWith(`findings/${SLUG}/`)).map(([, d]) => (d.doc as FindingRecord).title);
+    expect(titles).toContain("Leaked handle in close");
     expect(store.pointers()?.lastReviewedHead).toBe(H1);
     expect(store.pointers()?.rounds).toHaveLength(1);
     expect(store.pointers()?.findings[0].status).toBe("open");

@@ -271,8 +271,8 @@ The handler also measures its own reviews, with no eval run.
    lines changed by close, `rejected` when a person disagreed (a thumbs-down,
    a thread a person resolved, a dismissal or a withdrawal), else `ignored`.
    The outcome also says whether the pull request merged. This runs on every
-   line except a shadow line, with learning on or off, and a second close
-   keeps the first outcome.
+   line, shadow lines included (item 3), with learning on or off, and a
+   second close keeps the first outcome.
 3. A shadow line records what it would have posted on an open pull
    request, as keys `<slug>/s<n>` marked `shadow`. Each shadow review
    replaces the line's earlier records for that pull request, so the set is
