@@ -1043,6 +1043,24 @@ describe("review-pull-request handler", () => {
     expect(threads.spawned.find((s) => s.req.role === "pr-reviewer")?.req.prompt).toContain("- `gen/`");
   });
 
+  it("checks out the line's related repositories for reviewer and verifier children and names them in both prompts", async () => {
+    const gh = new FakeGitHub();
+    const threads = new FakeThreads(scripted(reviewOf([finding({})]), {}));
+    await createReviewHandler({ fetch: gh.fetch }).handle(event("ev1", "github.pull_request.opened"), context(threads, new FakeStore(), { verify: true, contextBudget: 0, relatedRepos: ["acme/deploy"] }));
+    const reviewer = threads.spawned.find((s) => s.req.role === "pr-reviewer");
+    const verifier = threads.spawned.find((s) => s.req.role === "pr-verifier");
+    expect(reviewer?.req.extraRepos).toEqual([{ repo: "acme/deploy" }]);
+    expect(verifier?.req.extraRepos).toEqual([{ repo: "acme/deploy" }]);
+    expect(reviewer?.req.prompt).toContain("## Related repositories");
+    expect(reviewer?.req.prompt).toContain("- `acme/deploy` at `../deploy`");
+    expect(verifier?.req.prompt).toContain("- `acme/deploy` at `../deploy`");
+
+    const none = new FakeThreads(scripted(reviewOf([]), {}));
+    await createReviewHandler({ fetch: new FakeGitHub().fetch }).handle(event("ev2", "github.pull_request.opened"), context(none, new FakeStore(), { contextBudget: 0 }));
+    expect(none.spawned[0]?.req.extraRepos).toBeUndefined();
+    expect(none.spawned[0]?.req.prompt).not.toContain("## Related repositories");
+  });
+
   it("starts no verifier when the line leaves verify off", async () => {
     const gh = new FakeGitHub();
     const store = new FakeStore();

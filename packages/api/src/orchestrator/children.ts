@@ -270,6 +270,9 @@ async function cleanupFailedSpawn(
  * (`.github` is legal) but not a leading hyphen. Returns undefined for
  * anything else; exported for direct unit tests.
  */
+/** Extra repositories one child checks out at most, beside its main one. */
+export const MAX_EXTRA_REPOS = 3;
+
 export function parseTaskRepo(repo: string, branch?: string): RepoBinding | undefined {
   const trimmed = repo.trim();
   const m =
@@ -608,6 +611,16 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
         `unrecognized repo '${req.repo}'. Pass owner/repo or a GitHub clone URL.`,
       );
     }
+    // Extra repositories sit beside the main one, with the same git access; the prepare step runs in the main one.
+    if ((req.extraRepos?.length ?? 0) > 0 && binding === undefined) throw new Error("extraRepos needs repo. Pass the main repository as repo.");
+    if ((req.extraRepos?.length ?? 0) > MAX_EXTRA_REPOS) throw new Error(`A child checks out at most ${MAX_EXTRA_REPOS} extra repositories. Pass fewer.`);
+    const extraBindings = (req.extraRepos ?? []).map((extra) => {
+      const parsed = parseTaskRepo(extra.repo, extra.ref);
+      if (!parsed) throw new Error(`unrecognized repo '${extra.repo}' in extraRepos. Pass owner/repo or a GitHub clone URL.`);
+      return parsed;
+    }).filter((b) => b.fullName.toLowerCase() !== binding?.fullName.toLowerCase());
+    const bindings = binding ? [binding, ...extraBindings] : [];
+    const targetDirs = computeTargetDirs(bindings);
 
     // Same "validate before anything is created" rule as `req.repo` above.
     // A `ScratchRequestError` here (refused, never clamped) must throw
@@ -636,7 +649,7 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
         if (!(error instanceof RegistryCapacityError)) throw error;
         const image = await deps.engineHost.resolveChildStartupImage({
           userId: ctx.actorUserId, orgId, workspace: "", profile: req.profile, docker: req.docker,
-          repos: binding ? [{ ...binding, targetDir: computeTargetDirs([binding])[0] ?? "" }] : [],
+          repos: bindings.map((b, i) => ({ ...b, targetDir: targetDirs[i] ?? "" })),
         });
         if (!image) throw error;
         const warning = `Starting sandbox with existing image ${image}. ${error.message.replace("Sandbox image can't be built:", "New image bakes are blocked:")}`;
@@ -700,17 +713,17 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
           updatedAt: now,
           lastActivityAt: now,
         });
-        if (binding) {
-          await tx.insert(sessionRepos).values({
+        if (bindings.length > 0) {
+          await tx.insert(sessionRepos).values(bindings.map((b, position) => ({
             sessionId: childSessionId,
-            host: binding.host ?? "github",
-            fullName: binding.fullName,
-            cloneUrl: binding.cloneUrl,
-            ref: binding.ref ?? null,
-            auth: binding.auth ?? "auto",
-            position: 0,
-            targetDir: computeTargetDirs([binding])[0] ?? null,
-          });
+            host: b.host ?? "github",
+            fullName: b.fullName,
+            cloneUrl: b.cloneUrl,
+            ref: b.ref ?? null,
+            auth: b.auth ?? "auto",
+            position,
+            targetDir: targetDirs[position] ?? null,
+          })));
         }
       });
     } catch (error) {
@@ -757,7 +770,7 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
 
     // A plugin's deterministic pre-turn step (for example a repository scan) builds the first prompt.
     const prompt = req.prepare
-      ? await runChildPrepare(childSession, binding ? computeTargetDirs([binding])[0] : undefined, req.prepare, req.prompt, ctx.cancel)
+      ? await runChildPrepare(childSession, binding ? targetDirs[0] : undefined, req.prepare, req.prompt, ctx.cancel)
           .catch((error: unknown) => cleanupFailedSpawn(deps, childSessionId, workspace, error))
       : req.prompt;
     // No child_watches row exists yet, so a cancel in this window has no other way to stop the child.

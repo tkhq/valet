@@ -3,7 +3,7 @@ import { Type, type Static } from "typebox";
 import { Value } from "typebox/value";
 import { reviewerBashTool } from "./bash.js";
 import { git } from "./git.js";
-import { dataBlock } from "./prompt.js";
+import { dataBlock, relatedReposSection } from "./prompt.js";
 import type { AgentSpec } from "./pipeline.js";
 import type { Finding } from "./types.js";
 
@@ -103,6 +103,8 @@ export interface VerifierPromptInput {
   context?: string;
   /** Recheck of a finding posted on an earlier commit whose code has since changed. */
   recheckFrom?: string;
+  /** Other repositories checked out beside this one (`relatedRepos`). */
+  relatedRepos?: string[];
   /** The last line: how to hand back the verdict. Default: call submit_verdict. */
   finish?: string;
 }
@@ -120,6 +122,7 @@ export function buildVerifierPrompt(input: VerifierPromptInput): string {
     dataBlock("pr-description", input.body.trim() || "(no description)"),
     `BASE commit: ${input.base}`,
     `HEAD commit: ${input.head} (checked out)`,
+    ...relatedReposSection(input.relatedRepos ?? []),
     ...(input.context?.trim() ? ["", "## Rules the reviewer had", "These come from the repository owner and the team. A claim that cites one of them is checked against the rule as written.", input.context.trim()] : []),
     "",
     "## Claim to check",

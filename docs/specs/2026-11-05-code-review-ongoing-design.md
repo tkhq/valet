@@ -175,6 +175,18 @@ are listed by title. Keyword search skips learned files, so a lesson does not
 appear twice. A person edits or
 deletes a lesson in Memory like any other file.
 
+## Related repositories
+
+A change in one repository can break code in another: a renamed config key,
+a chart value, an exported metric. The `relatedRepos` setting lists up to
+three other repositories (`owner/name`). The reviewer and verifier children
+check them out read-only beside the reviewed repository, at their default
+branch, through the child spawn's `extraRepos`. Both prompts name each one and
+its sibling directory. The reviewer prompt tells the reviewer to search them
+for readers of what the change alters, and a claim about another repository
+needs a path:line from it. The GitHub App must read each repository; the
+child's git credential stays read-only for all of them.
+
 ## Verifier
 
 Every review rechecks each open finding on a file the new commits changed.

@@ -891,6 +891,27 @@ describe("buildChildSpawner", () => {
     });
   });
 
+  it("binds extraRepos beside req.repo, in order, and refuses them without repo or past the cap", async () => {
+    githubFixture = startGithubFixture();
+    api = await bootTestApi({ githubApiUrl: githubFixture.url });
+    await api.providers.engineCredentials.save({ type: "org", id: "local-org" }, "github", { type: "api_key", accessToken: "org-test-token" });
+    const deps = childrenDeps(api);
+    const spawner = buildChildSpawner(deps, testChildWatcher(deps));
+    const parent = await api.providers.engineHost.sessionFor("parent-extra", { userId: "local-user", orgId: "local-org", workspace: "/tmp" });
+    const ctx = { parentSessionId: "parent-extra", parentThreadId: parent.thread("web:default").id, actorUserId: "local-user", owner: { type: "user" as const, id: "local-user" } };
+
+    const result = await spawner({ prompt: "review", repo: "acme/app", branch: "abc123", extraRepos: [{ repo: "acme/deploy" }, { repo: "acme/app" }, { repo: "other/app", ref: "main" }] }, ctx);
+    const rows = await api.providers.db.select().from(sessionRepos).where(eq(sessionRepos.sessionId, result.childSessionId));
+    const sorted = rows.sort((a, b) => a.position - b.position);
+    // The main repository repeated in extraRepos binds once; two repos named `app` get distinct directories.
+    expect(sorted.map((r) => [r.position, r.fullName, r.ref])).toEqual([[0, "acme/app", "abc123"], [1, "acme/deploy", null], [2, "other/app", "main"]]);
+    expect(new Set(sorted.map((r) => r.targetDir)).size).toBe(3);
+
+    await expect(spawner({ prompt: "review", extraRepos: [{ repo: "acme/deploy" }] }, ctx)).rejects.toThrow(/extraRepos needs repo/);
+    await expect(spawner({ prompt: "review", repo: "acme/app", extraRepos: ["a/1", "a/2", "a/3", "a/4"].map((repo) => ({ repo })) }, ctx)).rejects.toThrow(/at most 3 extra repositories/);
+    await expect(spawner({ prompt: "review", repo: "acme/app", extraRepos: [{ repo: "not a repo" }] }, ctx)).rejects.toThrow(/unrecognized repo 'not a repo' in extraRepos/);
+  });
+
   it("spawns without repo: no session_repos row, no clone prep", async () => {
     api = await bootTestApi();
     const deps = childrenDeps(api);

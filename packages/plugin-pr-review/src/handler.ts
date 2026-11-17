@@ -18,7 +18,7 @@ import { confidentEnough, mergeFindings } from "./pipeline.js";
 import { gatherForReview, noteBestEffort, renderConsolidation, type StageOutcome } from "./stages.js";
 import { sameIssue } from "./incremental.js";
 import { commentableLines, nearestCommentableLine } from "./linemap.js";
-import { buildReviewPrompt, type ReviewFocus } from "./prompt.js";
+import { buildReviewPrompt, relatedReposSection, type ReviewFocus } from "./prompt.js";
 import {
   parseFindings,
   renderFixedComment,
@@ -75,6 +75,12 @@ export const ReviewSettingsSchema = Type.Object(
     model: Type.String({
       default: "anthropic/claude-sonnet-5-5",
       description: "provider/model for the reviewer and verifier children.",
+    }),
+    relatedRepos: Type.Array(Type.String({ pattern: "^[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.][A-Za-z0-9_.-]*$" }), {
+      default: [],
+      maxItems: 3,
+      uniqueItems: true,
+      description: "Other repositories (`owner/name`) the reviewer and verifier children check out read-only beside this one, at their default branch, to find code that consumes what a change alters: an API, a config key, a chart value. The GitHub App must read them.",
     }),
     riskPaths: Type.Array(Type.String({ minLength: 1 }), {
       default: [],
@@ -303,7 +309,7 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
   const packReady = new Promise<void>((resolve) => { packSeen = resolve; });
   const claimInput = (f: Finding) => {
     const context = verifierRules(settings.instructions, packText);
-    return { title: pr.title, body: pr.body ?? "", base: mergeBase, head, finding: f, diff: claimDiff(prDiff, f.path), ...(context ? { context } : {}) };
+    return { title: pr.title, body: pr.body ?? "", base: mergeBase, head, finding: f, diff: claimDiff(prDiff, f.path), ...(context ? { context } : {}), relatedRepos: settings.relatedRepos };
   };
 
   // 1. Recheck open findings whose files changed. Only a grounded refutation
@@ -320,6 +326,7 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
       title: `Recheck ${f.id} at ${head.slice(0, 7)}`,
       repo: repoName,
       head,
+      relatedRepos: settings.relatedRepos,
     });
     const reason = verdict?.counter_evidence || verdict?.refutation_reason || "refuted";
     const changed = verdict?.verdict === "refuted" && refutationGrounded(verdict)
@@ -379,6 +386,7 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
       title: `Verify finding ${i + 1} at ${head.slice(0, 7)}`,
       repo: repoName,
       head,
+      relatedRepos: settings.relatedRepos,
     });
     const side = f.side ?? "RIGHT";
     const decision = decideFinding(f, verdict, await readableText(gh, f.path, side === "LEFT" ? mergeBase : head), commentableLines(patches.get(f.path) ?? "", side, false));
@@ -733,16 +741,21 @@ function pointer(f: Pick<PostedFinding, "id" | "path" | "line" | "side" | "uncon
 async function runVerifier(
   ctx: PluginEventContext,
   thread: PluginThreadRef,
-  req: { dispatchId: string; model: string; prompt: string; title: string; repo: string; head: string },
+  req: { dispatchId: string; model: string; prompt: string; title: string; repo: string; head: string; relatedRepos?: string[] },
 ): Promise<Verdict | undefined> {
   const child: PluginChild = await ctx.threads.spawnChild(
     thread,
-    { prompt: req.prompt, title: req.title, role: VERIFIER_ROLE, model: req.model, repo: req.repo, ref: req.head, gitAccess: "read" },
+    { prompt: req.prompt, title: req.title, role: VERIFIER_ROLE, model: req.model, repo: req.repo, ref: req.head, ...extraRepos(req.relatedRepos), gitAccess: "read" },
     { dispatchId: req.dispatchId },
   );
   const result = await ctx.threads.awaitChild(child, { resultSchema: VerdictSchema });
   // No verdict keeps the finding (`decideFinding` treats it as unverified).
   return result.outcome === "completed" ? (result.output as Verdict | undefined) : undefined; // validated against VerdictSchema by awaitChild
+}
+
+/** `spawnChild` fields that check out the line's related repositories beside the main one. */
+function extraRepos(related: string[] | undefined): { extraRepos?: { repo: string }[] } {
+  return related && related.length > 0 ? { extraRepos: related.map((repo) => ({ repo })) } : {};
 }
 
 /** The role text after the reviewer's own prompt: children answer with JSON, not a submit tool. */
@@ -754,9 +767,10 @@ export function answerFormat(schema: TSchema): string {
   return ["End your final message with one ```json code block that matches this JSON Schema.", "```json", JSON.stringify(schema, null, 2), "```"].join("\n");
 }
 
-export function reviewerPrompt(input: { review: string; instructions: string; excludePaths: string[]; memory: string }): string {
+export function reviewerPrompt(input: { review: string; instructions: string; excludePaths: string[]; memory: string; relatedRepos?: string[] }): string {
   return [
     input.review,
+    ...relatedReposSection(input.relatedRepos ?? []),
     ...(input.instructions.trim() ? ["", "## Instructions from the repository owner", input.instructions.trim()] : []),
     ...(input.excludePaths.length > 0 ? ["", "## Paths not to review", ...input.excludePaths.map((p) => `- \`${p}\``)] : []),
     ...(input.memory ? ["", "## Team notes (from the team's memory)", input.memory] : []),
@@ -826,6 +840,7 @@ async function runReviewerChild(
       instructions: input.settings.instructions,
       excludePaths: input.settings.excludePaths,
       memory,
+      relatedRepos: input.settings.relatedRepos,
     });
   // Without a pack, the memory search stands in for the pack's team notes. It runs only when no pack replaces the prompt.
   const fallback = async (): Promise<string> => promptWith(undefined, await teamNotes(ctx, input.repoName));
@@ -867,6 +882,7 @@ async function runReviewerChild(
       repo: input.repoName,
       ref: input.head,
       // The child reads untrusted PR text and has bash: its git credential must not push.
+      ...extraRepos(input.settings.relatedRepos),
       gitAccess: "read",
     },
     { dispatchId: input.dispatchId },

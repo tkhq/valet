@@ -131,3 +131,15 @@ export function buildReviewPrompt(pr: PullRequestContext): string {
     "Review this pull request, then call submit_review.",
   ].join("\n");
 }
+
+/** The prompt section that names the related repositories and where they are checked out. */
+export function relatedReposSection(related: readonly string[]): string[] {
+  if (related.length === 0) return [];
+  return [
+    "",
+    "## Related repositories",
+    "These repositories are checked out read-only beside this one, at their default branch, each in a sibling directory named after it (run `ls ..` if a name is taken twice):",
+    ...related.map((r) => `- \`${r}\` at \`../${r.split("/")[1]}\``),
+    "When the change alters something another repository consumes, such as an API, a message, a config key or a chart value, search these repositories for its readers before you decide. A claim about another repository needs a path:line from it.",
+  ];
+}

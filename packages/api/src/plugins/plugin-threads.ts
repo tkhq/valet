@@ -244,6 +244,7 @@ export function buildPluginThreads(deps: PluginThreadsDeps, scope: PluginThreads
           ...(req.model !== undefined ? { model: req.model } : {}),
           ...(req.repo !== undefined ? { repo: req.repo } : {}),
           ...(req.ref !== undefined ? { branch: req.ref } : {}),
+          ...(req.extraRepos !== undefined && req.extraRepos.length > 0 ? { extraRepos: req.extraRepos } : {}),
           ...(req.profile !== undefined ? { profile: req.profile } : {}),
           ...(req.docker !== undefined ? { docker: req.docker } : {}),
           ...(req.gitAccess !== undefined ? { gitAccess: req.gitAccess } : {}),

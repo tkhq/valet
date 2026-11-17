@@ -3444,6 +3444,8 @@ export interface SpawnChildRequest {
   title?: string;
   repo?: string;
   branch?: string;
+  /** More repositories checked out beside `repo`, with the same git access. Needs `repo`. In-process callers only. */
+  extraRepos?: { repo: string; ref?: string }[];
   model?: string;
   /** `read`: the sandbox git credential clones and fetches, never pushes. */
   gitAccess?: "read";

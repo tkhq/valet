@@ -39,6 +39,12 @@ export interface PluginChildRequest {
   repo?: string;
   /** Branch, tag or commit to check out. Needs `repo`. */
   ref?: string;
+  /**
+   * More repositories checked out beside `repo`, each at its default branch
+   * or `ref`, with the same `gitAccess`. The prepare step runs in `repo` only.
+   * Needs `repo`; at most three.
+   */
+  extraRepos?: { repo: string; ref?: string }[];
   /** Sandbox profile: "headless" (default) for agent work, "full" for interactive services. */
   profile?: "headless" | "full";
   /** A Docker daemon in the child's sandbox, to run the project's own containers. */
