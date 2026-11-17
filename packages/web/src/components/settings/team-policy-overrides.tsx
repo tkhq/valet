@@ -31,7 +31,7 @@ function TeamPolicyContent({ teamId, policies, grants, canEdit, put, del, revoke
   const simple = policies.filter(p => p.appliesIn === "any" && p.paramMatchers.length === 0 && p.expiresAt === null);
   const advanced = policies.filter(p => !simple.includes(p));
   return <div className="space-y-10">
-    <PolicyOverridesEditor overrides={simple} title="Team policy overrides" description="Team overrides on top of org policy."
+    <PolicyOverridesEditor overrides={simple} title="Team policy overrides" description="Allow, ask, or deny a service, action, or risk level for this team's runs."
       canEdit={canEdit} saving={put.isPending} deleting={del.isPending} save={body => put.mutateAsync(body)} remove={row => del.mutateAsync(row.id)} />
     <GrantsList title="Team active grants" grants={grants} canEdit={canEdit} pending={revoke.isPending} revoke={grant => revoke.mutateAsync(grant.id)} />
     <details onToggle={event => setAdvancedOpen(event.currentTarget.open)}>

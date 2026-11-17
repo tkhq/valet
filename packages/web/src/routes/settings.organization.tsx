@@ -1,17 +1,16 @@
 import type { ReactNode } from "react";
 import { Outlet, createFileRoute, useRouterState } from "@tanstack/react-router";
 import { useOrg } from "~/api/settings";
-import { Button, LinkTabs } from "~/components/primitives";
+import { Button, LinkTabs, ManagedNote } from "~/components/primitives";
 import { ORG_TEAMS_PATH, orgSectionFor } from "~/components/settings/settings-rail";
 import { ActiveTabLabel } from "~/components/settings/section";
 
 /**
  * `/settings/organization` layout — guards the org sections behind the
  * feature gate, and all but Teams behind org admin, matching the rail's
- * visibility rule (spec: "Organization settings are managed by your org
- * admins" for a gate-on non-admin; "Organizations aren't enabled" for
- * gate-off — exact strings, quiet empty states, never a crash or redirect
- * loop on direct navigation).
+ * visibility rule: the managed note for a gate-on non-admin, and
+ * "Organizations aren't enabled" for gate-off. Both are quiet empty states,
+ * never a crash or redirect loop on direct navigation.
  *
  * Teams (amended 2026-08-28) admits every org member: any member can
  * create a team and administer the teams they created, so the page itself
@@ -112,20 +111,20 @@ export function OrgRouteGuard({ children }: { children: ReactNode }) {
   }
 
   if (!orgQ.data?.features.organizations) {
-    return <OrgEmptyState message="Organizations aren't enabled" />;
+    return <OrgEmptyState><p>Organizations aren't enabled</p></OrgEmptyState>;
   }
 
   if (orgQ.data.callerRole !== "admin" && !isMemberVisiblePath(pathname)) {
-    return <OrgEmptyState message="Organization settings are managed by your org admins" />;
+    return <OrgEmptyState><ManagedNote scope="org" askAdmin className="text-sm" /></OrgEmptyState>;
   }
 
   return <>{children}</>;
 }
 
-function OrgEmptyState({ message }: { message: string }) {
+function OrgEmptyState({ children }: { children: ReactNode }) {
   return (
     <div className="flex min-h-[40vh] items-center justify-center px-6 py-10 text-center text-sm text-muted">
-      <p>{message}</p>
+      {children}
     </div>
   );
 }

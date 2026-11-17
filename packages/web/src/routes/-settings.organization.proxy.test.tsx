@@ -28,6 +28,9 @@ let settingsResult: {
   isLoading: boolean;
 } = { data: { enabled: false, mode: "centralized" }, isLoading: false };
 
+// The org page is editable, so the governance controls never read the org.
+vi.mock("~/api/settings", () => ({ useOrg: () => ({ data: undefined }) }));
+
 vi.mock("~/api/proxy-usage", () => ({
   useProxySettings: () => settingsResult,
   useSetProxyEnabled: () => ({

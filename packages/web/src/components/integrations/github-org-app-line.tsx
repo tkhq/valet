@@ -25,8 +25,8 @@ export function GithubOrgAppLine() {
   const summary = githubOrgApp(statusQ.data);
 
   // The same rule `SettingsRail` uses to show the Organization group.
-  // Anybody else follows the link to "Organization settings are managed by
-  // your org admins", so they read the corrective action instead.
+  // Anybody else follows the link to the organization's managed note, so
+  // they read the corrective action instead.
   const canOpenAppPage =
     orgQ.data?.features.organizations === true && orgQ.data.callerRole === "admin";
 

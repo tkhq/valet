@@ -313,7 +313,7 @@ describe("Organization tabs", () => {
   it("refuse the organization's Usage to a member", async () => {
     orgRole = "member";
     await mount("/settings/organization/usage");
-    expect(await within(content()).findByText("Organization settings are managed by your org admins")).toBeTruthy();
+    expect(await within(content()).findByText("Managed by your organization. Ask an admin to change it.")).toBeTruthy();
     expect(within(content()).queryByText("org page usage")).toBeNull();
   });
 

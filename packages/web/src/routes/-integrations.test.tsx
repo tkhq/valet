@@ -1197,7 +1197,7 @@ describe("IntegrationsPage — org-provided pairing", () => {
 
     expect(screen.getByRole("button", { name: "Link Slack account" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: /Connect Slack/ })).toBeNull();
-    expect(screen.queryByText(/Provided by your organization/)).toBeNull();
+    expect(screen.queryByText("Managed by your organization. Ask an admin to change it.")).toBeNull();
   });
 
   it("starting the link shows the code, the provider's instructions, and the expiry", async () => {
@@ -1243,7 +1243,7 @@ describe("IntegrationsPage — org-provided pairing", () => {
     identityLinksData = { links: [] };
     openIntegration("slack");
 
-    expect(screen.getByText(/Provided by your organization/)).toBeTruthy();
+    expect(screen.getByText("Managed by your organization. Ask an admin to change it.")).toBeTruthy();
     expect(screen.queryByRole("button", { name: /Link .* account/ })).toBeNull();
   });
 
@@ -1251,7 +1251,7 @@ describe("IntegrationsPage — org-provided pairing", () => {
     identityLinksLoading = true;
     openIntegration("slack");
 
-    expect(screen.queryByText(/Provided by your organization/)).toBeNull();
+    expect(screen.queryByText("Managed by your organization. Ask an admin to change it.")).toBeNull();
     expect(screen.queryByRole("button", { name: /Link .* account/ })).toBeNull();
   });
 
@@ -1516,7 +1516,7 @@ describe("IntegrationsPage — tool permissions in the panel", () => {
     openIntegration("github");
     const row = toolRow("Delete repository");
     expect(within(row).getByText("Organization")).toBeTruthy();
-    expect(within(row).getByText("Set by your organization")).toBeTruthy();
+    expect(within(row).getByText("Managed by your organization.")).toBeTruthy();
     expect(within(row).getByRole("button", { name: "Allow" }).hasAttribute("disabled")).toBe(true);
     expect(within(row).getByRole("button", { name: "Off" }).hasAttribute("disabled")).toBe(false);
   });

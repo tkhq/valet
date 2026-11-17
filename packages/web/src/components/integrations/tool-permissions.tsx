@@ -12,7 +12,7 @@
  */
 import type { ApprovalModeWire, PluginSummary, RiskLevelWire, ToolPermissionSource, ToolPermissionWire } from "@valet/api/wire";
 import { apiErrorMessage, useMyToolPermissions, useSetMyToolModes } from "~/api/policies";
-import { Button, FilterChips, Spinner } from "~/components/primitives";
+import { Button, FilterChips, ManagedNote, Spinner } from "~/components/primitives";
 
 const MODES: readonly { value: ApprovalModeWire; label: string }[] = [
   { value: "allow", label: "Allow" },
@@ -34,11 +34,6 @@ const TAG: Record<ToolPermissionSource, string> = {
   team: "Team",
   personal: "Custom",
   grant: "Approved",
-};
-
-const LOCKED: Record<"org" | "team", string> = {
-  org: "Set by your organization",
-  team: "Set by your team",
 };
 
 /** The tools a plugin's rows and panel speak for: its action services'. */
@@ -143,7 +138,7 @@ function ToolRow({ tool, onSet }: { tool: ToolPermissionWire; onSet: (mode: Appr
           )}
         </div>
         {tool.description && <p className="mt-0.5 line-clamp-1 text-xs text-muted">{tool.description}</p>}
-        {tool.lockedBy && <p className="mt-0.5 text-xs text-muted">{LOCKED[tool.lockedBy]}</p>}
+        {tool.lockedBy && <ManagedNote scope={tool.lockedBy} className="mt-0.5" />}
       </div>
       <FilterChips
         className="shrink-0 flex-nowrap"

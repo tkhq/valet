@@ -9,7 +9,7 @@ import type {
   PolicyAppliesInWire,
   RiskLevelWire,
 } from "@valet/api/wire";
-import { Badge, Button, ConfirmDialog, Input, Label, Select, Switch, Time } from "~/components/primitives";
+import { Badge, Button, ConfirmDialog, Input, Label, ManagedNote, Select, Switch, Time } from "~/components/primitives";
 import { ServiceActionCombobox } from "./service-action-combobox";
 import { Section } from "~/components/settings/section";
 import { usePlugins } from "~/api/integrations";
@@ -112,7 +112,8 @@ export function PoliciesSection({ teamId, canEdit = true, variant = "full" }: { 
       {variant === "full" && <KillSwitches plugins={plugins} policies={policies} teamId={teamId} canEdit={canEdit} />}
       <Section title={title} description={teamId === undefined
         ? "Rules the resolver applies before an action runs."
-        : "Rules for actions run by this team. Organization policies still apply."}>
+        : "Rules for actions run by this team. Organization policies still apply."}
+        actions={teamId !== undefined && !canEdit ? <ManagedNote scope="team" askAdmin /> : undefined}>
         {policiesQ.isLoading && <p className="py-4 text-sm text-muted">Loading…</p>}
         {policiesQ.error && <p className="py-4 text-sm text-danger-500">Failed to load policies.</p>}
         {!policiesQ.isLoading && policies.length === 0 && (
@@ -122,7 +123,6 @@ export function PoliciesSection({ teamId, canEdit = true, variant = "full" }: { 
           <PolicyRow key={p.id} policy={p} teamId={teamId} canEdit={canEdit} showConditions={variant === "advanced"} />
         ))}
       </Section>
-      {teamId !== undefined && !canEdit && <p className="text-sm text-muted">Only team admins can change policies.</p>}
       {teamId !== undefined && pluginsQ.error && <p role="alert">Could not load the action catalog. Reload to try again.</p>}
       {canEdit && <NewPolicyForm plugins={plugins} teamId={teamId} />}
     </div>
