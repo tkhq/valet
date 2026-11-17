@@ -230,6 +230,7 @@ codeReviewRouter.get("/outcomes", async (c) => {
   if (!owner) return c.json({ error: "Team not found. Select an accessible team." }, 404);
   const doc = pluginStore.doc;
   const merged = sql`(${doc}->'outcome'->>'merged')::boolean`;
+  const wouldGate = sql`coalesce((${doc}->>'wouldGate')::boolean, false)`;
   const result = (r: string) => sql<number>`count(*) filter (where ${merged} and ${doc}->'outcome'->>'result' = ${r})::int`;
   const rows = await db.select({
     repo: sql<string>`${doc}->>'repo'`,
@@ -240,6 +241,8 @@ codeReviewRouter.get("/outcomes", async (c) => {
     addressed: result("addressed"),
     rejected: result("rejected"),
     ignored: result("ignored"),
+    gateMerged: sql<number>`count(*) filter (where ${merged} and ${wouldGate})::int`,
+    gateAddressed: sql<number>`count(*) filter (where ${merged} and ${wouldGate} and ${doc}->'outcome'->>'result' = 'addressed')::int`,
     lastPostedAt: sql<string>`max(${doc}->>'at')`,
   }).from(pluginStore).where(and(
     eq(pluginStore.plugin, PR_REVIEW_PLUGIN), eq(pluginStore.scopeType, owner.type), eq(pluginStore.scopeId, owner.id),
@@ -247,7 +250,8 @@ codeReviewRouter.get("/outcomes", async (c) => {
   )).groupBy(sql`${doc}->>'repo'`, sql`${doc}->>'build'`, sql`coalesce((${doc}->>'shadow')::boolean, false)`).orderBy(desc(sql`max(${doc}->>'at')`)).limit(MAX_OUTCOME_ROWS);
   const outcomes: CodeReviewOutcomeWire[] = rows.map((r) => ({
     repo: r.repo, ...(r.build ? { build: r.build } : {}), ...(r.shadow ? { shadow: true as const } : {}), posted: r.posted, merged: r.merged,
-    addressed: r.addressed, rejected: r.rejected, ignored: r.ignored, lastPostedAt: r.lastPostedAt,
+    addressed: r.addressed, rejected: r.rejected, ignored: r.ignored,
+    ...(r.gateMerged > 0 ? { wouldGate: { merged: r.gateMerged, addressed: r.gateAddressed } } : {}), lastPostedAt: r.lastPostedAt,
   }));
   return c.json({ outcomes } satisfies ListCodeReviewOutcomesResponse);
 });

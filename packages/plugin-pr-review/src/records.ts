@@ -46,6 +46,12 @@ export interface FindingRecord {
   /** Rule notes and learned lessons in the reviewer's pack. */
   rules: string[];
   commentId?: number;
+  /**
+   * The outcome gate in `log` mode would have moved it to the summary. It
+   * posted as usual, so its outcome shows whether the gate would hide
+   * findings authors fix.
+   */
+  wouldGate?: true;
   /** A shadow line's finding: recorded, never posted. A shadow line keeps only its latest review of a pull request. */
   shadow?: true;
   outcome?: {
@@ -69,11 +75,11 @@ export function newRecords(input: {
   head: string;
   build?: string;
   rules: string[];
-  posted: { finding: PostedFinding; placement: FindingPlacement; commentId?: number }[];
+  posted: { finding: PostedFinding; placement: FindingPlacement; commentId?: number; wouldGate?: true }[];
   at?: Date;
 }): FindingRecord[] {
   const at = (input.at ?? new Date()).toISOString();
-  return input.posted.map(({ finding: f, placement, commentId }) => ({
+  return input.posted.map(({ finding: f, placement, commentId, wouldGate }) => ({
     repo: input.repo,
     number: input.number,
     id: f.id,
@@ -91,6 +97,7 @@ export function newRecords(input: {
     ...(input.build ? { build: input.build } : {}),
     rules: input.rules,
     ...(commentId !== undefined ? { commentId } : {}),
+    ...(wouldGate ? { wouldGate } : {}),
   }));
 }
 

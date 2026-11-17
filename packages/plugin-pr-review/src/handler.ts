@@ -70,9 +70,9 @@ export const ReviewSettingsSchema = Type.Object(
       default: false,
       description: "Record each review in the plugin thread only. Nothing is posted on GitHub.",
     }),
-    outcomeGate: Type.Boolean({
-      default: false,
-      description: "Learn from silence: a finding like ones this repository's authors left unaddressed on three or more merged pull requests goes to the summary, not an inline comment. Never moves a high, critical or security finding. Needs finding records from closed pull requests.",
+    outcomeGate: Type.Union([Type.Literal("off"), Type.Literal("log"), Type.Literal("on")], {
+      default: "off",
+      description: "Learn from silence: with `on`, a finding like ones this repository's authors left unaddressed on three or more merged pull requests goes to the summary, not an inline comment. With `log`, the finding posts as usual and its record is marked, so Review outcomes shows how many such findings authors fixed. Never moves a high, critical or security finding. Needs finding records from closed pull requests.",
     }),
     verify: Type.Boolean({
       default: false,
@@ -376,8 +376,12 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
   // answers with JSON, so the handler applies the same check here.
   const unsupported = new Set(evidenceProblems(candidates).map((p) => candidates[p.index]));
   // 3c. With `outcomeGate` on, a finding like ones authors here left unaddressed goes to the summary (`gate.ts`).
-  const history = settings.outcomeGate ? await repoHistory(ctx.store, repoName).catch((err: unknown) => { console.warn(`pr-review ${slug}: could not read finding history; the outcome gate is skipped`, err); return []; }) : [];
-  const suppressed = new Set(history.length === 0 ? [] : candidates.filter((f) => !unsupported.has(f) && gateFinding(f, history, DEFAULT_GATE, target.number).suppress));
+  // With `log`, it posts as usual and its record keeps `wouldGate`, to measure what the gate would hide.
+  const history = settings.outcomeGate !== "off" ? await repoHistory(ctx.store, repoName).catch((err: unknown) => { console.warn(`pr-review ${slug}: could not read finding history; the outcome gate is skipped`, err); return []; }) : [];
+  const gated = new Set(history.length === 0 ? [] : candidates.filter((f) => !unsupported.has(f) && gateFinding(f, history, DEFAULT_GATE, target.number).suppress));
+  const suppressed = settings.outcomeGate === "on" ? gated : new Set<Finding>();
+  /** Ids of new findings the gate would have moved, in `log` mode. */
+  const wouldGate = new Set<string>();
 
   // 4. With `verify` on, check each new finding in a fresh child. Refuted
   // ones are dropped; unconfirmed ones below high go to the summary only.
@@ -421,6 +425,7 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
       reopened.push({ ...f, id: back.id, line: f.line, ...(back.commentId !== undefined ? { commentId: back.commentId } : {}), ...(back.threadId !== undefined ? { threadId: back.threadId } : {}) });
       continue;
     }
+    if (settings.outcomeGate === "log" && gated.has(f)) wouldGate.add(`f${nextId}`);
     posted.push({ ...f, id: `f${nextId++}`, ...(unsupported.has(f) ? { unsupported: true as const } : suppressed.has(f) ? { suppressed: true as const } : unconfirmed.has(f) ? { unconfirmed: true as const } : {}) });
   }
 
@@ -432,7 +437,7 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
       : !candidates.includes(f) ? "dropped: line does not exist at HEAD"
       : !kept.includes(f) ? "dropped: the verifier refuted it"
       : SEVERITY_ORDER.indexOf(f.severity) < minRank ? `hidden: below ${settings.minSeverity}`
-      : out ? `posted as ${out.id}${out.unsupported ? " in the summary only: no trigger or no path:line evidence" : out.suppressed ? " in the summary only: like findings authors here left unaddressed" : out.unconfirmed ? " in the summary only: the verifier could not confirm it" : ""}`
+      : out ? `posted as ${out.id}${out.unsupported ? " in the summary only: no trigger or no path:line evidence" : out.suppressed ? " in the summary only: like findings authors here left unaddressed" : out.unconfirmed ? " in the summary only: the verifier could not confirm it" : ""}${wouldGate.has(out.id) ? " (the outcome gate would move it to the summary; logged only)" : ""}`
       : reopened.some((r) => r.path === f.path && r.title === f.title) ? "reopened a fixed finding"
       : "dropped: repeats an open or dismissed finding";
     return { finding: f, result };
@@ -554,7 +559,7 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
       ...inline.map((f) => ({ finding: f, placement: "inline" as const, ...(commentIds.get(f.id) !== undefined ? { commentId: commentIds.get(f.id) } : {}) })),
       ...outside.map((f) => ({ finding: f, placement: "outside" as const })),
       ...summaryOnly.map((f) => ({ finding: f, placement: f.unsupported ? ("unsupported" as const) : f.suppressed ? ("suppressed" as const) : ("unconfirmed" as const) })),
-    ],
+    ].map((p) => (wouldGate.has(p.finding.id) ? { ...p, wouldGate: true as const } : p)),
   });
   await writeRecords(ctx.store, slug, records).catch((err: unknown) => console.warn(`pr-review ${slug}: could not record ${records.length} finding(s) for outcome measurement`, err));
   await finishPendingUpdates(gh, next, save, ctx.signal);

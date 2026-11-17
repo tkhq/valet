@@ -48,6 +48,11 @@ function OutcomeRow({ outcome: o }: { outcome: CodeReviewOutcomeWire }) {
               ? `${o.posted} posted, ${o.merged} on merged pull requests: ${o.addressed} addressed, ${o.rejected} rejected, ${o.ignored} ignored`
               : `${o.posted} posted, none on a merged pull request yet`}
           </span>
+          {o.wouldGate && (
+            <span className="mt-1 block tabular-nums">
+              {`Outcome gate (log only): would have moved ${o.wouldGate.merged}, authors addressed ${o.wouldGate.addressed}`}
+            </span>
+          )}
         </>
       )}
     />

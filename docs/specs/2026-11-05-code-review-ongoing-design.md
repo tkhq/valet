@@ -285,7 +285,8 @@ The handler also measures its own reviews, with no eval run.
 
 ### Outcome gate
 
-The `outcomeGate` setting (off by default) learns from silence. Before
+The `outcomeGate` setting (`off`, `log` or `on`; `off` by default) learns
+from silence. Before
 posting, the handler compares each new finding with the repository's finding
 records that have an outcome on a merged pull request. Two findings are
 neighbors when their similarity reaches 0.35: the shared words of title and
@@ -307,10 +308,19 @@ for the same category. Valet has no embeddings, so the match is lexical.
   20,000 records, because store keys sort as text, not by pull request
   number.
 - The rule follows Greptile's filter, which blocks a comment similar to
-  three distinct downvoted ones. Turn it on for a line once its records
-  cover a few weeks of closed pull requests.
+  three distinct downvoted ones. Greptile limits suppression to style-type
+  comments; this gate covers every low and medium finding, and the match is
+  lexical, so it can match a real bug to past nits.
+- With `log`, the gate decides the same way but moves nothing. A finding it
+  would move posts as usual, and its record keeps `wouldGate`. When those
+  pull requests merge, the outcomes show how many of these findings authors
+  addressed. Run `log` on a line for a few weeks of closed pull requests
+  before `on`. If authors addressed a real share of the would-move findings,
+  the gate hides findings people fix: do not turn it on.
 
 `GET /api/code-review/outcomes` sums the records of the selected workspace
 per repository, build, and live or shadow line. Rates count merged pull
-requests only. The Code
-review page shows each row as "Review outcomes" with the address rate.
+requests only. Each row also counts the merged findings with `wouldGate` and
+how many of them authors addressed. The Code review page shows each row as
+"Review outcomes" with the address rate, plus an "Outcome gate (log only)"
+line when the row has such findings.

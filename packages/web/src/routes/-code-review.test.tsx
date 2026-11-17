@@ -57,7 +57,7 @@ const create = vi.fn((_body: unknown, opts?: { onSuccess?: (resp: { id: string }
 const patch = vi.fn();
 const reviewsQuery = vi.fn((_teamId?: string) => ({ data: { reviews }, isLoading: false, error: null }));
 const outcomesQuery = vi.fn((_teamId?: string) => ({
-  data: { outcomes: [{ repo: "acme/site", build: "abc1234def", posted: 5, merged: 4, addressed: 2, rejected: 1, ignored: 1, lastPostedAt: "2026-11-16T12:00:00.000Z" }] },
+  data: { outcomes: [{ repo: "acme/site", build: "abc1234def", posted: 5, merged: 4, addressed: 2, rejected: 1, ignored: 1, wouldGate: { merged: 2, addressed: 0 }, lastPostedAt: "2026-11-16T12:00:00.000Z" }] },
   isLoading: false,
   error: null,
 }));
@@ -122,6 +122,7 @@ describe("CodeReviewPage", () => {
     expect(within(section).getByText("50% addressed")).toBeTruthy();
     expect(within(section).getByText("Build abc1234de")).toBeTruthy();
     expect(within(section).getByText("5 posted, 4 on merged pull requests: 2 addressed, 1 rejected, 1 ignored")).toBeTruthy();
+    expect(within(section).getByText("Outcome gate (log only): would have moved 2, authors addressed 0")).toBeTruthy();
     expect(outcomesQuery).toHaveBeenCalled();
   });
 

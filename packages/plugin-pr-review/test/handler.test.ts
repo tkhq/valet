@@ -1059,8 +1059,9 @@ describe("review-pull-request handler", () => {
     expect(threads.spawned.find((s) => s.req.role === "pr-reviewer")?.req.prompt).toContain("- `gen/`");
   });
 
-  it("with outcomeGate on, lists a finding like ones authors left unaddressed in the summary", async () => {
-    for (const gate of [true, false]) {
+  it("with outcomeGate on, lists a finding like ones authors left unaddressed in the summary; with log, posts it and marks its record", async () => {
+    for (const mode of ["on", "log", "off"] as const) {
+      const gate = mode === "on";
       const gh = new FakeGitHub();
       const store = new FakeStore();
       for (const n of [1, 2, 3]) {
@@ -1074,11 +1075,14 @@ describe("review-pull-request handler", () => {
         finding({ title: "Null deref in parse" }),
         finding({ line: 9, severity: "low", category: "performance", title: "Fetch timeout looks short", body: "A two second fetch timeout may cut slow responses." }),
       ]), {}));
-      await createReviewHandler({ fetch: gh.fetch }).handle(event("ev1", "github.pull_request.opened"), context(threads, store, { contextBudget: 0, outcomeGate: gate }));
+      await createReviewHandler({ fetch: gh.fetch }).handle(event("ev1", "github.pull_request.opened"), context(threads, store, { contextBudget: 0, outcomeGate: mode }));
       const [review] = [...gh.reviews.values()];
       expect(gh.comments.map((c) => c.line)).toEqual(gate ? [5] : [5, 9]);
       expect(review.body.includes("Findings like ones this repository left unaddressed (1)")).toBe(gate);
       if (gate) expect(store.pointers()?.findings).toContainEqual({ id: "f2", path: "a.ts", line: 9, status: "open", suppressed: true });
+      const record = (id: string) => store.get<FindingRecord>("findings", `acme/site#7/${id}`);
+      expect((await record("f2"))?.doc.wouldGate).toBe(mode === "log" ? true : undefined);
+      expect((await record("f1"))?.doc.wouldGate).toBeUndefined();
     }
   });
 

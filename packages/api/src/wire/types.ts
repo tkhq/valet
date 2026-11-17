@@ -3861,6 +3861,12 @@ export interface CodeReviewOutcomeWire {
   rejected: number;
   /** Of `merged`: neither. */
   ignored: number;
+  /**
+   * Of `merged`: findings the outcome gate in `log` mode would have moved to
+   * the summary, and how many of them authors addressed. A high address
+   * share means the gate would hide findings authors fix. Absent when none.
+   */
+  wouldGate?: { merged: number; addressed: number };
   lastPostedAt: string;
 }
 
