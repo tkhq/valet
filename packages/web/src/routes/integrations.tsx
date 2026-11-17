@@ -212,7 +212,7 @@ function PersonalIntegrationsPage({ connectResult }: { connectResult: ConnectRes
     <div>
       <SectionHeading
         title="Integrations"
-        description="Accounts and services your assistant can use in your own workspace."
+        description="Accounts and services your assistant can use in your personal threads."
         // The box stays up through an empty match — hiding it would leave
         // the search with no box to clear it in.
         actions={!isLoading && !error && showSearch && (

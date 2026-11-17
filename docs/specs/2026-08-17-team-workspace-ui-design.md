@@ -317,9 +317,8 @@ id), and the server checks team membership as before.
   starts closed, opens by itself when one of its pages is current, and the
   browser remembers it per space. A closed space shows all its pages in a
   menu on hover or from its chevron.
-- **Security.** Security is an admin setting, so the Settings page lists
-  Valet Security under Plugins for a caller with the plugin. The top bar's
-  Plugins menu also opens it.
+- **Security.** The top bar's Plugins menu opens Valet Security for a caller
+  with the plugin. The Settings rail has no Plugins group (2026-11-16).
 - **No workspace overview.** Home is the landing page. The `/overview`
   dashboard is deleted, and `/overview` redirects to `/`.
 - **New thread** is one button that starts a thread. It has no create menu:

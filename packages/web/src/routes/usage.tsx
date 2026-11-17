@@ -403,7 +403,7 @@ export function UsagePage() {
 
   return (
     <div className="space-y-10">
-      {/* Settings names the scope: the team page's title, or Personal workspace in the rail. */}
+      {/* Settings names the scope: the team page's title, or Personal in the rail. */}
       <SectionHeading
         title="Usage"
         description={scope === "team"
@@ -932,7 +932,7 @@ export function UsagePage() {
           to="/settings/api-keys"
           className="text-moss underline-offset-2 hover:underline"
         >
-          Personal workspace → API keys and proxy
+          Personal → API keys and proxy
         </Link>
         .
       </div>

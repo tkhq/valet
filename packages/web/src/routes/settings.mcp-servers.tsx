@@ -8,7 +8,7 @@ import { OrganizationMcpServersPage } from "./settings.organization.mcp-servers"
  * organizations feature is off. Same page as
  * `/settings/organization/mcp-servers`, but outside the organization route
  * guard: a single-org deployment still loads these servers. The rail shows
- * this entry under Personal workspace only while the Organization group is
+ * this entry under Personal only while the Organization group is
  * hidden, and only to an org admin (see `settings-rail.tsx`).
  */
 export const Route = createFileRoute("/settings/mcp-servers")({

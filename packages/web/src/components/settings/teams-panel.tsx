@@ -120,7 +120,7 @@ export function TeamsPanel({
         <EmptyRow>
           {teamId === undefined
             ? "No teams yet. Create one above."
-            : "This team is unavailable. Select another workspace or reload the page."}
+            : "You are not a member of this team. Choose a team under Your teams."}
         </EmptyRow>
       )}
 

@@ -55,13 +55,16 @@ export function OrganizationLayout() {
  * The admin's tab bar over the routes one Organization rail item groups
  * (settings-redesign spec, decision 2). A plain member reaches only Teams
  * and 1Password, which are rail items of their own, so they get no tabs.
+ * A heading that repeats one of its tabs (General over a General tab) stays
+ * for screen readers only, the same rule `SectionHeading` applies.
  */
 function OrgSectionTabs() {
   const tabs = useOrgSectionTabs();
   if (!tabs) return null;
+  const repeatsTab = tabs.section.routes.some((route) => route.label === tabs.section.label);
   return (
     <div className="mb-8">
-      <h2 className="mb-3 text-lg font-medium text-ink">{tabs.section.label}</h2>
+      <h2 className={repeatsTab ? "sr-only" : "mb-3 text-lg font-medium text-ink"}>{tabs.section.label}</h2>
       <LinkTabs tabs={tabs.section.routes} activeTo={tabs.active.to} label={tabs.section.label} />
     </div>
   );

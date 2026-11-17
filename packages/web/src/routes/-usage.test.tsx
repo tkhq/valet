@@ -14,7 +14,7 @@
  *   - spend chart renders day bars;
  *   - Download CSV control points at /api/usage/export.csv with correct query;
  *   - proxy request log has bounded page navigation and never renders raw content;
- *   - the key setup callout links Personal workspace → API keys and proxy;
+ *   - the key setup callout links Personal → API keys and proxy;
  *   - disabled-gateway notice renders.
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
@@ -1062,7 +1062,7 @@ describe("UsagePage — key setup link", () => {
   it("links the personal API keys and proxy page by its rail name", () => {
     render(<UsagePage />);
     fireEvent.click(screen.getByRole("tab", { name: "Activity" }));
-    const link = screen.getByRole("link", { name: "Personal workspace → API keys and proxy" });
+    const link = screen.getByRole("link", { name: "Personal → API keys and proxy" });
     expect(link.getAttribute("href")).toBe("/settings/api-keys");
   });
 });

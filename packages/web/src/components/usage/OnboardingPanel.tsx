@@ -523,7 +523,7 @@ function ProxyOnboardingFlow({ settingsQuery, showGatewayStatus = true, team = f
               <p>
                 {settingsQuery.data?.mode === "passthrough" && "This gateway runs in pass-through mode. "}
                 To create your own key, open{" "}
-                <Link to="/settings/api-keys" className="underline">Personal workspace → API keys and proxy</Link>.
+                <Link to="/settings/api-keys" className="underline">Personal → API keys and proxy</Link>.
                 {settingsQuery.data?.mode === "passthrough"
                   ? " That page makes a personal proxy key, and you must also supply your own provider key with it."
                   : " That page makes a personal proxy key."}
