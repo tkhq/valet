@@ -64,7 +64,7 @@ export const ReviewSettingsSchema = Type.Object(
       default: "low",
       description: "Post only findings at this severity or above.",
     }),
-    reviewDrafts: Type.Boolean({ default: false, description: "Review draft pull requests too." }),
+    reviewDrafts: Type.Boolean({ default: false, description: "Review draft pull requests on every push too. A review a person asks for reviews a draft either way." }),
     shadow: Type.Boolean({
       default: false,
       description: "Record each review in the plugin thread only. Nothing is posted on GitHub.",
@@ -255,7 +255,8 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
   }
   if (settings.shadow || manual?.shadow) return shadowReview(event, ctx, gh, pr, settings, { slug, repoName, number: target.number, commit: manual?.commit });
   if (pr.state !== "open") return log(slug, `skipped: the pull request is ${pr.state}`);
-  if (pr.draft && !settings.reviewDrafts) return log(slug, "skipped: draft pull request");
+  // A person who asks for a review gets one on a draft too; only push events wait for ready_for_review.
+  if (pr.draft && !settings.reviewDrafts && !manual) return log(slug, "skipped: draft pull request");
 
   let stored = await ctx.store.get<PullPointers>(POINTERS_COLLECTION, slug);
   let prior = stored?.doc;
