@@ -246,7 +246,7 @@ async function main(): Promise<void> {
           try {
             listed = hasRejected(await readFile(file, "utf8"));
           } catch (err) {
-            console.warn(`${file} is not valid YAML, so this run left it as it is. Fix the file, or delete it and run again. ${err instanceof Error ? err.message : String(err)}`);
+            console.warn(`${file} could not be read as a YAML case, so this run left it as it is. Fix or delete the file, then run again. ${err instanceof Error ? err.message : String(err)}`);
             continue;
           }
           if (!listed) console.warn(`${file} exists without the ${rejected.length} rejected finding(s) this run found. Delete it and run again to add them.`);
