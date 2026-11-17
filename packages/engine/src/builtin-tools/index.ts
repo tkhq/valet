@@ -628,6 +628,22 @@ const EXTERNAL_SENDER_CHILDREN = {
 };
 
 /** Longest `task` batch name. It is a label the model picks, not content. */
+/** The native tools a child needs to read and change a repository. */
+const WORKSPACE_TOOLS = ["read", "write", "edit", "bash"] as const;
+
+/**
+ * A repository child whose `toolScope.tools` names none of the workspace
+ * tools cannot read or change a file, and it reports that it has no shell
+ * instead of doing the work. A model reads `tools` as "which integrations"
+ * and passes service names such as `github`; this refuses that call with the
+ * fix, so the parent retries instead of starting a child that cannot work.
+ */
+export function taskToolScopeProblem(repo: string | undefined, scope: { tools?: string[] } | undefined): string | null {
+  if (!repo || scope?.tools === undefined) return null;
+  if (scope.tools.some((tool) => (WORKSPACE_TOOLS as readonly string[]).includes(tool))) return null;
+  return `[task_tool_scope] This child works in ${repo}, but toolScope.tools grants none of ${WORKSPACE_TOOLS.join(", ")}, so it could not read or change a file. toolScope.tools takes native tool names, not services. Put integrations in toolScope.actions as service.* (for example github.*), or omit toolScope so the child keeps every tool.`;
+}
+
 export const TASK_BATCH_MAX_CHARS = 64;
 
 /**
@@ -1214,6 +1230,9 @@ export const taskTool = defineTool({
         ...(normalizedScratch !== undefined ? { scratch: normalizedScratch } : {}),
       };
     }
+
+    const scopeProblem = taskToolScopeProblem(args.repo, args.toolScope);
+    if (scopeProblem) return { text: scopeProblem, ok: false };
 
     const req: SpawnChildRequest = {
       toolScope: intersectToolScopes(ctx.toolScopeCeiling, ctx.canonicalToolScope?.(args.toolScope) ?? args.toolScope),
