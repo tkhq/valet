@@ -101,6 +101,17 @@ describe("scanRepo", () => {
     expect(scan.hits.some((h) => h.def && h.path === "z/def.py")).toBe(true);
   });
 
+  it("keeps the same capped hits on every scan: the first ones by path and line", async () => {
+    // ripgrep searches files in parallel; without a sort, which hits fill the cap changes from run to run.
+    const files: Record<string, string> = {};
+    for (let i = 0; i < 40; i++) files[`m${String(i).padStart(2, "0")}/use.ts`] = "gizmo_total();\ngizmo_total();\n";
+    const r = repo(files, {});
+    const kept = async (): Promise<string[]> => (await scanRepo(localRunner(r.dir), { words: ["gizmo_total"], maxHitsPerWord: 3 })).hits.map((h) => `${h.path}:${h.line}`);
+    const first = await kept();
+    expect(first).toEqual(["m00/use.ts:1", "m00/use.ts:2", "m01/use.ts:1"]);
+    for (let i = 0; i < 4; i++) expect(await kept()).toEqual(first);
+  });
+
   it("fails clearly outside a git repository", async () => {
     await expect(scanRepo(localRunner(mkdtempSync(join(tmpdir(), "pr-review-not-git-"))), { words: ["x"] })).rejects.toThrow("git ls-files failed");
   });
