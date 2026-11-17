@@ -110,11 +110,6 @@ export interface VerifierPromptInput {
 }
 
 /**
- * The verifier's first prompt: the PR as the reviewer saw it (title,
- * description, diff, rules) and the claim. Pure, so a host without a local
- * checkout (the plugin handler) sends the same prompt as `createVerifierSpec`.
- */
-/**
  * For a high or critical claim on a line with `runChecks`: run code before
  * deciding, where the sandbox can. No leading review tool documents this
  * step; it turns a plausible claim into a reproduced one, or refutes it.
@@ -128,6 +123,11 @@ export const RUN_CHECK_SECTION = [
   "- A run that shows the claimed wrong result confirms the claim. A passing run of a test that exercises the trigger refutes it as misread. If nothing can run, decide from the code as usual, and say so in evidence.",
 ].join("\n");
 
+/**
+ * The verifier's first prompt: the PR as the reviewer saw it (title,
+ * description, diff, rules) and the claim. Pure, so a host without a local
+ * checkout (the plugin handler) sends the same prompt as `createVerifierSpec`.
+ */
 export function buildVerifierPrompt(input: VerifierPromptInput): string {
   const f = input.finding;
   return [
