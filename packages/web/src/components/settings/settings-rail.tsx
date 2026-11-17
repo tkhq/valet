@@ -16,8 +16,9 @@ import {
   type LucideIcon,
   BarChart3,
 } from "lucide-react";
+import { useState, type ReactNode } from "react";
 import { useOrg, useTeams } from "~/api/settings";
-import { BACK_LINK_CLASS, Button, DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger, type AppPath } from "~/components/primitives";
+import { BACK_LINK_CLASS, Button, Input, DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger, type AppPath } from "~/components/primitives";
 import { eligibleTeams } from "~/components/session/assistant-rail";
 import { useResponsiveOverlay } from "~/hooks/use-responsive-overlay";
 import { cn } from "~/lib/cn";
@@ -39,6 +40,9 @@ import { lastAppPath } from "~/lib/last-app-path";
  *   existing routes (`ORG_SECTIONS`). A plain member sees Teams only: the
  *   1Password page holds nothing a member can act on, and their own token
  *   is on Integrations.
+ *
+ * A search box (wider screens) filters every page the rail can open,
+ * including each Organization tab, by name and by what the page holds.
  *
  * Active state is computed from the pathname (via `cn`'s `twMerge`) rather
  * than TanStack's `activeProps`, which only concatenates class strings.
@@ -133,6 +137,8 @@ interface RailItem {
   label: string;
   icon: LucideIcon;
   active: (pathname: string) => boolean;
+  /** Extra words the rail search matches: what the page holds. */
+  keywords?: string;
 }
 
 /** A stable React key: team items share one route pattern. */
@@ -150,17 +156,17 @@ function exact(to: string): (pathname: string) => boolean {
 }
 
 const ACCOUNT_ITEMS: RailItem[] = [
-  { to: "/settings/profile", label: "Profile", icon: User, active: exact("/settings/profile") },
-  { to: "/settings/preferences", label: "Preferences", icon: SlidersHorizontal, active: exact("/settings/preferences") },
-  { to: "/settings/notifications", label: "Notifications", icon: Bell, active: exact("/settings/notifications") },
+  { to: "/settings/profile", label: "Profile", icon: User, active: exact("/settings/profile"), keywords: "name email password account" },
+  { to: "/settings/preferences", label: "Preferences", icon: SlidersHorizontal, active: exact("/settings/preferences"), keywords: "appearance theme dark light thread defaults model" },
+  { to: "/settings/notifications", label: "Notifications", icon: Bell, active: exact("/settings/notifications"), keywords: "chime sound alerts" },
 ];
 
 const PERSONAL_ITEMS: RailItem[] = [
-  { to: "/settings/integrations", label: "Integrations", icon: Plug, active: exact("/settings/integrations") },
-  { to: "/settings/access", label: "Access", icon: KeyRound, active: exact("/settings/access") },
-  { to: "/settings/secrets", label: "Secrets", icon: LockKeyhole, active: exact("/settings/secrets") },
-  { to: "/settings/policies", label: "Policies", icon: Shield, active: exact("/settings/policies") },
-  { to: "/settings/usage", label: "Usage", icon: BarChart3, active: exact("/settings/usage") },
+  { to: "/settings/integrations", label: "Integrations", icon: Plug, active: exact("/settings/integrations"), keywords: "connect connections github slack linear google tools" },
+  { to: "/settings/access", label: "Access", icon: KeyRound, active: exact("/settings/access"), keywords: "api keys proxy connected agents mcp cli coding tool" },
+  { to: "/settings/secrets", label: "Secrets", icon: LockKeyhole, active: exact("/settings/secrets"), keywords: "environment variables env" },
+  { to: "/settings/policies", label: "Policies", icon: Shield, active: exact("/settings/policies"), keywords: "approvals permissions kill switches" },
+  { to: "/settings/usage", label: "Usage", icon: BarChart3, active: exact("/settings/usage"), keywords: "spend cost tokens" },
   // Read-only and backed by the member-visible models list, so every
   // member sees it in both org and single-user mode.
   { to: "/settings/model-comparison", label: "Model comparison", icon: BarChart3, active: exact("/settings/model-comparison") },
@@ -192,6 +198,62 @@ const ADMIN_ORG_ITEMS: RailItem[] = ORG_SECTIONS.map((section) => ({
   icon: section.icon,
   active: (pathname: string) => orgSectionFor(pathname) === section,
 }));
+
+interface SearchEntry {
+  key: string;
+  to: AppPath;
+  params?: { teamId: string };
+  label: string;
+  /** Where the page sits in the rail, for example "Organization / Security and audit". */
+  path: string;
+  text: string;
+}
+
+/** One entry per page the rail can open. An admin's Organization item
+ * expands to one entry per tab, so "Audit log" finds its tab directly. */
+export function settingsSearchEntries(groups: RailGroupSpec[], orgAdmin: boolean): SearchEntry[] {
+  const entries: SearchEntry[] = [];
+  for (const group of groups) {
+    if (group.label === "Organization" && orgAdmin) {
+      for (const section of ORG_SECTIONS) {
+        for (const route of section.routes) {
+          const path = `Organization / ${section.label}`;
+          entries.push({ key: route.to, to: route.to, label: route.label, path, text: `${route.label} ${path}`.toLowerCase() });
+        }
+      }
+      continue;
+    }
+    for (const item of group.items) {
+      entries.push({
+        key: itemKey(item),
+        to: item.to,
+        params: item.params,
+        label: item.label,
+        path: group.label,
+        text: `${item.label} ${group.label} ${item.keywords ?? ""}`.toLowerCase(),
+      });
+    }
+  }
+  return entries;
+}
+
+/** Entries whose text holds every word of `query`. A page whose own name
+ * holds the query comes first, so Enter opens "Audit log" for "audit" and
+ * not the first tab of "Security and audit". Ties keep rail order. */
+export function searchSettings(entries: SearchEntry[], query: string): SearchEntry[] {
+  const q = query.trim().toLowerCase();
+  const words = q.split(/\s+/).filter(Boolean);
+  if (words.length === 0) return [];
+  const rank = (entry: SearchEntry) => {
+    const label = entry.label.toLowerCase();
+    return label.startsWith(q) ? 0 : label.includes(q) ? 1 : 2;
+  };
+  return entries
+    .filter((entry) => words.every((word) => entry.text.includes(word)))
+    .map((entry, index) => ({ entry, index, rank: rank(entry) }))
+    .sort((a, b) => a.rank - b.rank || a.index - b.index)
+    .map(({ entry }) => entry);
+}
 
 export function SettingsRail() {
   const sectionMenu = useResponsiveOverlay("sm");
@@ -263,10 +325,71 @@ export function SettingsRail() {
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
-      <div className="hidden space-y-5 sm:block">
-        {groups.map((group) => <RailGroup key={group.label} {...group} pathname={pathname} />)}
+      <div className="hidden sm:block">
+        <RailSearch entries={settingsSearchEntries(groups, organizationsOn && orgAdmin)} pathname={pathname}>
+          <div className="space-y-5">
+            {groups.map((group) => <RailGroup key={group.label} {...group} pathname={pathname} />)}
+          </div>
+        </RailSearch>
       </div>
     </nav>
+  );
+}
+
+/** A filter over every settings page. While the box holds text, the
+ * results, each with its place in the rail, replace the groups. Enter opens
+ * the first result and Escape clears the box. */
+function RailSearch({ entries, pathname, children }: { entries: SearchEntry[]; pathname: string; children: ReactNode }) {
+  const router = useRouter();
+  const [query, setQuery] = useState("");
+  const results = searchSettings(entries, query);
+  const searching = query.trim().length > 0;
+  return (
+    <>
+      <Input
+        type="search"
+        size="sm"
+        value={query}
+        onChange={(event) => setQuery(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") setQuery("");
+          if (event.key === "Enter" && results[0]) {
+            event.preventDefault();
+            void router.navigate({ to: results[0].to, params: results[0].params });
+            setQuery("");
+          }
+        }}
+        placeholder="Search settings"
+        aria-label="Search settings"
+        className="mb-5"
+      />
+      {!searching ? children : results.length === 0 ? (
+        <p className="px-2.5 text-muted">No settings match.</p>
+      ) : (
+        <ul aria-label="Search results" className="space-y-0.5">
+          {results.map((entry) => {
+            const active = normalizeSettingsPath(pathname) === entry.to;
+            return (
+              <li key={entry.key}>
+                <Link
+                  to={entry.to}
+                  params={entry.params}
+                  onClick={() => setQuery("")}
+                  aria-current={active ? "page" : undefined}
+                  className={cn(
+                    "block rounded-lg px-2.5 py-1.5 transition-colors",
+                    active ? "bg-ink-wash text-ink" : "text-ink hover:bg-ink-wash",
+                  )}
+                >
+                  <span className="block truncate">{entry.label}</span>
+                  <span className="block truncate text-xs text-muted">{entry.path}</span>
+                </Link>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </>
   );
 }
 
