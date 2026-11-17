@@ -103,9 +103,9 @@ function supersededText(label: string): string {
   return `A newer event for ${label} superseded this one.`;
 }
 
-/** The services a plugin may ask app tokens for: its own and those it declares credentials for. */
+/** The services a plugin may ask app tokens for: its own, those it declares credentials for, and its `appServices`. */
 function pluginServices(plugin: ValetPlugin): Set<string> {
-  return new Set([plugin.name, ...(plugin.credentials ?? []).map((c) => c.service ?? plugin.name)]);
+  return new Set([plugin.name, ...(plugin.credentials ?? []).map((c) => c.service ?? plugin.name), ...(plugin.appServices ?? [])]);
 }
 
 /** What the dispatcher needs to run plugin event handlers. */

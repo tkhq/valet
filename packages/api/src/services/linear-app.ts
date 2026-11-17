@@ -14,6 +14,18 @@ export const LINEAR_CREDENTIAL_SERVICE = "linear";
  * so `LinearAppTokenStore` knows it may mint a replacement. */
 export const LINEAR_CLIENT_CREDENTIALS_GRANT = "client_credentials";
 
+/**
+ * The organization's Linear app-actor token, or null when the org has no
+ * `client_credentials` connection. Read it through the refreshing
+ * credential store (`engineCredentials`), which mints a replacement before
+ * it expires.
+ */
+export async function linearAppToken(credentials: Pick<CredentialStore, "get">, orgId: string): Promise<string | null> {
+  const stored = await credentials.get({ type: "org", id: orgId }, LINEAR_CREDENTIAL_SERVICE);
+  if (stored?.metadata?.grant !== LINEAR_CLIENT_CREDENTIALS_GRANT) return null;
+  return stored.accessToken ?? null;
+}
+
 export interface LinearAppConfig {
   clientId: string;
   clientSecret: string;

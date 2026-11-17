@@ -90,6 +90,14 @@ class FakeGitHub {
   compared: string[] = [];
   diffed: string[] = [];
   merged = false;
+  prTitle = "Add a.ts";
+  prBody = "Adds a.";
+  /** Issues by number, for linked tickets. */
+  issues: Record<number, { title: string; body: string; html_url: string; state: string }> = {};
+  /** Linear GraphQL answers: issues by identifier; `linearFails` makes the request fail. */
+  linearIssues: Record<string, { identifier: string; title: string; description: string; state: { name: string }; comments: { nodes: { body: string; user: { name: string } }[] } }> = {};
+  linearFails = false;
+  linearQueries: string[] = [];
   /** Parent shas by commit, for `GET /commits/<sha>`. */
   parentsOf: Record<string, string[]> = {};
   extraFiles: { filename: string; status: string; additions: number; deletions: number; patch: string }[] = [];
@@ -113,7 +121,20 @@ class FakeGitHub {
     const path = url.pathname.replace(`/repos/${OWNER}/${REPO}`, "");
     const body = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : {};
     const ok = (data: unknown): Response => new Response(typeof data === "string" ? data : JSON.stringify(data), { status: 200 });
+    if (url.hostname === "api.linear.app") {
+      const query = String(body.query);
+      this.linearQueries.push(query);
+      if (this.linearFails) return new Response("unavailable", { status: 503 });
+      const data: Record<string, unknown> = {};
+      for (const m of query.matchAll(/(t\d+): issue\(id: "([^"]+)"\)/g)) data[m[1]] = this.linearIssues[m[2]] ?? null;
+      return ok({ data });
+    }
     if (method !== "GET") this.writes.push(`${method} ${path}`);
+    const issueMatch = /^\/issues\/(\d+)$/.exec(path);
+    if (method === "GET" && issueMatch) {
+      const issue = this.issues[Number(issueMatch[1])];
+      return issue ? ok(issue) : new Response(JSON.stringify({ message: "Not Found" }), { status: 404 });
+    }
 
     if (method === "POST" && path === "/graphql") {
       const query = String(body.query);
@@ -162,8 +183,8 @@ class FakeGitHub {
         merged: this.merged,
         merge_commit_sha: this.merged ? "9".repeat(40) : null,
         draft: this.draft,
-        title: "Add a.ts",
-        body: "Adds a.",
+        title: this.prTitle,
+        body: this.prBody,
         html_url: "https://github.com/acme/site/pull/7",
         ...(this.authorAssociation !== undefined ? { author_association: this.authorAssociation } : {}),
         user: { login: "author" },
@@ -1041,6 +1062,40 @@ describe("review-pull-request handler", () => {
     expect(body).toContain("Open findings (1)");
     expect(body).toContain("2 finding(s) are not shown");
     expect(threads.spawned.find((s) => s.req.role === "pr-reviewer")?.req.prompt).toContain("- `gen/`");
+  });
+
+  it("gives the reviewer and the verifier the tickets the pull request links", async () => {
+    const gh = new FakeGitHub();
+    gh.prTitle = "ENG-12: reject empty input in parse";
+    gh.prBody = "Closes #3. See also #4.";
+    gh.issues[3] = { title: "Parse accepts empty input", body: "Empty input is never valid here: reject it.", html_url: "https://github.com/acme/site/issues/3", state: "open" };
+    gh.issues[4] = { title: "Unrelated", body: "Not closed by this PR.", html_url: "https://github.com/acme/site/issues/4", state: "open" };
+    gh.linearIssues["ENG-12"] = { identifier: "ENG-12", title: "Reject empty input", description: "Empty input must fail fast. The loader retries on purpose.", state: { name: "In Progress" }, comments: { nodes: [{ body: "Retrying is intended.", user: { name: "Lead" } }] } };
+    const threads = new FakeThreads(scripted(reviewOf([finding({})]), {}));
+    const ctx = { ...context(threads, new FakeStore(), { verify: true, contextBudget: 0 }), appToken: async (service: string) => (service === "github" ? "ghs_test" : service === "linear" ? "lin_test" : null) };
+    await createReviewHandler({ fetch: gh.fetch }).handle(event("ev1", "github.pull_request.opened"), ctx);
+
+    const reviewer = threads.spawned.find((s) => s.req.role === "pr-reviewer")?.req.prompt ?? "";
+    expect(reviewer).toContain("## Linked tickets");
+    expect(reviewer).toContain("ENG-12 (linear, In Progress): Reject empty input");
+    expect(reviewer).toContain("Comment by Lead: Retrying is intended.");
+    expect(reviewer).toContain("#3 (github, open): Parse accepts empty input");
+    expect(reviewer).not.toContain("Not closed by this PR.");
+    expect(threads.spawned.find((s) => s.req.role === "pr-verifier")?.req.prompt).toContain("Empty input must fail fast.");
+  });
+
+  it("reviews without tickets when Linear fails or the org has no Linear token", async () => {
+    for (const [token, fails] of [["lin_test", true], [null, false]] as const) {
+      const gh = new FakeGitHub();
+      gh.prTitle = "ENG-12: reject empty input";
+      gh.linearFails = fails;
+      const threads = new FakeThreads(scripted(reviewOf([finding({})]), {}));
+      const ctx = { ...context(threads, new FakeStore(), { contextBudget: 0 }), appToken: async (service: string) => (service === "github" ? "ghs_test" : token) };
+      await createReviewHandler({ fetch: gh.fetch }).handle(event("ev1", "github.pull_request.opened"), ctx);
+      expect(threads.spawned.find((s) => s.req.role === "pr-reviewer")?.req.prompt).not.toContain("## Linked tickets");
+      expect(gh.comments).toHaveLength(1);
+      expect(gh.linearQueries.length).toBe(token ? 1 : 0);
+    }
   });
 
   it("starts no verifier when the line leaves verify off", async () => {

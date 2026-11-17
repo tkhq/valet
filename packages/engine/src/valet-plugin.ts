@@ -713,6 +713,14 @@ export interface ValetPlugin {
   roles?: RoleSpec[];
   credentials?: CredentialDeclaration[];
   /**
+   * Services whose organization app credential this plugin's event handlers
+   * borrow through `ctx.appToken`, beyond the services it declares
+   * credentials for, such as `linear` for a handler that reads linked
+   * tickets. Unlike a credential declaration, it adds no connect flow and
+   * changes no other plugin's connection.
+   */
+  appServices?: string[];
+  /**
    * Memory directories this plugin's event handlers may write in the line
    * owner's memory, each ending in `/`, such as `principles/`. The host
    * refuses a write anywhere else, and `lib/` is never writable.

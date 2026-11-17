@@ -12,6 +12,8 @@ const plugin: ValetPlugin = {
   // The handler borrows the GitHub App installation token to read the pull
   // request and post the review. The same declaration as the GitHub plugin's.
   credentials: [{ service: "github", type: "oauth2", scopes: [], configKeys: ["accessToken"], connectLabel: "Connect GitHub (via GitHub App)" }],
+  // Linked Linear tickets are read with the org's Linear app token, when the org has one.
+  appServices: ["linear"],
   // Lessons learned from review feedback: repository notes and general principles.
   memoryWrites: ["principles/", LEARNED_DIR],
   roles: [

@@ -101,6 +101,8 @@ export interface VerifierPromptInput {
   diff: string;
   /** The repository owner's instructions and team rules the reviewer had. */
   context?: string;
+  /** The tickets the PR links, as `ticketsSection` renders them. */
+  tickets?: string;
   /** Recheck of a finding posted on an earlier commit whose code has since changed. */
   recheckFrom?: string;
   /** The last line: how to hand back the verdict. Default: call submit_verdict. */
@@ -118,6 +120,7 @@ export function buildVerifierPrompt(input: VerifierPromptInput): string {
     "# Pull request",
     dataBlock("pr-title", input.title),
     dataBlock("pr-description", input.body.trim() || "(no description)"),
+    ...(input.tickets ? [input.tickets] : []),
     `BASE commit: ${input.base}`,
     `HEAD commit: ${input.head} (checked out)`,
     ...(input.context?.trim() ? ["", "## Rules the reviewer had", "These come from the repository owner and the team. A claim that cites one of them is checked against the rule as written.", input.context.trim()] : []),

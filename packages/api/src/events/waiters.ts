@@ -28,7 +28,7 @@ import { agentSessions } from "../schema/index.js";
 import type { ChannelVisibility } from "../services/channels.js";
 import { channelVisibility, orgSlackCredential, slackEventChannel } from "../services/thread-access.js";
 import { slackBotUserIdOf } from "../services/slack-bot-identity.js";
-import { LINEAR_CLIENT_CREDENTIALS_GRANT, LINEAR_CREDENTIAL_SERVICE } from "../services/linear-app.js";
+import { linearAppToken } from "../services/linear-app.js";
 import { anyMatch, matchClauses, needsPreviousStatus, toDigest } from "./waiter-match.js";
 import { channelOriginResolver } from "./channel-origin.js";
 
@@ -317,12 +317,6 @@ export interface WaiterMatchDepsOptions {
 }
 
 /** The org's Linear app-actor token, or null when Linear is not connected with an app. */
-async function linearAppToken(providers: WaiterProviders, orgId: string): Promise<string | null> {
-  const stored = await providers.engineCredentials.get({ type: "org", id: orgId }, LINEAR_CREDENTIAL_SERVICE);
-  if (stored?.metadata?.grant !== LINEAR_CLIENT_CREDENTIALS_GRANT) return null;
-  return stored.accessToken ?? null;
-}
-
 /** The production matcher deps over the API's providers. */
 export function waiterMatchDeps(providers: WaiterProviders, opts: WaiterMatchDepsOptions = {}): WaiterMatchDeps {
   const timeoutMs = opts.providerTimeoutMs ?? WAITER_PROVIDER_TIMEOUT_MS;
@@ -354,7 +348,7 @@ export function waiterMatchDeps(providers: WaiterProviders, opts: WaiterMatchDep
       if (!resolver || service !== "linear") return null;
       const ref = linearPreviousStatusRef(event.payload);
       if (!ref) return null;
-      const ctx: DeriveContext = { orgId, appToken: () => linearAppToken(providers, orgId), fetch: linearFetch };
+      const ctx: DeriveContext = { orgId, appToken: () => linearAppToken(providers.engineCredentials, orgId), fetch: linearFetch };
       // The fetch aborts after the timeout. The race also bounds a fetch
       // that ignores its signal. No previous status means no match.
       return withTimeout(resolver.resolve(ctx, ref), timeoutMs, null);

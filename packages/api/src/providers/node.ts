@@ -76,6 +76,7 @@ import { workflowApprovalPort } from "../channels/workflow-gates.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { OAuthRefreshingCredentialStore } from "../plugins/oauth-refreshing-credential-store.js";
 import { LinearAppTokenStore } from "../plugins/linear-app-token-store.js";
+import { linearAppToken } from "../services/linear-app.js";
 import { TeamCredentialStore } from "../plugins/team-credential-store.js";
 import { isTeamMember } from "../services/teams.js";
 import { createOnePasswordService } from "../services/onepassword.js";
@@ -986,9 +987,9 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
       },
       appToken: (() => {
         const githubToken = githubInstallationTokenFor({ db, credentials: engineCredentials, key: deriveSecretKey(opts.encryptionKey) });
-        // Only GitHub has an app credential a handler can borrow today.
+        // GitHub (per repository owner) and Linear (the org's app actor) have app credentials a handler can borrow.
         return async (orgId: string, service: string, scope?: { owner?: string }) =>
-          service === "github" ? githubToken(orgId, scope?.owner) : null;
+          service === "github" ? githubToken(orgId, scope?.owner) : service === "linear" ? linearAppToken(engineCredentials, orgId) : null;
       })(),
     },
   });

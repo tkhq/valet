@@ -175,6 +175,28 @@ are listed by title. Keyword search skips learned files, so a lesson does not
 appear twice. A person edits or
 deletes a lesson in Memory like any other file.
 
+## Linked tickets
+
+The most common wrong finding reports a deliberate behavior as a defect.
+The PR description often says less than the ticket behind it, so the handler
+reads the tickets a pull request links before the review.
+
+- Linear issues named by identifier (`ENG-123`) in the title, the
+  description or the branch name. The handler reads them with the org's
+  Linear app-actor token, which the plugin borrows through `appServices`.
+  With no Linear connection, the handler skips them.
+- GitHub issues the description closes (`fixes #12`), through the GitHub
+  App token the handler already holds. A plain `#12` does not count.
+- At most five tickets. Each keeps its title, state, description (cut to
+  1,500 characters) and its last five comments (400 characters each).
+
+The reviewer prompt and the verifier prompt carry the tickets under
+"Linked tickets", right after the PR description, as data blocks. The
+section tells the reviewer not to report a behavior that a ticket or the
+description calls intended. A risk the ticket does not address is at most a
+low finding, phrased as a question. A failed request leaves the tickets out
+and the review goes on, and the handler logs the failure.
+
 ## Verifier
 
 Every review rechecks each open finding on a file the new commits changed.

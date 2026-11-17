@@ -31,6 +31,7 @@ import {
   type PostedFinding,
 } from "./render.js";
 import { ReviewSchema, type Finding, type Review } from "./types.js";
+import { closedIssueNumbers, fetchLinearTickets, githubTicket, linearTicketIds, MAX_TICKETS, ticketsSection, type LinkedTicket } from "./intent.js";
 import { anchorProblems, evidenceProblems, lineCount } from "./review.js";
 import { buildVerifierPrompt, claimDiff, decideFinding, refutationCitesRules, refutationGrounded, VerdictSchema, type Verdict } from "./verify.js";
 import { packRules } from "./context/pack.js";
@@ -250,7 +251,7 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
     if (!settings.learn || settings.shadow) return log(slug, "skipped: learning is off for this line");
     return learnFromPullRequest(event, ctx, gh, pr, settings, { slug, repoName, number: target.number });
   }
-  if (settings.shadow || manual?.shadow) return shadowReview(event, ctx, gh, pr, settings, { slug, repoName, commit: manual?.commit });
+  if (settings.shadow || manual?.shadow) return shadowReview(event, ctx, gh, pr, settings, { slug, repoName, commit: manual?.commit, ...(opts.fetch ? { fetch: opts.fetch } : {}) });
   if (pr.state !== "open") return log(slug, `skipped: the pull request is ${pr.state}`);
   if (pr.draft && !settings.reviewDrafts) return log(slug, "skipped: draft pull request");
 
@@ -301,9 +302,10 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
   // Rechecks wait for the pack stage so they get its rules. A review that fails before the stage also releases them.
   let packSeen: () => void = () => undefined;
   const packReady = new Promise<void>((resolve) => { packSeen = resolve; });
+  const tickets = await linkedTickets(ctx, gh, pr, opts.fetch);
   const claimInput = (f: Finding) => {
     const context = verifierRules(settings.instructions, packText);
-    return { title: pr.title, body: pr.body ?? "", base: mergeBase, head, finding: f, diff: claimDiff(prDiff, f.path), ...(context ? { context } : {}) };
+    return { title: pr.title, body: pr.body ?? "", base: mergeBase, head, finding: f, diff: claimDiff(prDiff, f.path), ...(context ? { context } : {}), ...(tickets ? { tickets } : {}) };
   };
 
   // 1. Recheck open findings whose files changed. Only a grounded refutation
@@ -343,6 +345,7 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
     ...(from !== undefined ? { incrementFrom: from } : {}),
     knownFindings: [...open.live, ...open.dismissed.filter(hasTitle)].map((f) => ({ path: f.path, line: f.line, title: f.title })),
     dispatchId: dispatch("review"),
+    tickets,
     context: {
       // Convention files and playbooks are instructions: read them at the merge base, never at the PR head.
       readTrusted: (path) => gh.fileText(path, mergeBase),
@@ -800,6 +803,8 @@ async function runReviewerChild(
   input: {
     slug: string; repoName: string; pr: PullRequest; base: string; head: string; settings: ReviewSettings; diff: PullRequestDiff;
     incrementFrom?: string; knownFindings: { path: string; line: number; title: string }[]; dispatchId: string;
+    /** The linked tickets section (`ticketsSection`), or "" when the PR links none. */
+    tickets?: string;
     /** Gather a context pack first, in the child's sandbox. `patch` is the diff before the budget; unset uses the reviewed diff. */
     context?: { readTrusted: (path: string) => Promise<string | undefined>; patch?: string | undefined };
     /** Limit this child to one defect class. Unset: the general review. */
@@ -822,6 +827,7 @@ async function runReviewerChild(
         ...(input.incrementFrom !== undefined ? { increment: { from: input.incrementFrom } } : {}),
         knownFindings: input.knownFindings,
         ...(pack !== undefined ? { contextPack: pack } : {}),
+        ...(input.tickets ? { tickets: input.tickets } : {}),
       }),
       instructions: input.settings.instructions,
       excludePaths: input.settings.excludePaths,
@@ -909,7 +915,7 @@ async function shadowReview(
   gh: GitHubClient,
   pr: PullRequest,
   settings: ReviewSettings,
-  where: { slug: string; repoName: string; commit: string | undefined },
+  where: { slug: string; repoName: string; commit: string | undefined; fetch?: typeof fetch },
 ): Promise<void> {
   const { slug, repoName } = where;
   const checkout = where.commit ?? (pr.merged && pr.merge_commit_sha ? pr.merge_commit_sha : pr.head.sha);
@@ -933,6 +939,7 @@ async function shadowReview(
     diff: prDiffFor(prDiff, reviewed, mergeBase, checkout, settings.riskPaths),
     knownFindings: [],
     dispatchId: dispatch("shadow-review"),
+    tickets: await linkedTickets(ctx, gh, pr, where.fetch),
     context: { readTrusted: (path: string) => gh.fileText(path, mergeBase), patch: prDiff !== undefined ? onlyFiles(prDiff, new Set(reviewed.map((f) => f.filename))) : undefined },
   });
   const inPaths = draft.findings.filter((f) => !excluded(f.path, settings.excludePaths));
@@ -1128,6 +1135,29 @@ async function learnFromPullRequest(
   await noteBestEffort(ctx, thread, renderLearnOutcome(slug, feedback.length, outcome), `${event.id}:learned`);
   await markLearned();
   log(slug, `learned from ${feedback.length} feedback item(s): ${outcome.written.length} written, ${outcome.skipped.length} skipped`);
+}
+
+/**
+ * The tickets the pull request links (`intent.ts`) as a prompt section, or ""
+ * when it links none or none can be read. A failure is logged, never thrown:
+ * a review without tickets is still a review.
+ */
+async function linkedTickets(ctx: PluginEventContext, gh: GitHubClient, pr: PullRequest, fetchImpl: typeof fetch | undefined): Promise<string> {
+  try {
+    const tickets: LinkedTicket[] = [];
+    const ids = linearTicketIds(pr.title, pr.body, pr.head.ref);
+    const linear = ids.length > 0 ? await ctx.appToken("linear") : null;
+    if (linear) tickets.push(...(await fetchLinearTickets(linear, ids, fetchImpl, ctx.signal)));
+    for (const n of closedIssueNumbers(pr.body)) {
+      const issue = await gh.issue(n);
+      if (issue) tickets.push(githubTicket(n, issue));
+    }
+    return ticketsSection(tickets.slice(0, MAX_TICKETS));
+  } catch (err) {
+    if (ctx.signal.aborted) throw err;
+    console.warn("pr-review: could not read the linked tickets; the review runs without them", err);
+    return "";
+  }
 }
 
 /** The learning pass as a note in the plugin thread. */

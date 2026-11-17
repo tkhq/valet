@@ -278,6 +278,20 @@ describe("EventDispatcher plugin target", () => {
     await d.stop();
   });
 
+  it("lends an app token for a service the plugin lists in appServices, with no credential declaration", async () => {
+    const { deliveryId } = await seed();
+    const asked: string[] = [];
+    let token: string | null = null;
+    const plugin = { ...pluginWith(async (_event, ctx) => { token = await ctx.appToken("linear"); }), appServices: ["linear"] };
+    const d = dispatcher(plugin, handlerHost(async (_orgId, service) => { asked.push(service); return service === "linear" ? "lin_app" : null; }));
+    await d.pollOnce();
+    const row = await settled(deliveryId);
+    expect(row.status).toBe("delivered");
+    expect(asked).toEqual(["linear"]);
+    expect(token).toBe("lin_app");
+    await d.stop();
+  });
+
   it("skips the delivery when its line is turned off while the handler runs", async () => {
     const { deliveryId } = await seed();
     const host = handlerHost();

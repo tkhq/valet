@@ -54,6 +54,13 @@ export interface ReviewComment {
 }
 
 /** One emoji reaction on a review comment. */
+export interface Issue {
+  title: string;
+  body?: string | null;
+  html_url?: string;
+  state?: string;
+}
+
 export interface Reaction {
   content: string;
   user?: { login: string } | null;
@@ -95,6 +102,8 @@ export class GitHubError extends Error {
 
 export interface GitHubClient {
   pull(): Promise<PullRequest>;
+  /** An issue of this repository, or null when it does not exist or the token cannot read it. */
+  issue(number: number): Promise<Issue | null>;
   /** The user's role on the repository (`admin`, `maintain`, `write`, `triage` or `read`), or undefined when GitHub gives none. */
   permission(user: string): Promise<string | undefined>;
   compare(base: string, head: string): Promise<Comparison | null>;
@@ -193,6 +202,12 @@ export function githubClient(opts: { token: string; owner: string; repo: string;
 
   return {
     pull: () => json<PullRequest>("GET", pullPath, "read pull request"),
+    async issue(number) {
+      const res = await call("GET", `${repoPath}/issues/${number}`);
+      if (res.status === 404 || res.status === 403 || res.status === 410) return null;
+      if (!res.ok) throw await failed(res, `read issue #${number}`);
+      return (await res.json()) as Issue;
+    },
     async permission(user) {
       const res = await call("GET", `${repoPath}/collaborators/${encodeURIComponent(user)}/permission`);
       // Not a collaborator, or a token that may not read it: no role.
