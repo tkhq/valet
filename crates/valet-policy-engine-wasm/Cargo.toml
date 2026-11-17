@@ -1,0 +1,20 @@
+[package]
+name = "valet-policy-engine-wasm"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "WebAssembly boundary for the Valet policy engine"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+base64.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_jcs.workspace = true
+sha2.workspace = true
+valet-policy-engine = { path = "../valet-policy-engine" }
+wasm-bindgen.workspace = true

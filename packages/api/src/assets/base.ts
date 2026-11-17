@@ -10,9 +10,10 @@
  * the web dist comes from `VALET_WEB_DIST_DIR` and PGlite loads its wasm the
  * normal way (no override).
  */
+import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 /** True only in the packaged single-binary artifact. */
 export function isBundled(): boolean {
@@ -47,6 +48,13 @@ export function webDistPath(): string | undefined {
 export function pgliteAssetDir(): string | undefined {
   if (!isBundled()) return undefined;
   return join(assetBase(), "pglite");
+}
+
+/** Worker entry from copied dist assets when present, or from the source tree in development. */
+export function policyWorkerUrl(): URL {
+  const packaged = join(assetBase(), "policy-engine", "policy-worker.cjs");
+  if (isBundled() || existsSync(packaged)) return pathToFileURL(packaged);
+  return new URL("../authorization/evaluators/policy-worker.cjs", import.meta.url);
 }
 
 /** PGlite constructor overrides that point it at the sibling wasm/data. */
