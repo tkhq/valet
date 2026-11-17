@@ -26,8 +26,8 @@
  * A proxy key is a personal API key: it is listed with the person's keys.
  * When the org turns personal API keys off (`services/api-key-policy.ts`),
  * both the start and the approved poll refuse a proxy-key request. A login
- * mints a CLI token, not an API key, so the policy does not touch it. The
- * org maximum key lifetime does not apply to proxy keys
+ * mints a CLI token, not an API key, so the policy does not touch it. A
+ * proxy key expires at the org maximum key lifetime when the org sets one
  * (`docs/specs/2026-07-14-auth-v2-design.md`, update of 2026-11-17).
  */
 import { createHash, randomBytes, randomInt } from "node:crypto";
@@ -40,7 +40,7 @@ import type { AppDb } from "../lib/drizzle.js";
 import { readOptionalJsonObject } from "../lib/optional-json-body.js";
 import { PROXY_KEY_SCOPE } from "../lib/request-principal.js";
 import { cliDeviceRequests } from "../schema/index.js";
-import { getInstanceApiKeyPolicy } from "../services/api-key-policy.js";
+import { getInstanceApiKeyPolicy, resolveKeyExpiry } from "../services/api-key-policy.js";
 import type { CliDeviceCodeResponse, CliDeviceInfo, CliDevicePurpose, CliProxyKeyResponse } from "../wire/types.js";
 import { trustedRequestOrigins } from "./oauth-consent.js";
 
@@ -282,10 +282,20 @@ export function cliDevicePublicRouter(db: AppDb, auth: ValetAuth): Hono<AppEnv> 
     if (!taken?.userId) return deviceError(c, "expired_token", "The code was already used.");
     if (taken.purpose === "proxy-key") {
       // The policy can change while the request waits for approval.
-      if (!(await getInstanceApiKeyPolicy(db)).allowPersonalKeys) return proxyKeyRefused(c);
+      const policy = await getInstanceApiKeyPolicy(db);
+      if (!policy.allowPersonalKeys) return proxyKeyRefused(c);
+      // The CLI sends no expiry, so the key gets the org maximum, or none.
+      // A request with no expiry always resolves.
+      const lifetime = resolveKeyExpiry(policy, undefined);
+      const expiresIn = lifetime.ok ? lifetime.expiresIn : null;
       // Server-side call with metadata: the scope keeps the key off the Valet API.
       const created = await auth.api.createApiKey({
-        body: { name: taken.keyName ?? `proxy@${taken.device}`, userId: taken.userId, metadata: { scope: PROXY_KEY_SCOPE } },
+        body: {
+          name: taken.keyName ?? `proxy@${taken.device}`,
+          userId: taken.userId,
+          metadata: { scope: PROXY_KEY_SCOPE },
+          ...(expiresIn === null ? {} : { expiresIn }),
+        },
       });
       if (!created?.key) return c.json({ error: "server_error", error_description: "Valet could not create the proxy key. Run `valet proxy setup` again." }, 500);
       return c.json({

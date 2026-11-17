@@ -25,7 +25,7 @@ const OPEN_POLICY: ApiKeyPolicy = { allowPersonalKeys: true, maxLifetimeDays: nu
 
 export const PERSONAL_API_KEYS_OFF_MESSAGE =
   "Your organization does not allow personal API keys. " +
-  "Ask an organization admin to turn them on in Settings → Organization → Policies.";
+  "Ask an organization admin to turn them on in Settings > Organization > Policies.";
 
 export async function getApiKeyPolicy(db: AppQueryable, orgId: string): Promise<ApiKeyPolicy> {
   const rows = await db
