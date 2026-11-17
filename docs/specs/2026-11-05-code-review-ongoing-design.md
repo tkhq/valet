@@ -73,6 +73,10 @@ the plugin keeps them apart.
   before conventions and code sections, with no section share. The pack cuts
   a matched rule only when the rules alone pass the budget, and it logs the
   cut.
+- **The same commit gives the same pack.** ripgrep searches files in
+  parallel, so its output order changes from run to run. The scan sorts the
+  matches by path and line before it keeps the first hits for each word.
+  Before this sort, most packs built twice on the same commit differed.
 - **The PR head is data.** The author controls the PR head. The plugin scans it
   only for code facts: definitions, callers and tests. The scan runs in the
   reviewer child's sandbox before its first turn (`spawnChild` `prepare`), on

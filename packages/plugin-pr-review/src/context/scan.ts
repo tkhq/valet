@@ -80,13 +80,17 @@ export async function scanRepo(runner: RepoRunner, req: ScanRequest): Promise<Sc
   if (cut) result.incomplete.push(`more than ${MAX_KEPT_PATHS} convention and test paths; kept the first ${MAX_KEPT_PATHS}`);
   if (words.length === 0) return result;
 
-  // One `git grep` for every word. awk splits the matches by word, keeps the
-  // first `cap` per word plus anything shaped like a definition, and counts all.
+  // One `git grep` for every word. The matches are sorted by path and line,
+  // then awk splits them by word, keeps the first `cap` per word plus anything
+  // shaped like a definition, and counts all.
   const grep = await runner.run(
     [
       'w=$(mktemp) && cat > "$w" &&',
       // ripgrep matches many fixed words in one pass; `git grep -w -F` with dozens of words is 100x slower on a large repo.
       'if command -v rg >/dev/null 2>&1; then rg -n --no-heading --no-messages --hidden -g "!.git/" -w -F -f "$w" .; else git grep -n -I -w -F --no-color -f "$w" -- .; fi |',
+      // ripgrep searches files in parallel, so its output order changes from run to run. awk keeps the first
+      // `cap` hits per word, so sort by path and line first: the same commit must always give the same pack.
+      "LC_ALL=C sort -t: -k1,1 -k2,2n |",
       `awk -v wf="$w" -v cap=${cap} -v long=${LONG_LINE} '`,
       "BEGIN { while ((getline l < wf) > 0) { n++; W[n] = l; e = l; gsub(/\\$/, \"\\\\$\", e);",
       '  R[n] = "(^|[^A-Za-z0-9_$])" e "([^A-Za-z0-9_$]|$)";',
