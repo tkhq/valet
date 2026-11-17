@@ -260,6 +260,9 @@ async function cleanupFailedSpawn(
   throw error;
 }
 
+/** Extra repositories one child checks out at most, beside its main one. */
+export const MAX_EXTRA_REPOS = 3;
+
 /**
  * Host policy for `SpawnChildRequest.repo` (the `task` tool's free-form repo
  * string). Accepts `owner/repo` shorthand, an `https://host/owner/repo[.git]`
@@ -270,9 +273,6 @@ async function cleanupFailedSpawn(
  * (`.github` is legal) but not a leading hyphen. Returns undefined for
  * anything else; exported for direct unit tests.
  */
-/** Extra repositories one child checks out at most, beside its main one. */
-export const MAX_EXTRA_REPOS = 3;
-
 export function parseTaskRepo(repo: string, branch?: string): RepoBinding | undefined {
   const trimmed = repo.trim();
   const m =
@@ -618,7 +618,11 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
       const parsed = parseTaskRepo(extra.repo, extra.ref);
       if (!parsed) throw new Error(`unrecognized repo '${extra.repo}' in extraRepos. Pass owner/repo or a GitHub clone URL.`);
       return parsed;
-    }).filter((b) => b.fullName.toLowerCase() !== binding?.fullName.toLowerCase());
+    }).filter((b, i, all) => {
+      // One row per repository: drop the main one and repeats, in any letter case, or two clones collide in one directory.
+      const name = b.fullName.toLowerCase();
+      return name !== binding?.fullName.toLowerCase() && all.findIndex((o) => o.fullName.toLowerCase() === name) === i;
+    });
     const bindings = binding ? [binding, ...extraBindings] : [];
     const targetDirs = computeTargetDirs(bindings);
 

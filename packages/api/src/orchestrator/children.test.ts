@@ -907,6 +907,11 @@ describe("buildChildSpawner", () => {
     expect(sorted.map((r) => [r.position, r.fullName, r.ref])).toEqual([[0, "acme/app", "abc123"], [1, "acme/deploy", null], [2, "other/app", "main"]]);
     expect(new Set(sorted.map((r) => r.targetDir)).size).toBe(3);
 
+    // A repository listed twice in extraRepos, in any letter case, binds once.
+    const repeated = await spawner({ prompt: "review", repo: "acme/app", extraRepos: [{ repo: "acme/deploy" }, { repo: "Acme/Deploy" }] }, ctx);
+    const repeatedRows = await api.providers.db.select().from(sessionRepos).where(eq(sessionRepos.sessionId, repeated.childSessionId));
+    expect(repeatedRows.map((r) => r.fullName).sort()).toEqual(["acme/app", "acme/deploy"]);
+
     await expect(spawner({ prompt: "review", extraRepos: [{ repo: "acme/deploy" }] }, ctx)).rejects.toThrow(/extraRepos needs repo/);
     await expect(spawner({ prompt: "review", repo: "acme/app", extraRepos: ["a/1", "a/2", "a/3", "a/4"].map((repo) => ({ repo })) }, ctx)).rejects.toThrow(/at most 3 extra repositories/);
     await expect(spawner({ prompt: "review", repo: "acme/app", extraRepos: [{ repo: "not a repo" }] }, ctx)).rejects.toThrow(/unrecognized repo 'not a repo' in extraRepos/);
