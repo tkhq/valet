@@ -2434,6 +2434,8 @@ export interface TeamApiKeySummary {
   start: string | null;
   createdAt: number;
   lastRequest: number | null;
+  /** Epoch ms after which the key stops working. Null: no expiry. */
+  expiresAt: number | null;
   createdBy: string | null;
 }
 
@@ -2443,6 +2445,12 @@ export interface ListTeamApiKeysResponse {
 
 export interface CreateTeamApiKeyRequest {
   name: string;
+  /**
+   * Seconds until the key expires, from 1 day to 1 year. Null: no expiry,
+   * refused when the org sets a maximum lifetime. Absent: the org maximum,
+   * or no expiry when the org sets none.
+   */
+  expiresIn?: number | null;
 }
 
 /** One-time reveal. `key` is the full `vlt_` secret. */
@@ -2451,6 +2459,8 @@ export interface CreateTeamApiKeyResponse {
   name: string | null;
   start: string | null;
   createdAt: number;
+  /** Epoch ms after which the key stops working. Null: no expiry. */
+  expiresAt: number | null;
   key: string;
   createdBy: string;
 }
@@ -4375,6 +4385,10 @@ export interface OrgSettingsResponse {
   allowAnonymousImageBakes?: boolean;
   /** Whether members can install the GitHub App on personal accounts. */
   allowPersonalInstallations: boolean;
+  /** Whether members can create personal API keys. Absent on older APIs. Defaults to true. */
+  allowPersonalApiKeys?: boolean;
+  /** Longest lifetime of a new API key, in days: 30, 90, or 365. Null: no limit. Absent on older APIs. */
+  maxApiKeyLifetimeDays?: number | null;
   /**
    * Context size, in tokens, that threads compact to stay under. Null: the
    * Valet default (200k). 0: no cap; threads compact only near the model's
@@ -4389,6 +4403,9 @@ export interface PatchOrgSettingsRequest {
   allowPublicArtifacts?: boolean;
   allowAnonymousImageBakes?: boolean;
   allowPersonalInstallations?: boolean;
+  allowPersonalApiKeys?: boolean;
+  /** 30, 90, or 365 days, or null for no limit. */
+  maxApiKeyLifetimeDays?: number | null;
   /** A token count from 50,000 to 1,000,000, 0 for no cap, or null for the Valet default. */
   compactionWindowTokens?: number | null;
 }
@@ -4965,6 +4982,17 @@ export interface OrgResponse {
   allowAnonymousImageBakes?: boolean;
   /** Absent on older APIs. Defaults to true. */
   allowPersonalInstallations?: boolean;
+  /**
+   * Whether members can create personal API keys. Readable by every member,
+   * so the key form can show the managed note. Absent on older APIs.
+   * Defaults to true.
+   */
+  allowPersonalApiKeys?: boolean;
+  /**
+   * Longest lifetime of a new API key, in days: 30, 90, or 365. Null: no
+   * limit. The key forms hide longer choices. Absent on older APIs.
+   */
+  maxApiKeyLifetimeDays?: number | null;
   /**
    * Context size, in tokens, that threads compact to stay under. Null: the
    * Valet default (200k). 0: no cap; threads compact only near the model's

@@ -461,7 +461,7 @@ describe("ApiKeysPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "Create" }));
 
     expect(createApiKeyMutate).toHaveBeenCalledWith(
-      "CI pipeline",
+      { name: "CI pipeline", expiresIn: 90 * 86_400 },
       expect.objectContaining({ onSuccess: expect.any(Function) }),
     );
     expect(screen.getByText("valet_sk_live_abc123")).toBeTruthy();

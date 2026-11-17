@@ -8,6 +8,8 @@ CREATE TABLE "orgs" (
 	"allow_public_artifacts" boolean NOT NULL DEFAULT false,
 	"allow_anonymous_image_bakes" boolean NOT NULL DEFAULT false,
 	"allow_personal_installations" boolean NOT NULL DEFAULT true,
+	"allow_personal_api_keys" boolean NOT NULL DEFAULT true,
+	"max_api_key_lifetime_days" integer,
 	"compaction_window_tokens" integer,
 	"model_tiers" jsonb,
 	"approved_models" jsonb,

@@ -26,6 +26,7 @@ export * from './tool-scope.js';
 export * from './action-id.js';
 export * from './toon-syntax.js';
 export * from './upload-limits.js';
+export * from './api-key-lifetime.js';
 
 export * from "./browser.js";
 export * from './browser-policy.js';

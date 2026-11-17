@@ -68,6 +68,13 @@ export const orgs = pgTable("orgs", {
   allowAnonymousImageBakes: boolean("allow_anonymous_image_bakes").notNull().default(false),
   /** Allow members to install the GitHub App on personal accounts. */
   allowPersonalInstallations: boolean("allow_personal_installations").notNull().default(true),
+  /** Members can create personal `vlt_` API keys. Team keys do not read it. */
+  allowPersonalApiKeys: boolean("allow_personal_api_keys").notNull().default(true),
+  /**
+   * Longest lifetime, in days, of a new API key: 30, 90, or 365. Null: no
+   * limit. Existing keys keep the expiry they were created with.
+   */
+  maxApiKeyLifetimeDays: integer("max_api_key_lifetime_days"),
   /**
    * Context size, in tokens, that threads compact to stay under (the engine's
    * `compaction.contextBudgetTokens`). Null: the Valet default (200k). 0: no

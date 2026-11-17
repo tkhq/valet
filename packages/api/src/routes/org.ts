@@ -136,6 +136,8 @@ async function loadOrgResponse(
     allowPublicArtifacts: row.allowPublicArtifacts,
     allowAnonymousImageBakes: row.allowAnonymousImageBakes,
     allowPersonalInstallations: row.allowPersonalInstallations,
+    allowPersonalApiKeys: row.allowPersonalApiKeys,
+    maxApiKeyLifetimeDays: row.maxApiKeyLifetimeDays,
     compactionWindowTokens: row.compactionWindowTokens,
     plugins,
     loadedPlugins: engineHost.loadedPluginNames(),

@@ -1,6 +1,12 @@
 import { useState } from "react";
 import type { OrgDirectoryUserWire, TeamApiKeySummary } from "@valet/api/wire";
-import { Button, ErrorRow, Input, LoadingRow } from "~/components/primitives";
+import {
+  apiKeyLifetimeChoices,
+  defaultApiKeyLifetime,
+  SECONDS_PER_DAY,
+  type ApiKeyLifetimeDays,
+} from "@valet/shared";
+import { Button, ErrorRow, Input, LoadingRow, Select } from "~/components/primitives";
 import {
   useApiKeys,
   useCreateApiKey,
@@ -8,10 +14,11 @@ import {
   useRevokeApiKey,
   useRevokeTeamApiKey,
   useTeamApiKeys,
+  type CreateApiKeyInput,
   type CreatedApiKey,
 } from "~/api/api-keys";
 import { useOrg, useOrgDirectory, useTeams } from "~/api/settings";
-import { formatDateOr } from "~/lib/format-when";
+import { formatDate, formatDateOr } from "~/lib/format-when";
 import { errorText } from "~/lib/error-text";
 import { useCopyToClipboard } from "~/lib/use-copy";
 import { useWorkspaceScope } from "~/lib/workspace-scope";
@@ -25,11 +32,35 @@ export function ApiKeysSection() {
 
 function PersonalApiKeysSection() {
   const keysQ = useApiKeys();
+  const orgQ = useOrg();
+  const createKey = useCreateApiKey();
   const [created, setCreated] = useState<CreatedApiKey | null>(null);
+  // Until the org loads, the form offers every choice. The api enforces the
+  // policy whatever the form sends.
+  const keysAllowed = orgQ.data?.allowPersonalApiKeys ?? true;
 
   return (
     <div className="min-w-0 max-w-full space-y-4">
-      <CreatePersonalKeyRow onCreated={setCreated} />
+      {keysAllowed ? (
+        <CreateKeyRow
+          maxLifetimeDays={orgQ.data?.maxApiKeyLifetimeDays ?? null}
+          onCreate={(input, onSuccess) => {
+            createKey.mutate(input, {
+              onSuccess: (resp) => {
+                onSuccess();
+                setCreated(resp);
+              },
+            });
+          }}
+          pending={createKey.isPending}
+          errorMessage={createKey.error?.message ?? null}
+        />
+      ) : (
+        <p className="text-sm leading-relaxed text-muted">
+          Your organization does not allow personal API keys. An organization admin can change this in Organization settings, under Policies.
+          Your existing keys work until they expire or you revoke them.
+        </p>
+      )}
 
       {created && <KeyRevealBlock name={created.name ?? "New key"} secret={created.key} onDismiss={() => setCreated(null)} />}
 
@@ -52,6 +83,7 @@ function PersonalApiKeysSection() {
               start={key.start}
               createdAt={key.createdAt}
               lastRequest={key.lastRequest}
+              expiresAt={key.expiresAt}
             />
           ))}
         </div>
@@ -99,10 +131,23 @@ export function TeamApiKeysSection({ teamId }: { teamId: string }) {
     return <ErrorRow>You are not a member of this team. Choose a team under Your teams.</ErrorRow>;
   }
   const canMutate = team.callerRole === "admin" || orgQ.data.callerRole === "admin";
-  return <TeamApiKeyControls key={`${teamId}:${canMutate}`} teamId={teamId} keys={keysQ.data} canMutate={canMutate} />;
+  return (
+    <TeamApiKeyControls
+      key={`${teamId}:${canMutate}`}
+      teamId={teamId}
+      keys={keysQ.data}
+      canMutate={canMutate}
+      maxLifetimeDays={orgQ.data.maxApiKeyLifetimeDays ?? null}
+    />
+  );
 }
 
-function TeamApiKeyControls({ teamId, keys, canMutate }: { teamId: string; keys: TeamApiKeySummary[]; canMutate: boolean }) {
+function TeamApiKeyControls({ teamId, keys, canMutate, maxLifetimeDays }: {
+  teamId: string;
+  keys: TeamApiKeySummary[];
+  canMutate: boolean;
+  maxLifetimeDays: number | null;
+}) {
   const createKey = useCreateTeamApiKey(teamId);
   const directoryQ = useOrgDirectory();
   const ws = useActiveWorkspace();
@@ -124,9 +169,10 @@ function TeamApiKeyControls({ teamId, keys, canMutate }: { teamId: string; keys:
         </details>
       </div>
       {canMutate && (
-        <CreateTeamKeyRow
-          onCreate={(name, onSuccess) => {
-            createKey.mutate(name, {
+        <CreateKeyRow
+          maxLifetimeDays={maxLifetimeDays}
+          onCreate={(input, onSuccess) => {
+            createKey.mutate(input, {
               onSuccess: (resp) => {
                 onSuccess();
                 setCreated({ name: resp.name, key: resp.key });
@@ -134,7 +180,7 @@ function TeamApiKeyControls({ teamId, keys, canMutate }: { teamId: string; keys:
             });
           }}
           pending={createKey.isPending}
-          error={createKey.error}
+          errorMessage={createKey.error ? errorText(createKey.error) : null}
         />
       )}
 
@@ -165,6 +211,7 @@ function TeamApiKeyControls({ teamId, keys, canMutate }: { teamId: string; keys:
               start={key.start}
               createdAt={key.createdAt}
               lastRequest={key.lastRequest}
+              expiresAt={key.expiresAt}
               createdByLabel={creatorLabel(key.createdBy, directoryQ.data?.users)}
               revokeDisabled={!canMutate}
             />
@@ -175,63 +222,48 @@ function TeamApiKeyControls({ teamId, keys, canMutate }: { teamId: string; keys:
   );
 }
 
-function CreatePersonalKeyRow({ onCreated }: { onCreated: (created: CreatedApiKey) => void }) {
-  const [name, setName] = useState("");
-  const createKey = useCreateApiKey();
+/** A lifetime choice: days, or null for "No expiry". */
+type LifetimeChoice = ApiKeyLifetimeDays | null;
 
-  function submit() {
-    const trimmed = name.trim();
-    if (!trimmed) return;
-    createKey.mutate(trimmed, {
-      onSuccess: (created) => {
-        setName("");
-        onCreated(created);
-      },
-    });
-  }
-
-  return (
-    <div className="flex flex-col gap-1.5">
-      <div className="flex gap-2">
-        <Input
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") submit();
-          }}
-          placeholder="e.g. CI pipeline"
-          aria-label="Key name"
-          className="min-w-0 flex-1"
-        />
-        <Button type="button" onClick={submit} disabled={!name.trim() || createKey.isPending}>
-          {createKey.isPending ? "Creating…" : "Create"}
-        </Button>
-      </div>
-      {createKey.error && <p className="text-xs text-danger-500">{createKey.error.message}</p>}
-    </div>
-  );
+function lifetimeLabel(days: LifetimeChoice): string {
+  if (days === null) return "No expiry";
+  return days === 365 ? "1 year" : `${days} days`;
 }
 
-function CreateTeamKeyRow({
+/**
+ * The create form for a personal or a team key: a name and an expiry. Under
+ * an org maximum the expiry list hides "No expiry" and longer choices.
+ */
+function CreateKeyRow({
+  maxLifetimeDays,
   onCreate,
   pending,
-  error,
+  errorMessage,
 }: {
-  onCreate: (name: string, onSuccess: () => void) => void;
+  maxLifetimeDays: number | null;
+  onCreate: (input: CreateApiKeyInput, onSuccess: () => void) => void;
   pending: boolean;
-  error: Error | null;
+  errorMessage: string | null;
 }) {
   const [name, setName] = useState("");
+  const [picked, setPicked] = useState<LifetimeChoice | undefined>(undefined);
+  const choices = apiKeyLifetimeChoices(maxLifetimeDays);
+  // The org maximum can arrive or change after a pick. A pick it no longer
+  // allows falls back to the default choice.
+  const lifetime = picked !== undefined && choices.includes(picked) ? picked : defaultApiKeyLifetime(maxLifetimeDays);
 
   function submit() {
     const trimmed = name.trim();
     if (!trimmed) return;
-    onCreate(trimmed, () => setName(""));
+    onCreate(
+      { name: trimmed, expiresIn: lifetime === null ? null : lifetime * SECONDS_PER_DAY },
+      () => setName(""),
+    );
   }
 
   return (
     <div className="flex flex-col gap-1.5">
-      <div className="flex gap-2">
+      <div className="flex flex-wrap gap-2">
         <Input
           value={name}
           onChange={(e) => setName(e.target.value)}
@@ -242,11 +274,29 @@ function CreateTeamKeyRow({
           aria-label="Key name"
           className="min-w-0 flex-1"
         />
+        <Select
+          aria-label="Key expiry"
+          className="w-auto shrink-0"
+          value={lifetime === null ? "none" : String(lifetime)}
+          onChange={(e) => {
+            const next = choices.find((choice) => (choice === null ? "none" : String(choice)) === e.target.value);
+            if (next !== undefined) setPicked(next);
+          }}
+        >
+          {choices.map((choice) => (
+            <option key={choice ?? "none"} value={choice === null ? "none" : String(choice)}>
+              {lifetimeLabel(choice)}
+            </option>
+          ))}
+        </Select>
         <Button type="button" onClick={submit} disabled={!name.trim() || pending}>
           {pending ? "Creating…" : "Create"}
         </Button>
       </div>
-      {error && <p role="alert" className="text-sm text-danger-500">{errorText(error)}</p>}
+      {maxLifetimeDays !== null && (
+        <p className="text-xs text-muted">Your organization requires keys to expire within {lifetimeLabel(choices[choices.length - 1] ?? null)}.</p>
+      )}
+      {errorMessage && <p role="alert" className="text-sm text-danger-500">{errorMessage}</p>}
     </div>
   );
 }
@@ -291,12 +341,14 @@ function PersonalApiKeyRow({
   start,
   createdAt,
   lastRequest,
+  expiresAt,
 }: {
   apiKeyId: string;
   name: string | null;
   start: string | null;
   createdAt: Date | number;
   lastRequest: Date | number | null;
+  expiresAt: Date | number | null;
 }) {
   const revokeKey = useRevokeApiKey();
   return (
@@ -305,6 +357,7 @@ function PersonalApiKeyRow({
       start={start}
       createdAt={createdAt}
       lastRequest={lastRequest}
+      expiresAt={expiresAt}
       pending={revokeKey.isPending}
       onRevoke={(done) => revokeKey.mutate(apiKeyId, { onSuccess: done })}
     />
@@ -318,6 +371,7 @@ function TeamApiKeyRow({
   start,
   createdAt,
   lastRequest,
+  expiresAt,
   createdByLabel,
   revokeDisabled,
 }: {
@@ -327,6 +381,7 @@ function TeamApiKeyRow({
   start: string | null;
   createdAt: Date | number;
   lastRequest: Date | number | null;
+  expiresAt: Date | number | null;
   createdByLabel: string | null;
   revokeDisabled?: boolean;
 }) {
@@ -337,6 +392,7 @@ function TeamApiKeyRow({
       start={start}
       createdAt={createdAt}
       lastRequest={lastRequest}
+      expiresAt={expiresAt}
       createdByLabel={createdByLabel}
       revokeDisabled={revokeDisabled}
       pending={revokeKey.isPending}
@@ -345,11 +401,19 @@ function TeamApiKeyRow({
   );
 }
 
+/** "Expires <date>", "Expired", or "No expiry" for a key row. */
+function expiryText(expiresAt: Date | number | null, now: number = Date.now()): string {
+  if (expiresAt === null) return "No expiry";
+  const at = new Date(expiresAt).getTime();
+  return at <= now ? "Expired" : `Expires ${formatDate(at)}`;
+}
+
 function ApiKeyRow({
   name,
   start,
   createdAt,
   lastRequest,
+  expiresAt,
   createdByLabel,
   onRevoke,
   pending,
@@ -359,6 +423,7 @@ function ApiKeyRow({
   start: string | null;
   createdAt: Date | number;
   lastRequest: Date | number | null;
+  expiresAt: Date | number | null;
   /** Team rows only. A personal key has one possible creator. */
   createdByLabel?: string | null;
   onRevoke: (done: () => void) => void;
@@ -382,6 +447,7 @@ function ApiKeyRow({
       <div className="hidden shrink-0 text-xs text-muted sm:block">
         Last used {formatDateOr(lastRequest, "Never")}
       </div>
+      <div className="hidden shrink-0 text-xs text-muted sm:block">{expiryText(expiresAt)}</div>
       {revokeDisabled ? null : confirming ? (
         <span className="flex shrink-0 items-center gap-2">
           <Button

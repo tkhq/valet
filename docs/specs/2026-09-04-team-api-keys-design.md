@@ -130,3 +130,7 @@ The wider gap stands. Every other team-scoped write that re-checks authority und
 The 403 body carries `code: "team_admin_required"` and `teamId`, the same discriminator `TeamAdminRequiredError` sends when the delete path on this resource refuses a member. One client branch therefore answers both refusals, and a client can tell this 403 from the signed-out 403 on the same endpoint. The create refusal does not reuse the error class: that class carries deletion-request wording and a `teamAdminRefusal` lookup for a pending request. A create has no such request, so the body carries no `requestId`.
 
 This changes no permission. A member could not create a team key before, and cannot now.
+
+### Expiry and the org maximum (2026-11-17)
+
+A team key can expire. The create form offers 30 days, 90 days, 1 year, and No expiry, and `POST /api/teams/:id/api-keys` accepts `expiresIn` in seconds (1 day to 1 year, or null). The list and the create response carry `expiresAt`. The org maximum key lifetime applies to team keys. The org switch for personal keys does not. See the update of 2026-11-17 in `docs/specs/2026-07-14-auth-v2-design.md`.

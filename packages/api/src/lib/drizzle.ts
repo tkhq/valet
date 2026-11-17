@@ -984,6 +984,16 @@ WHERE r.status <> 'merged' ORDER BY l.org_id, l.subject_type, l.subject_id, l.di
     sql: 'ALTER TABLE "orgs" ADD COLUMN IF NOT EXISTS "allow_personal_installations" boolean NOT NULL DEFAULT true',
   },
   {
+    describe: "orgs.allow_personal_api_keys column",
+    probe: { kind: "column", table: "orgs", column: "allow_personal_api_keys" },
+    sql: 'ALTER TABLE "orgs" ADD COLUMN IF NOT EXISTS "allow_personal_api_keys" boolean NOT NULL DEFAULT true',
+  },
+  {
+    describe: "orgs.max_api_key_lifetime_days column",
+    probe: { kind: "column", table: "orgs", column: "max_api_key_lifetime_days" },
+    sql: 'ALTER TABLE "orgs" ADD COLUMN IF NOT EXISTS "max_api_key_lifetime_days" integer',
+  },
+  {
     describe: "orgs.compaction_window_tokens column",
     probe: { kind: "column", table: "orgs", column: "compaction_window_tokens" },
     sql: 'ALTER TABLE "orgs" ADD COLUMN IF NOT EXISTS "compaction_window_tokens" integer',

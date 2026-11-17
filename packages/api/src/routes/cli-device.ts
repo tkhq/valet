@@ -22,6 +22,13 @@
  * The CLI starts it with its CLI token, only that token's user can approve
  * it, and the approved poll returns a proxy-scoped API key instead of a CLI
  * token. A CLI token cannot create a credential alone (`AGENT_WRITES`).
+ *
+ * A proxy key is a personal API key: it is listed with the person's keys.
+ * When the org turns personal API keys off (`services/api-key-policy.ts`),
+ * both the start and the approved poll refuse a proxy-key request. A login
+ * mints a CLI token, not an API key, so the policy does not touch it. The
+ * org maximum key lifetime does not apply to proxy keys
+ * (`docs/specs/2026-07-14-auth-v2-design.md`, update of 2026-11-17).
  */
 import { createHash, randomBytes, randomInt } from "node:crypto";
 import { and, asc, count, eq, gt, inArray, lt, or } from "drizzle-orm";
@@ -33,6 +40,7 @@ import type { AppDb } from "../lib/drizzle.js";
 import { readOptionalJsonObject } from "../lib/optional-json-body.js";
 import { PROXY_KEY_SCOPE } from "../lib/request-principal.js";
 import { cliDeviceRequests } from "../schema/index.js";
+import { getInstanceApiKeyPolicy } from "../services/api-key-policy.js";
 import type { CliDeviceCodeResponse, CliDeviceInfo, CliDevicePurpose, CliProxyKeyResponse } from "../wire/types.js";
 import { trustedRequestOrigins } from "./oauth-consent.js";
 
@@ -74,6 +82,14 @@ const PROXY_KEY_LIMITS = [
 ];
 
 const MAX_KEY_NAME_LENGTH = 120;
+
+export const PROXY_KEY_POLICY_OFF =
+  "Your organization does not allow personal API keys, so Valet cannot create a proxy key for you. " +
+  "Ask a team admin for a team proxy key, or ask an organization admin to turn personal API keys on.";
+
+function proxyKeyRefused(c: Context<AppEnv>) {
+  return c.json({ error: "unauthorized_client", error_description: PROXY_KEY_POLICY_OFF }, 403);
+}
 
 /** The computer name the CLI reports, trimmed to printable text. The CLI chooses it, so it proves nothing. */
 export function deviceLabel(raw: unknown): string {
@@ -205,6 +221,7 @@ export function cliDevicePublicRouter(db: AppDb, auth: ValetAuth): Hono<AppEnv> 
       if (!token) return c.json({ error: "invalid_client", error_description: "Sign in first. Run `valet login <url>`, then run `valet proxy setup` again." }, 401);
       const keyName = keyNameLabel(body?.key_name);
       if (!keyName) return c.json({ error: "invalid_request", error_description: "Send key_name for a proxy-key request." }, 400);
+      if (!(await getInstanceApiKeyPolicy(db)).allowPersonalKeys) return proxyKeyRefused(c);
       proxyKey = { keyName, requestedBy: token.userId };
     }
     // Requests nobody finished are useless after they expire.
@@ -264,6 +281,8 @@ export function cliDevicePublicRouter(db: AppDb, auth: ValetAuth): Hono<AppEnv> 
       .returning({ userId: cliDeviceRequests.userId, device: cliDeviceRequests.device, purpose: cliDeviceRequests.purpose, keyName: cliDeviceRequests.keyName });
     if (!taken?.userId) return deviceError(c, "expired_token", "The code was already used.");
     if (taken.purpose === "proxy-key") {
+      // The policy can change while the request waits for approval.
+      if (!(await getInstanceApiKeyPolicy(db)).allowPersonalKeys) return proxyKeyRefused(c);
       // Server-side call with metadata: the scope keeps the key off the Valet API.
       const created = await auth.api.createApiKey({
         body: { name: taken.keyName ?? `proxy@${taken.device}`, userId: taken.userId, metadata: { scope: PROXY_KEY_SCOPE } },
