@@ -1,6 +1,5 @@
 import { Link, useRouter, useRouterState } from "@tanstack/react-router";
 import {
-  ArrowLeft,
   Bell,
   Blocks,
   Building2,
@@ -18,7 +17,7 @@ import {
   BarChart3,
 } from "lucide-react";
 import { useOrg, useTeams } from "~/api/settings";
-import { Button, DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger, type AppPath } from "~/components/primitives";
+import { BACK_LINK_CLASS, Button, DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger, type AppPath } from "~/components/primitives";
 import { eligibleTeams } from "~/components/session/assistant-rail";
 import { useResponsiveOverlay } from "~/hooks/use-responsive-overlay";
 import { cn } from "~/lib/cn";
@@ -40,9 +39,6 @@ import { lastAppPath } from "~/lib/last-app-path";
  *   existing routes (`ORG_SECTIONS`). A plain member sees Teams only: the
  *   1Password page holds nothing a member can act on, and their own token
  *   is on Integrations.
- *
- * "Back to app" sits above the groups and returns to the last app page
- * (`lastAppPath`), or Home after a reload into Settings.
  *
  * Active state is computed from the pathname (via `cn`'s `twMerge`) rather
  * than TanStack's `activeProps`, which only concatenates class strings.
@@ -220,11 +216,18 @@ export function SettingsRail() {
     active: (p) => onRoute(p, `/settings/teams/${team.id}`),
   }));
 
+  // An org admin opens a team they are not on from Organization · Teams,
+  // so that item stays active on the team's pages.
+  const onOtherTeam = /^\/settings\/teams\/[^/]+/.test(normalizeSettingsPath(pathname)) && !teamItems.some((item) => item.active(pathname));
+  const orgItems = (orgAdmin ? ADMIN_ORG_ITEMS : MEMBER_ORG_ITEMS).map((item, index) =>
+    index === 0 && onOtherTeam ? { ...item, active: () => true } : item,
+  );
+
   const groups: RailGroupSpec[] = [
     { label: "Account", items: ACCOUNT_ITEMS },
     { label: "Personal", items: personalItems },
     ...(teamItems.length > 0 ? [{ label: "Your teams", items: teamItems }] : []),
-    ...(organizationsOn ? [{ label: "Organization", items: orgAdmin ? ADMIN_ORG_ITEMS : MEMBER_ORG_ITEMS }] : []),
+    ...(organizationsOn ? [{ label: "Organization", items: orgItems }] : []),
   ];
   const currentGroup = groups.find((group) => group.items.some((item) => item.active(pathname)));
   const current = currentGroup?.items.find((item) => item.active(pathname));
@@ -232,7 +235,6 @@ export function SettingsRail() {
 
   return (
     <nav aria-label="Settings" className="w-full shrink-0 text-sm sm:w-56">
-      <BackToApp />
       <div className="sm:hidden">
         <DropdownMenu open={sectionMenu.open} onOpenChange={sectionMenu.setOpen}>
           <DropdownMenuTrigger asChild>
@@ -268,10 +270,12 @@ export function SettingsRail() {
   );
 }
 
-/** A plain anchor with the real href, so a modified click opens a new tab;
- * a plain click navigates in place. The href is a stored path with search,
- * which the typed `Link` does not take. */
-function BackToApp() {
+/** "← Back to app" above the Settings title: the last app page
+ * (`lastAppPath`), or Home after a reload into Settings. It is a plain
+ * anchor with the real href, so a modified click opens a new tab; a plain
+ * click navigates in place. The href is a stored path with search, which
+ * the typed `BackLink` does not take. */
+export function BackToApp() {
   const router = useRouter();
   const href = lastAppPath();
   return (
@@ -282,10 +286,9 @@ function BackToApp() {
         event.preventDefault();
         router.history.push(href);
       }}
-      className="mb-3 flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-muted transition-colors hover:bg-ink-wash hover:text-ink sm:mb-5"
+      className={BACK_LINK_CLASS}
     >
-      <ArrowLeft className="h-4 w-4 shrink-0" aria-hidden />
-      Back to app
+      ← Back to app
     </a>
   );
 }

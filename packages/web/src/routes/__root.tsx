@@ -111,7 +111,7 @@ function RootLayout() {
   const href = useRouterState({ select: (s) => s.location.href });
   const mobile = useMobileLayout();
   const isPublic = isPublicPath(pathname);
-  // The settings rail's "Back to app" link returns to this page.
+  // The "Back to app" link above the Settings title returns to this page.
   useEffect(() => {
     if (!isPublic) rememberAppPath(pathname, href);
   }, [isPublic, pathname, href]);

@@ -46,8 +46,9 @@ export function TeamSettingsShell({ teamId }: { teamId: string }) {
     { to: "/settings/teams/$teamId/secrets", label: "Secrets", params: { teamId } },
     { to: "/settings/teams/$teamId/access", label: "Access", params: { teamId } },
     { to: "/settings/teams/$teamId/policies", label: "Policies", params: { teamId } },
-    { to: "/settings/teams/$teamId/usage", label: "Usage", params: { teamId } },
   ];
+  // The usage API answers only to members, as on the Overview.
+  if (team.callerRole !== null) tabs.push({ to: "/settings/teams/$teamId/usage", label: "Usage", params: { teamId } });
   const path = normalizeSettingsPath(pathname);
   const activeTo: AppPath = tabs.find((tab) => tab.to !== "/settings/teams/$teamId" && path.endsWith(tab.to.slice(tab.to.lastIndexOf("/"))))?.to
     ?? "/settings/teams/$teamId";
@@ -56,9 +57,13 @@ export function TeamSettingsShell({ teamId }: { teamId: string }) {
     <div className="space-y-6">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <h2 className="text-lg font-medium text-ink">{team.name}</h2>
-        <Link to="/chat" search={{ workspace: teamId }} className="text-sm text-muted underline-offset-2 hover:text-ink hover:underline">
-          Open team threads
-        </Link>
+        {/* Team threads open only for members: an org admin off the team
+            gets "workspace not found". */}
+        {team.callerRole !== null && (
+          <Link to="/chat" search={{ workspace: teamId }} className="text-sm text-muted underline-offset-2 hover:text-ink hover:underline">
+            Open team threads
+          </Link>
+        )}
       </div>
       <LinkTabs tabs={tabs} activeTo={activeTo} label={`${team.name} settings`} />
       <PinnedWorkspaceScope teamId={teamId}>

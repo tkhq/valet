@@ -35,7 +35,7 @@ export function AccessSections() {
   const personal = teamId === undefined;
   return (
     <div className="space-y-10">
-      <SectionHeading title="Access" />
+      <SectionHeading title="Access" description={personal ? "The agents, keys, and proxy that call Valet for you." : undefined} />
       {personal && (
         <Section
           title="Connected agents"

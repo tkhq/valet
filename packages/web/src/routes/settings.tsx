@@ -1,5 +1,5 @@
 import { Outlet, createFileRoute, useRouterState } from "@tanstack/react-router";
-import { SettingsRail, normalizeSettingsPath } from "~/components/settings/settings-rail";
+import { BackToApp, SettingsRail, normalizeSettingsPath } from "~/components/settings/settings-rail";
 import { PageHeader, pageClass } from "~/components/primitives";
 
 /**
@@ -22,7 +22,7 @@ export function SettingsLayout() {
   return (
     <div className="flex-1 overflow-y-auto">
       <div className={pageClass}>
-        <PageHeader title="Settings" className="mb-4 sm:mb-8" />
+        <PageHeader title="Settings" back={<BackToApp />} className="mb-4 sm:mb-8" />
         <div className="flex flex-col gap-4 sm:flex-row sm:gap-10">
           <SettingsRail />
           <div className={wide ? "min-w-0 flex-1" : "min-w-0 max-w-3xl flex-1"}>

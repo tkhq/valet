@@ -1,6 +1,6 @@
 /**
  * The last app page (path, search and hash) the person saw before they
- * opened Settings. The settings rail's "Back to app" link returns there.
+ * opened Settings. The "Back to app" link above the Settings title returns there.
  * It lives in memory only: after a reload straight into Settings there is
  * no earlier page, and the link goes to Home.
  */

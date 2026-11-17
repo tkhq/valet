@@ -1,4 +1,4 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { Link, createFileRoute } from "@tanstack/react-router";
 import { useTeams } from "~/api/settings";
 import { EmptyRow } from "~/components/primitives";
 import { SectionHeading } from "~/components/settings/section";
@@ -22,7 +22,7 @@ export function TeamUsageTab({ teamId }: { teamId: string }) {
     return (
       <div className="space-y-3">
         <SectionHeading title="Usage" />
-        <EmptyRow>Only members of this team can see its usage. To see spend for the whole organization, open Organization → Models and usage → Usage.</EmptyRow>
+        <EmptyRow>Only members of this team can see its usage. <Link to="/settings/organization/usage" className="text-ink underline-offset-2 hover:underline">See organization usage</Link>.</EmptyRow>
       </div>
     );
   }
