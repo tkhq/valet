@@ -85,6 +85,8 @@ export interface ReviewerSpecOptions {
   knownFindings?: { path: string; line: number; title: string }[];
   /** The gather stage's context pack, put in the first prompt. */
   contextPack?: string;
+  /** The tickets the PR links, as `ticketsSection` renders them. */
+  tickets?: string;
   /** Narrow this pass to one defect class (see FOCUS_PROMPTS). Unset: the general review. */
   focus?: ReviewFocus;
 }
@@ -231,6 +233,7 @@ export async function createReviewerSpec(opts: ReviewerSpecOptions): Promise<Rev
       ...(opts.incrementFrom !== undefined ? { increment: { from: opts.incrementFrom } } : {}),
       ...(opts.knownFindings !== undefined ? { knownFindings: opts.knownFindings } : {}),
       ...(opts.contextPack !== undefined ? { contextPack: opts.contextPack } : {}),
+      ...(opts.tickets ? { tickets: opts.tickets } : {}),
     }),
     review: () => submitted,
   };

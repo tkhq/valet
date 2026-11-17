@@ -97,6 +97,8 @@ export interface RunnerOptions {
   verifyModel?: string;
   /** Code-review verification for every case. Unset: each case's `pull_request.verify`. */
   verify?: boolean;
+  /** Show code-review cases the tickets their case file carries (`pull_request.tickets`). */
+  tickets?: boolean;
   /** Independent code-review passes per case. */
   reviewPasses?: number;
   /** One extra focused code-review pass per entry (failure, concurrency, tests). */

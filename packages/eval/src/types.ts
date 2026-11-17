@@ -446,6 +446,24 @@ export interface PullRequestSpec {
   number?: number;
   /** Check each finding with a verifier agent before scoring. Default true. */
   verify?: boolean;
+  /**
+   * The tickets the pull request links, read once when the case was made
+   * (`review-tickets`), so a replay does not depend on a live tracker. The
+   * runner shows them only with `--tickets`.
+   */
+  tickets?: CaseTicket[];
+}
+
+/** One linked ticket in a case: the shape `ticketsSection` renders. */
+export interface CaseTicket {
+  source: "linear" | "github";
+  /** `ENG-123` or `#12`. */
+  id: string;
+  title: string;
+  url?: string;
+  state?: string;
+  /** Description and recent comments. */
+  text: string;
 }
 
 /** One eval case, loaded from a YAML file in `evals/cases/`. */

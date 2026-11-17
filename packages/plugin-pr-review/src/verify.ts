@@ -88,6 +88,8 @@ export interface VerifierSpecOptions {
   context?: string;
   /** provider/model for the verifier. Unset: the host's model. */
   model?: string;
+  /** The tickets the PR links, as `ticketsSection` renders them. */
+  tickets?: string;
 }
 
 export interface VerifierPromptInput {
@@ -199,6 +201,7 @@ export async function createVerifierSpec(opts: VerifierSpecOptions): Promise<Ver
     diff,
     ...(opts.context !== undefined ? { context: opts.context } : {}),
     ...(opts.recheckFrom !== undefined ? { recheckFrom: opts.recheckFrom } : {}),
+    ...(opts.tickets ? { tickets: opts.tickets } : {}),
   });
 
   return {

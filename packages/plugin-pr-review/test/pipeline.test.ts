@@ -239,6 +239,20 @@ describe("runReviewPipeline", () => {
     expect(models).toEqual({ review: undefined, "verify:0": "openai/gpt-5.6-terra" });
   });
 
+  it("gives the reviewer and the verifiers the linked tickets", async () => {
+    const { dir, base, head } = repo();
+    const prompts: Record<string, string> = {};
+    const run: AgentRunner = async (spec) => {
+      prompts[spec.label] = spec.prompt;
+      if (spec.label === "review") await submit(spec, "submit_review", { summary: "s", confidence: 3, findings: [finding("F")] });
+      return { outcome: "completed" };
+    };
+    const tickets = "## Linked tickets\n<ticket>\nENG-12 (linear, In Progress): Reject empty input\n</ticket>";
+    await runReviewPipeline({ workspace: dir, base, head, title: "t", body: "", verify: true, tickets }, run);
+    expect(prompts.review).toContain("ENG-12 (linear, In Progress)");
+    expect(prompts["verify:0"]).toContain("ENG-12 (linear, In Progress)");
+  });
+
   it("diffs from the merge-base when the base branch moved on", async () => {
     const { dir, base, head } = repo();
     const g = (...args: string[]): string => execFileSync("git", args, { cwd: dir, encoding: "utf8" }).trim();

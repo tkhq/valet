@@ -1,3 +1,4 @@
+export { closedIssueNumbers, linearTicketIds, MAX_TICKETS, ticketsSection, type LinkedTicket } from "./intent.js";
 export {
   anchorProblems,
   evidenceProblems,

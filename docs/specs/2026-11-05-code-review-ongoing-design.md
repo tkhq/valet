@@ -197,6 +197,10 @@ description calls intended. A risk the ticket does not address is at most a
 low finding, phrased as a question. A failed request leaves the tickets out
 and the review goes on, and the handler logs the failure.
 
+The eval replays this with `--tickets`: a case carries its tickets in
+`pull_request.tickets`, read once when the case was made, so a replay does
+not depend on the live tracker.
+
 ## Verifier
 
 Every review rechecks each open finding on a file the new commits changed.

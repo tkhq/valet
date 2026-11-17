@@ -125,6 +125,15 @@ describe("pull_request cases", () => {
     expect(c.pull_request?.repo).toBe("sentry");
   });
 
+  it("parse linked tickets and refuse a malformed one", () => {
+    const ticket = { source: "linear", id: "ENG-12", title: "Reject empty input", state: "In Progress", text: "Empty input must fail fast." };
+    const c = parseEvalCase({ ...base, pull_request: { ...base.pull_request, tickets: [ticket] } }, "x.yaml");
+    expect(c.pull_request?.tickets).toEqual([ticket]);
+    expect(() => parseEvalCase({ ...base, pull_request: { ...base.pull_request, tickets: [{ ...ticket, source: "jira" }] } }, "x.yaml")).toThrow(/source must be linear or github/);
+    expect(parseCliArgs(["--tickets"]).tickets).toBe(true);
+    expect(parseCliArgs([]).tickets).toBeUndefined();
+  });
+
   it("reject turns, review_match without a PR, and a bad golden list", () => {
     expect(() => parseEvalCase({ ...base, turns: [{ role: "user", content: "hi" }] }, "x.yaml")).toThrow(CaseValidationError);
     expect(() =>

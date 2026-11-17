@@ -17,6 +17,7 @@ import {
   type Check,
   type GoldenComment,
   type ReviewCaseKind,
+  type CaseTicket,
   type PullRequestSpec,
   type EvalCase,
   type EvalTurn,
@@ -382,6 +383,25 @@ function parsePullRequest(raw: Record<string, unknown>, source: string): PullReq
   if (v.verify !== undefined) {
     if (typeof v.verify !== "boolean") throw new CaseValidationError(source, "`pull_request.verify` must be true or false");
     spec.verify = v.verify;
+  }
+  if (v.tickets !== undefined) {
+    if (!Array.isArray(v.tickets)) throw new CaseValidationError(source, "`pull_request.tickets` must be a list");
+    spec.tickets = v.tickets.map((t, i): CaseTicket => {
+      const at = `\`pull_request.tickets[${i}]\``;
+      if (!isRecord(t)) throw new CaseValidationError(source, `${at} must be a mapping`);
+      if (t.source !== "linear" && t.source !== "github") throw new CaseValidationError(source, `${at}.source must be linear or github`);
+      for (const k of ["id", "title", "text"] as const) {
+        if (typeof t[k] !== "string") throw new CaseValidationError(source, `${at}.${k} must be a string`);
+      }
+      return {
+        source: t.source,
+        id: String(t.id),
+        title: String(t.title),
+        text: String(t.text),
+        ...(typeof t.url === "string" ? { url: t.url } : {}),
+        ...(typeof t.state === "string" ? { state: t.state } : {}),
+      };
+    });
   }
   return spec;
 }

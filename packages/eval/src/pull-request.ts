@@ -29,7 +29,7 @@ import {
   resolveModelId,
   type Model,
 } from "@valet/engine";
-import { directoryMemory, runReviewPipeline, type AgentRunResult, type AgentRunner } from "@valet/plugin-pr-review";
+import { directoryMemory, runReviewPipeline, ticketsSection, type AgentRunResult, type AgentRunner } from "@valet/plugin-pr-review";
 import { LocalSandboxProvider } from "@valet/sandbox-local";
 import { gatewayModelResolver, viaGateway } from "./gateway.js";
 import { pullRequestBody } from "./private-pull-request.js";
@@ -199,6 +199,7 @@ async function reviewInWorkspace(
       body: spec.body ?? (spec.number !== undefined ? await pullRequestBody(spec.remote, spec.number) : ""),
       verify,
       ...(opts.verifyModel !== undefined ? { verifyModel: opts.verifyModel } : {}),
+      ...(opts.tickets && spec.tickets?.length ? { tickets: ticketsSection(spec.tickets) } : {}),
       ...(opts.reviewPasses !== undefined ? { passes: opts.reviewPasses } : {}),
       ...(opts.reviewFocus !== undefined ? { focuses: opts.reviewFocus } : {}),
       ...(opts.focusMinConfidence !== undefined ? { focusMinConfidence: opts.focusMinConfidence } : {}),
