@@ -610,7 +610,9 @@ export class EventDispatcher {
           // A bot post has no reply origin, and a Block Kit payload can fill
           // the JSON excerpt before its fields. The transport's readable text
           // (Slack: text, blocks, and attachments) goes first.
-          const readable = this.deps.normalizeChannelMessage
+          // Only Slack's transport reads a payload's rich parts. Another
+          // service would only repeat its payload's text.
+          const readable = event.service === "slack" && this.deps.normalizeChannelMessage
             ? (await this.deps.normalizeChannelMessage(event.service, { text: channelText(event.payload) ?? "", payload: event.payload })).text
             : "";
           const excerpt = JSON.stringify(event.payload).slice(0, MAX_BODY_EXCERPT_CHARS);

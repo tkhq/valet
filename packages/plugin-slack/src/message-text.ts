@@ -77,30 +77,48 @@ function richLines(container: unknown): string[] {
   }
 }
 
-/** The lines of one Block Kit block. Buttons, selects, images, dividers, and
- *  inputs carry no message content and give no lines. */
-function blockLines(block: unknown): string[] {
+/** One block or attachment's lines. `mirror` marks main text that a bot
+ * often copies from `text` in another format (a section's text, a header, a
+ * markdown or rich-text block); fields and context are never a copy. */
+interface Group {
+  lines: string[];
+  mirror: boolean;
+}
+
+/** The groups of one Block Kit block. Buttons, selects, images, dividers, and
+ *  inputs carry no message content and give none. */
+function blockGroups(block: unknown): Group[] {
   if (!isObj(block)) return [];
   switch (block.type) {
     case "header":
-      return [textObject(block.text)];
+      return [{ lines: [textObject(block.text)], mirror: true }];
     case "section":
-      return [textObject(block.text), ...list(block.fields).map(textObject)];
+      return [
+        { lines: [textObject(block.text)], mirror: true },
+        { lines: list(block.fields).map(textObject), mirror: false },
+      ];
     case "context":
-      return [list(block.elements).map(textObject).filter(Boolean).join(" ")];
+      return [{ lines: [list(block.elements).map(textObject).filter(Boolean).join(" ")], mirror: false }];
     case "markdown":
-      return [str(block.text)];
+      return [{ lines: [str(block.text)], mirror: true }];
     case "rich_text":
-      return list(block.elements).flatMap(richLines);
+      return [{ lines: list(block.elements).flatMap(richLines), mirror: true }];
     default:
       return [];
   }
 }
 
-/** The lines of one legacy attachment. `fallback` counts only when the
+/** A link preview Slack attached to a message: the linked page's own title
+ *  and text, which nobody in the conversation wrote. A forwarded message
+ *  (`is_msg_unfurl`) is kept. */
+function isLinkPreview(att: Obj): boolean {
+  return !att.is_msg_unfurl && (Boolean(att.from_url) || att.is_app_unfurl === true || Boolean(att.original_url));
+}
+
+/** The group of one legacy attachment. `fallback` counts only when the
  *  attachment has nothing else, because it repeats the rest. */
-function attachmentLines(att: unknown): string[] {
-  if (!isObj(att)) return [];
+function attachmentGroups(att: unknown): Group[] {
+  if (!isObj(att) || isLinkPreview(att)) return [];
   const title = str(att.title);
   const lines = [
     str(att.pretext),
@@ -113,39 +131,56 @@ function attachmentLines(att: unknown): string[] {
       const value = str(field.value);
       return name && value ? `${name}: ${value}` : name || value;
     }),
-    ...list(att.blocks).flatMap(blockLines),
     str(att.footer),
   ];
-  return lines.some((line) => line.trim()) ? lines : [str(att.fallback)];
+  const own: Group = { lines: lines.some((line) => line.trim()) ? lines : [str(att.fallback)], mirror: false };
+  return [own, ...list(att.blocks).flatMap(blockGroups)];
+}
+
+/** The words of a text, lowercased, with Slack and Markdown link markup
+ *  reduced to its label, so the same words in mrkdwn and Markdown match. */
+function words(text: string): string[] {
+  const plain = text
+    .replace(/<([^>|]+)\|([^>]+)>/g, "$2")
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1");
+  return plain.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
 }
 
 /**
- * The text of a message's `blocks` and `attachments`, one line per field,
- * without lines that repeat the top-level `text` or an earlier line. Empty
- * when the blocks and attachments add nothing beyond `text`, as for a plain
- * human message, whose only block is a rich-text copy of `text`. Capped at
+ * The text of a message's `blocks` and `attachments`, one line per field.
+ * It leaves out a main-text block whose words all appear in the top-level
+ * `text` (the same content in another format), lines equal to a line of
+ * `text`, a line repeated within one block or attachment, and link
+ * previews. Empty when the rest adds nothing, as for a plain human message,
+ * whose only block is a rich-text copy of `text`. Capped at
  * MESSAGE_CONTENT_MAX_CHARS.
  */
 export function slackMessageExtraText(msg: Record<string, unknown>): string {
   const text = str(msg.text).trim();
   const textLines = new Set(text.split("\n").map((line) => line.trim()).filter(Boolean));
-  const seen = new Set<string>();
-  const out: string[] = [];
+  const textWords = new Set(words(text));
   // A person's message carries one rich_text block that mirrors `text`, with
   // links and formatting written another way. Only a bot or app post, or a
   // message with no `text`, gets content from rich_text.
-  const mirror = Boolean(text) && !msg.bot_id && msg.subtype !== "bot_message";
-  const blocks = list(msg.blocks).filter((block) => !(mirror && isObj(block) && block.type === "rich_text"));
-  const lines = [...blocks.flatMap(blockLines), ...list(msg.attachments).flatMap(attachmentLines)];
-  for (const raw of lines) {
-    const line = raw.trimEnd();
-    const key = line.trim();
-    if (!key || textLines.has(key) || seen.has(key)) continue;
-    seen.add(key);
-    out.push(line);
+  const person = Boolean(text) && !msg.bot_id && msg.subtype !== "bot_message";
+  const blocks = list(msg.blocks).filter((block) => !(person && isObj(block) && block.type === "rich_text"));
+  const groups = [...blocks.flatMap(blockGroups), ...list(msg.attachments).flatMap(attachmentGroups)];
+  const out: string[] = [];
+  for (const group of groups) {
+    const lines = group.lines.flatMap((line) => line.split("\n"));
+    if (group.mirror && textWords.size > 0) {
+      const own = words(lines.join(" "));
+      if (own.length > 0 && own.every((w) => textWords.has(w))) continue;
+    }
+    const seen = new Set<string>();
+    for (const raw of lines) {
+      const line = raw.trimEnd();
+      const key = line.trim();
+      if (!key || textLines.has(key) || seen.has(key)) continue;
+      seen.add(key);
+      out.push(line);
+    }
   }
   const joined = out.join("\n");
-  // The whole of `text` can arrive as one block line with its line breaks.
-  if (!joined || joined.trim() === text) return "";
   return joined.length > MESSAGE_CONTENT_MAX_CHARS ? `${joined.slice(0, MESSAGE_CONTENT_MAX_CHARS)}…` : joined;
 }
