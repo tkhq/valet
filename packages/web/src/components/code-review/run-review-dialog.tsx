@@ -19,7 +19,7 @@ export function RunReviewDialog({ open, onOpenChange, teamId }: RunReviewDialogP
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         title="Review a pull request"
-        description="Valet reviews it now with the settings of the repository's code review line."
+        description="Valet reviews it now with the settings of the repository's code review line, drafts included."
         className="max-w-md gap-3"
       >
         {open && <RunReviewForm teamId={teamId} onDone={() => onOpenChange(false)} />}

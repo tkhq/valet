@@ -983,6 +983,15 @@ describe("review-pull-request handler", () => {
     expect(threads.spawned).toHaveLength(1);
   });
 
+  it("reviews a draft when a person asks for the review", async () => {
+    const gh = new FakeGitHub();
+    gh.draft = true;
+    const threads = new FakeThreads(scripted(reviewOf([]), {}));
+    await createReviewHandler({ fetch: gh.fetch }).handle(event("ev1", MANUAL_REVIEW_EVENT, { requestedBy: "user-1" }), context(threads, new FakeStore()));
+    expect(threads.spawned).toHaveLength(1);
+    expect(gh.reviews.size).toBe(1);
+  });
+
   it.each([
     ["NONE", undefined],
     ["CONTRIBUTOR", undefined],
