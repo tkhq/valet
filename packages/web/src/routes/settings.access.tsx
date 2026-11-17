@@ -6,7 +6,7 @@ import { SettingsProxyPage } from "~/components/settings/proxy-section";
 import { PinnedWorkspaceScope, useWorkspaceScope } from "~/lib/workspace-scope";
 
 /**
- * `/settings/access` — everything that lets a tool or script act for the
+ * `/settings/access`: everything that lets a tool or script act for the
  * personal workspace: connected agents, coding-tool setup, API keys, and the
  * proxy. It pins personal scope, so it never shows a team's keys whatever
  * the switcher holds. A team's keys live on `/settings/teams/$teamId/access`,

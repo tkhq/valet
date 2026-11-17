@@ -615,7 +615,7 @@ describe("UsagePage — unpriced indicator", () => {
   });
 });
 
-describe("UsagePage — personal scope", () => {
+describe("UsagePage: personal scope", () => {
   it.each([
     ["a member", { features: { organizations: false }, callerRole: "member" as const }],
     ["an org admin", { features: { organizations: true }, callerRole: "admin" as const }],
@@ -629,7 +629,7 @@ describe("UsagePage — personal scope", () => {
   });
 });
 
-describe("UsagePage — organization scope", () => {
+describe("UsagePage: organization scope", () => {
   it("requests org scope, names the organization, and exports org CSV", async () => {
     const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
     breakdownResult = { data: mockBreakdownOrgScope, isLoading: false, error: null };

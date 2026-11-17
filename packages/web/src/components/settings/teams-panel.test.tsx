@@ -652,7 +652,7 @@ describe("TeamsPanel — add-member picker", () => {
   });
 });
 
-describe("TeamCredentials — team connections", () => {
+describe("TeamCredentials: team connections", () => {
   beforeEach(() => {
     callerRole = "admin";
     orgRole = "member";
@@ -708,7 +708,7 @@ describe("TeamCredentials — team connections", () => {
  * writes nothing. One route serves both rows, and they cost different things,
  * so each row kind has its own verb and its own note (`removalLabels`).
  */
-describe("TeamCredentials — removing a team connection", () => {
+describe("TeamCredentials: removing a team connection", () => {
   /** linear is stored on the team. slack is shared by Two. */
   const DIRECT = "Disconnect Linear from Platform";
   const SHARED = "Stop sharing Two's Slack with Platform";
@@ -883,7 +883,7 @@ describe("TeamsPanel — team settings page", () => {
   });
 });
 
-describe("TeamsPanel — organization list", () => {
+describe("TeamsPanel: organization list", () => {
   it("links each team to its settings page and edits nothing in place", () => {
     callerRole = "member";
     orgRole = "admin";

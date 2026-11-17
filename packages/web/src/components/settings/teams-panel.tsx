@@ -89,7 +89,7 @@ const DELETE_TEAM_NOTE =
  * deliberately treated differently. The file only asserts members, so the
  * member controls keep working. Only delete goes, because the API refuses
  * it: the next boot would recreate the team empty. `CONFIG_MANAGED_NOTE`
- * states the half a reader cannot see — that a restart puts the declared
+ * states the half a reader cannot see: a restart puts the declared
  * members back.
  */
 export function TeamsPanel({
@@ -228,7 +228,7 @@ function TeamListRow({ team, canMutate }: { team: TeamSummary; canMutate: boolea
 /**
  * The team's actions menu: Delete for whoever administers the team, else
  * Request deletion. Two gates, both required. `canMutate` is authorization;
- * origin is provenance — the API refuses a delete on a declared team,
+ * origin is provenance: the API refuses a delete on a declared team,
  * because the next boot would recreate it empty. Delete is the only item
  * there, and an empty menu is worse than no menu.
  */
