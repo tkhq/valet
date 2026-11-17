@@ -29,7 +29,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { stringify } from "yaml";
+import { parse, stringify } from "yaml";
 import { collectOutcomes, gh, loginKey, mergedPulls, type OutcomeRow, type PullNode } from "./review-outcomes.js";
 
 /** Default distance in lines within which our comment counts as the same finding. */
@@ -112,6 +112,13 @@ export function keptFindings(rows: readonly OutcomeRow[], ours: string): Outcome
 export function rejectedFindings(rows: readonly OutcomeRow[], ours: string): OutcomeRow[] {
   const key = loginKey(ours);
   return rows.filter((r) => loginKey(r.bot) === key && r.outcome === "rejected" && r.side === "RIGHT" && r.botStatus !== "withdrawn");
+}
+
+/** Whether a case file's review check lists `rejected` findings. Reads the YAML, so a comment that quotes the word does not count. */
+export function hasRejected(caseYaml: string): boolean {
+  const doc: unknown = parse(caseYaml);
+  if (typeof doc !== "object" || doc === null || !("checks" in doc) || !Array.isArray(doc.checks)) return false;
+  return doc.checks.some((c: unknown) => typeof c === "object" && c !== null && "rejected" in c && Array.isArray(c.rejected) && c.rejected.length > 0);
 }
 
 /** Misses grouped by pull request and the commit the comments were made on. */
@@ -234,7 +241,7 @@ async function main(): Promise<void> {
       const file = join(outDir, `${missCaseId(g, prefix)}.yaml`);
       if (existsSync(file)) {
         // Keep a case someone may have edited, but say when it lacks rejected findings this run found.
-        if (rejected.length > 0 && !(await readFile(file, "utf8")).includes("rejected:")) {
+        if (rejected.length > 0 && !hasRejected(await readFile(file, "utf8"))) {
           console.warn(`${file} exists without the ${rejected.length} rejected finding(s) this run found. Delete it and run again to add them.`);
         }
         continue;

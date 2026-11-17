@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { findMisses, goldenText, groupMisses, insideRepo, keptFindings, missCase, missCaseId, rejectedFindings, reviewedBy } from "../src/review-misses.js";
+import { findMisses, goldenText, groupMisses, hasRejected, insideRepo, keptFindings, missCase, missCaseId, rejectedFindings, reviewedBy } from "../src/review-misses.js";
 import type { OutcomeRow, PullNode } from "../src/review-outcomes.js";
 
 const row = (over: Partial<OutcomeRow>): OutcomeRow => ({
@@ -72,6 +72,8 @@ describe("review misses", () => {
     const [g] = groupMisses(rejected);
     const doc = missCase({ ...g, rows: [] }, "a", true, "rejected", rejected);
     expect(doc).toMatchObject({ id: missCaseId(g, "rejected"), checks: [{ golden: [], rejected: [{ category: "bug" }] }] });
+    expect(hasRejected("checks:\n  - type: review_match\n    golden: []\n    rejected:\n      - comment: x\n        category: bug\n")).toBe(true);
+    expect(hasRejected("# rejected: in a header\nchecks:\n  - type: review_match\n    golden:\n      - comment: 'rejected: quoted'\n        category: bug\n")).toBe(false);
   });
 
   it("keeps our own addressed comments as kept cases, apart from misses", () => {
