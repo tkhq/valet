@@ -1802,8 +1802,23 @@ export class Session {
    * missing. */
   async readEntries(threadKey: string, opts?: MessageQuery, reader?: { id: string; key: string }): Promise<SessionEntry[]> {
     const t = (await this.threadByKey(threadKey)) ?? this.threadById(threadKey);
-    if (!t || (reader && !(await this.threadReadable(reader, t)))) return [];
-    return t.readEntries(opts);
+    if (t) {
+      if (reader && !(await this.threadReadable(reader, t))) return [];
+      return t.readEntries(opts);
+    }
+    // A sibling conversation of the workspace lives in its own session.
+    const siblings = await this.workspaceThreads();
+    const other = siblings.find((d) => d.id === threadKey)
+      ?? siblings.filter((d) => d.key === threadKey).sort((a, b) => b.updatedAt - a.updatedAt)[0];
+    if (!other || (reader && !(await this.threadReadable(reader, other)))) return [];
+    return this.providers.store.getEntries(other.sessionId, other.id, opts);
+  }
+
+  /** Threads of the workspace's other sessions (`CreateSessionOptions.workspaceSessions`). */
+  private async workspaceThreads(): Promise<ThreadData[]> {
+    const ids = (await this.options.workspaceSessions?.().catch(() => [] as string[])) ?? [];
+    const others = ids.filter((id) => id !== this.id);
+    return others.length > 0 ? this.providers.store.listThreadsForSessions(others) : [];
   }
 
   /** Whether `reader` may see `target` (`CreateSessionOptions.threadAccess`). */
@@ -1816,7 +1831,9 @@ export class Session {
 
   /** The stored threads `reader` may see, for `list_threads`. */
   async readableThreads(reader: { id: string; key: string }): Promise<ThreadData[]> {
-    const datas = await this.providers.store.listThreads(this.id);
+    const own = await this.providers.store.listThreads(this.id);
+    const ownIds = new Set(own.map((d) => d.id));
+    const datas = [...own, ...(await this.workspaceThreads()).filter((d) => !ownIds.has(d.id))];
     const shown = await Promise.all(datas.map((d) => this.threadReadable(reader, d)));
     return datas.filter((_, i) => shown[i]);
   }
