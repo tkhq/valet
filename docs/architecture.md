@@ -410,3 +410,4 @@ Rancher Desktop flow. Every target pins `--context rancher-desktop`.
 | 9000 | Sandbox gateway (inside `full` sandboxes) |
 | 8765 | code-server (behind the gateway) |
 | 7681 | ttyd web terminal (behind the gateway) |
+
