@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Message, SessionDetail } from "@valet/api/wire";
-import { buildTranscript } from "./transcript";
+import { buildTranscript, TRANSCRIPT_STRING_MAX_CHARS } from "./transcript";
 
 const session: SessionDetail = {
   id: "sess_1",
@@ -18,6 +18,13 @@ const session: SessionDetail = {
   profile: "full",
   docker: false,
 };
+
+/** The last ```json block in a transcript: the raw JSON appendix. */
+function appendix(out: string): Message[] {
+  const blocks = out.match(/```json\n([\s\S]*?)\n```/g);
+  if (!blocks) throw new Error("transcript has no ```json block");
+  return JSON.parse(blocks[blocks.length - 1].replace(/```json\n|\n```/g, "")) as Message[];
+}
 
 const messages: Message[] = [
   {
@@ -116,10 +123,7 @@ describe("buildTranscript", () => {
     });
     expect(out).toContain("## Raw JSON appendix");
     // The appendix parses back to the two messages in the active thread.
-    const jsonMatch = out.match(/```json\n([\s\S]*?)\n```/g);
-    expect(jsonMatch).toBeTruthy();
-    const lastBlock = jsonMatch![jsonMatch!.length - 1].replace(/```json\n|\n```/g, "");
-    const parsed = JSON.parse(lastBlock) as Message[];
+    const parsed = appendix(out);
     expect(parsed).toHaveLength(2);
     expect(parsed[0].id).toBe("m_1");
     expect(parsed[1].id).toBe("m_2");
@@ -242,5 +246,100 @@ describe("buildTranscript", () => {
     expect(out).toContain("tool_call · write · streaming");
     // A still-streaming call has no result yet — don't print a result block.
     expect(out).not.toContain("**result**");
+  });
+  it("keeps long text, tool args and tool results in full", () => {
+    // Each value is far past the old 8,000-char cap. Distinct line numbers
+    // prove that no middle or tail section went missing.
+    const lines = (tag: string, n: number) =>
+      Array.from({ length: n }, (_, i) => `${tag} line ${i}`).join("\n");
+    const longText = lines("text", 3000);
+    const longCommand = lines("arg", 3000);
+    const longOutput = lines("output", 5000);
+    const long: Message = {
+      id: "m_long",
+      sessionId: "sess_1",
+      threadId: "th_1",
+      role: "assistant",
+      content: longText,
+      parts: [
+        { kind: "text", text: longText },
+        {
+          kind: "tool_call",
+          callId: "call_long",
+          toolName: "bash",
+          status: "error",
+          args: { command: longCommand },
+          result: { content: [{ type: "text", text: longOutput }] },
+          error: longOutput,
+        },
+      ],
+      createdAt: 1_700_000_006_000,
+    };
+    expect(longOutput.length).toBeGreaterThan(50_000);
+    const out = buildTranscript({
+      session,
+      threadId: "th_1",
+      messages: [long],
+      agentStatus: "idle",
+      conn: "open",
+    });
+    expect(out).not.toMatch(/\[transcript cut \d+/);
+    expect(out).not.toContain("truncated");
+    // Timeline: text and error print raw; args and result print as JSON.
+    expect(out).toContain(longText);
+    expect(out).toContain(longOutput);
+    expect(out).toContain(JSON.stringify(longCommand));
+    expect(out).toContain(JSON.stringify(longOutput));
+    // Appendix: the JSON still parses and carries every value verbatim.
+    const [parsed] = appendix(out);
+    expect(parsed.content).toBe(longText);
+    const call = parsed.parts?.[1];
+    expect(call?.kind).toBe("tool_call");
+    if (call?.kind !== "tool_call") return;
+    expect(call.args).toEqual({ command: longCommand });
+    expect(call.result).toEqual({ content: [{ type: "text", text: longOutput }] });
+    expect(call.error).toBe(longOutput);
+  });
+
+  it("marks a string over the cap with the count of dropped chars", () => {
+    const huge = "x".repeat(TRANSCRIPT_STRING_MAX_CHARS + 1234);
+    const big: Message = {
+      id: "m_huge",
+      sessionId: "sess_1",
+      threadId: "th_1",
+      role: "assistant",
+      content: "",
+      parts: [
+        {
+          kind: "tool_call",
+          callId: "call_huge",
+          toolName: "read",
+          status: "completed",
+          args: { path: "big.log" },
+          result: { text: huge },
+        },
+      ],
+      createdAt: 1_700_000_007_000,
+    };
+    const out = buildTranscript({
+      session,
+      threadId: "th_1",
+      messages: [big],
+      agentStatus: "idle",
+      conn: "open",
+    });
+    const marker = `\n… [transcript cut 1234 of ${huge.length} chars]`;
+    expect(out).toContain(JSON.stringify(marker).slice(1, -1));
+    // The cut is per string, so the appendix stays valid JSON.
+    const [parsed] = appendix(out);
+    const call = parsed.parts?.[0];
+    expect(call?.kind).toBe("tool_call");
+    if (call?.kind !== "tool_call") return;
+    expect(call.args).toEqual({ path: "big.log" });
+    const result: unknown = call.result;
+    const text = typeof result === "object" && result !== null && "text" in result ? result.text : undefined;
+    if (typeof text !== "string") throw new Error("appendix result has no text");
+    expect(text.length).toBe(TRANSCRIPT_STRING_MAX_CHARS + marker.length);
+    expect(text.endsWith(marker)).toBe(true);
   });
 });

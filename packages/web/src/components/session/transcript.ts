@@ -31,17 +31,35 @@ export interface TranscriptContext {
 
 const HEADER_RULE = "─".repeat(60);
 
-/** Truncate values that would blow up the transcript (very large tool results). */
-function truncate(text: string, max: number): string {
-  if (text.length <= max) return text;
-  return `${text.slice(0, max)}\n… [truncated ${text.length - max} chars]`;
+/**
+ * Largest string the transcript copies in full. The cap applies to each
+ * string on its own (a message body, one string inside tool args or a tool
+ * result), never to a whole message or to the transcript. It exists only so
+ * that one runaway output cannot make the clipboard write fail.
+ */
+export const TRANSCRIPT_STRING_MAX_CHARS = 500_000;
+
+/** Return `text` unchanged when it fits. Otherwise cut it and append a
+ * marker that tells how many chars the transcript dropped. */
+function capString(text: string): string {
+  if (text.length <= TRANSCRIPT_STRING_MAX_CHARS) return text;
+  let end = TRANSCRIPT_STRING_MAX_CHARS;
+  // Do not split a surrogate pair at the cut.
+  const code = text.charCodeAt(end - 1);
+  if (code >= 0xd800 && code <= 0xdbff) end -= 1;
+  return `${text.slice(0, end)}\n… [transcript cut ${text.length - end} of ${text.length} chars]`;
 }
 
+/** Serialize `value` with every string at any depth passed through
+ * `capString`. The output always stays valid JSON. */
 function safeJson(value: unknown, indent = 2): string {
   try {
     // JSON.stringify(undefined) returns undefined (not a string) — a
     // streaming tool_call can have no args yet.
-    return JSON.stringify(value, null, indent) ?? "undefined";
+    return (
+      JSON.stringify(value, (_key, v: unknown) => (typeof v === "string" ? capString(v) : v), indent) ??
+      "undefined"
+    );
   } catch (err) {
     return `<unserializable: ${err instanceof Error ? err.message : String(err)}>`;
   }
@@ -59,8 +77,7 @@ function formatTimestamp(ms: number): string {
  * Shallow-copy a message with any attachment `url` fields truncated to the
  * first 80 chars. A single `data:image/png;base64,…` URL can be a megabyte;
  * dumping the raw payload turns the appendix into noise for debug-paste
- * use. `truncate` is a per-value guard on the whole `safeJson` output — it
- * clips the whole doc, not per-url — so shorten here.
+ * use. The general string cap is far larger than this, so shorten here.
  */
 function shortenAttachmentUrls(m: Message): Message {
   if (!m.attachments || m.attachments.length === 0) return m;
@@ -79,7 +96,7 @@ function renderMessage(m: Message, index: number): string {
   if (m.queueItemId) lines.push(`queueItemId: ${m.queueItemId}`);
   lines.push("");
   if (m.content && m.content.trim().length > 0) {
-    lines.push(truncate(m.content, 8000));
+    lines.push(capString(m.content));
     lines.push("");
   }
   if (m.attachments && m.attachments.length > 0) {
@@ -102,7 +119,7 @@ function renderMessage(m: Message, index: number): string {
     if (part.kind === "text") {
       const text = part.text?.trim();
       if (text) {
-        lines.push(truncate(text, 8000));
+        lines.push(capString(text));
         lines.push("");
       }
     } else if (part.kind === "tool_call") {
@@ -110,18 +127,18 @@ function renderMessage(m: Message, index: number): string {
       lines.push("");
       lines.push("**args**");
       lines.push("```json");
-      lines.push(truncate(safeJson(part.args), 8000));
+      lines.push(safeJson(part.args));
       lines.push("```");
       if (part.status !== "running" && part.status !== "streaming") {
         lines.push("**result**");
         lines.push("```json");
-        lines.push(truncate(safeJson(part.result), 8000));
+        lines.push(safeJson(part.result));
         lines.push("```");
       }
       if (part.error) {
         lines.push("**error**");
         lines.push("```");
-        lines.push(truncate(part.error, 4000));
+        lines.push(capString(part.error));
         lines.push("```");
       }
       lines.push("");
@@ -186,11 +203,11 @@ export function buildTranscript(ctx: TranscriptContext): string {
     `## Raw JSON appendix`,
     ``,
     `Machine-readable snapshot of the same messages the UI rendered — includes`,
-    `every tool-call arg/result verbatim (bounded to the same per-value truncation`,
-    `as the timeline above). Paste this into a debugger to replay state.`,
+    `every tool-call arg/result verbatim (a string longer than ${TRANSCRIPT_STRING_MAX_CHARS} chars`,
+    `ends in a "transcript cut" marker). Paste this into a debugger to replay state.`,
     ``,
     "```json",
-    truncate(safeJson(inThread.map(shortenAttachmentUrls)), 64_000),
+    safeJson(inThread.map(shortenAttachmentUrls)),
     "```",
   ];
 
