@@ -227,6 +227,15 @@ describe("normalizeForAgent", () => {
   });
 });
 
+describe("normalizeForAgent with a payload", () => {
+  it("adds a bot post's attachment fields to its text", async () => {
+    const transport = makeTransport();
+    fake.setMembers([]);
+    const payload = { subtype: "bot_message", text: "promotion failed", attachments: [{ fields: [{ title: "Promotion", value: "prod.4b9e82d" }] }] };
+    expect(await transport.normalizeForAgent({ text: "promotion failed", payload })).toEqual({ senderName: undefined, text: "promotion failed\nPromotion: prod.4b9e82d" });
+  });
+});
+
 describe("parseUpdate — the agent surface events", () => {
   it("routes a direct message and anchors the turn to the user's own message", () => {
     const transport = makeTransport();

@@ -65,6 +65,7 @@ import { fetchThreadTranscript } from "./thread-context.js";
 import { enrichSlackText } from "./text-enrich.js";
 import { escapeMrkdwn, markdownToSlackMrkdwn, neutralizeSlackMentions } from "./format.js";
 import { verifySlackDelivery } from "./verify.js";
+import { slackMessageExtraText } from "../message-text.js";
 
 const PROGRESS_CREATE_REJECTIONS = new Set([
   "invalid_blocks", "invalid_arguments", "missing_scope", "not_in_channel", "channel_not_found", "not_authed",
@@ -1224,9 +1225,11 @@ export class SlackTransport implements ChannelTransport {
   /** Normalize an inbound message for an agent — see `ChannelTransport`. Resolves
    *  the sender's name and cleans the text so the model never sees raw ids or
    *  Slack markup. */
-  async normalizeForAgent(msg: { userId?: string; text: string }): Promise<{ senderName?: string; text: string }> {
+  async normalizeForAgent(msg: { userId?: string; text: string; payload?: unknown }): Promise<{ senderName?: string; text: string }> {
     const senderName = msg.userId ? (await this.api.usersInfo(msg.userId).catch(() => null))?.displayName : undefined;
-    const text = await enrichSlackText(this.api, msg.text, this.botUserId);
+    // A bot post keeps its fields in blocks or attachments.
+    const extra = msg.payload !== null && typeof msg.payload === "object" ? slackMessageExtraText({ ...msg.payload }) : "";
+    const text = await enrichSlackText(this.api, [msg.text, extra].filter(Boolean).join("\n"), this.botUserId);
     return { senderName, text };
   }
 

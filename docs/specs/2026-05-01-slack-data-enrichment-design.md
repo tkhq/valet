@@ -93,6 +93,8 @@ A bot, app, or workflow post often keeps its real content in Block Kit `blocks` 
 
 `slackMessageExtraText` (`src/message-text.ts`) builds it. It drops lines that repeat `text` or an earlier line, and caps the result at 4,000 characters. A person's message carries a `rich_text` block that mirrors `text`, so `rich_text` counts only for a bot or app post or a message with no `text`. `content` is absent when it adds nothing. The read actions resolve mentions in `content` as in `text`, and the `read_history` keyword filter matches both. The inbound thread transcript (`thread-context.ts`) appends the same lines to each message.
 
+An event delivery gets the same lines. `ChannelTransport.normalizeForAgent` takes the raw `payload`, and the Slack transport appends the block and attachment text before it resolves mentions. The event dispatcher passes the payload on both paths. For a post with a reply origin, the readable text is the body. A bot post has no reply origin, so its body is the summary, then the readable text, then the JSON excerpt, which a Block Kit payload can fill before its fields.
+
 #### Message subtype filtering
 
 `read_history` gets a new optional `include_subtypes` boolean parameter (default `false`). When false, messages with housekeeping subtypes are filtered out:

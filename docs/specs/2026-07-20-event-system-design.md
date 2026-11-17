@@ -270,7 +270,8 @@ implemented in `packages/api/src/events/dispatcher.ts`:
     claim after a partial failure (run started, delivered-UPDATE lost) resolves
     to the same run instead of starting a duplicate.
   - **orchestrator** — prompt the owner's orchestrator with `SignalContent`
-    (`signalType: event.key`, `body`: summary + payload excerpt,
+    (`signalType: event.key`, `body`: summary + the transport's readable
+    text, when it has one (2026-11-17) + payload excerpt,
     `attributes`: refs) — same delivery path ChannelHost uses. `admitSignal`
     doesn't apply (its edge ACL authorizes session→session edges and an event
     has no sender session); its second-layer defense is replicated in
