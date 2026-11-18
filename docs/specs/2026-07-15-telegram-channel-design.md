@@ -37,7 +37,7 @@ This pass turns those shapes into the first working channel, and in doing so pin
 
 5. **Identity linking: one-time code from web settings.** New settings surface "Connected accounts → Telegram":
    - `POST /api/me/identity-links/telegram/start` mints a single-use, 10-minute code (random, hash stored) and returns the deep link `https://t.me/<bot_username>?start=<code>`.
-   - The transport surfaces `/start <code>` as `kind: "command"`; the host verifies the code and writes a `userIdentityLinks` row (`channelType: "telegram"`, `externalId`: Telegram numeric user id → Valet user id). Re-linking replaces the row; unlink is a settings action (`DELETE`).
+   - The transport surfaces `/start <code>` as `kind: "command"`; the host verifies the code and writes a `userIdentityLinks` row (`channelType: "telegram"`, `externalId`: Telegram numeric user id → Valet user id). Re-linking replaces the row for the same Valet user. The host refuses to move a Telegram account that is already linked to a different Valet user, and the confirmation names the Valet account it linked to. Unlink is a settings action (`DELETE`).
    - Messages from unlinked senders get one polite "link your account at …" reply per chat per hour (rate-limited in memory) plus a drop-log row.
 
 6. **Routing: identity link → orchestrator, no binding rows this pass.** For a DM: resolve sender via `userIdentityLinks` → that user's orchestrator session → thread key `telegram:{chatId}` → `thread.submitPrompt(text, …)` as a **user prompt** (human messages are prompts, not signals — signals remain agent-to-agent per the orchestrator spec). The `channelBindings` table stays shape-only; it's the seam for explicit chat↔session binds (groups, Slack channels) in a later pass, and this spec doesn't touch it.
