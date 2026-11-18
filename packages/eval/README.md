@@ -386,3 +386,13 @@ pnpm --filter @valet/eval test
 Faux-provider tests cover the runner, checks, judge mechanics, sampling,
 and catalogs without network. Live tests (judge calibration, product
 drive) run only when `ANTHROPIC_API_KEY` is set.
+
+## Secret-intake detection
+
+`pnpm --filter @valet/eval secret-intake` scores the detectors that catch keys pasted into messages against a generated, labeled set (`src/secret-intake/`). The set uses random values in each provider's shape and never a real key. Design and results: `docs/specs/2026-11-17-secret-intake-design.md`.
+
+| Flag | Effect |
+|---|---|
+| `--held-out` | Use providers, templates and look-alikes that were not used to tune stage 1. |
+| `--model` | Add stage 2, a model that confirms low-score candidates. Needs `VALET_LLM_GATEWAY_URL` with `VALET_API_KEY` or `VALET_API_KEY_FILE`, or `ANTHROPIC_API_KEY`. `SECRET_INTAKE_MODEL` picks the model (default `claude-haiku-5-5`). |
+| `--json <file>` | Write per-detector scores and per-category recall. |

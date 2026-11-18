@@ -6,15 +6,21 @@
  * reaches the model. A note at the end of the message tells the user and
  * the agent what happened.
  *
- * Only `known` formats (`@valet/shared` `detectSecrets`). A guessed match
- * would rewrite an ordinary message.
+ * Keys in a known provider format, and stage-1 candidates scored at least
+ * 0.5, are always caught. With a model (`confirm`, the organization's `xs`
+ * tier), weaker candidates are caught too when the model confirms them. The
+ * model may add candidates but never veto a strong one: in the eval
+ * (`docs/specs/2026-11-17-secret-intake-design.md`) a veto cost recall and
+ * prevented no false alarm. Without a model verdict, a weak candidate is
+ * left as text.
  *
  * The api holds the value in memory for this request: it arrived in the
  * message. The note says so and asks the user to rotate a key that was
  * also shared elsewhere, for example in a Slack channel, where the
  * original message stays.
  */
-import { detectSecrets, replaceSecrets, type SecretCandidate } from "@valet/shared";
+import { detectSecrets, findSecretCandidates, replaceSecrets, suggestSecretName, type SecretTokenCandidate } from "@valet/shared";
+import type { ConfirmIntake } from "./intake-confirm.js";
 import { SecretStoreError } from "./provider.js";
 import { secretReference, type SecretActor, type SecretScope, type SecretStoreService } from "./service.js";
 
@@ -33,6 +39,40 @@ async function freeName(store: SecretStoreService, actor: SecretActor, scope: Se
   return `${base}_${Date.now()}`;
 }
 
+/** Stage-1 score at which a candidate is caught without asking the model. */
+export const STRONG_CANDIDATE_SCORE = 0.5;
+/** Lowest stage-1 score the model is asked about. */
+export const MODEL_CANDIDATE_SCORE = 0.2;
+
+interface Caught {
+  candidate: SecretTokenCandidate;
+  name: string;
+  label: string;
+}
+
+/** The candidates to replace: known formats, plus confirmed or strong others. */
+export async function catchSecrets(
+  text: string,
+  opts: { orgId: string; confirm?: ConfirmIntake; credentialRequested?: boolean },
+): Promise<Caught[]> {
+  const all = findSecretCandidates(text, opts.credentialRequested ? { credentialRequested: true } : {});
+  const caught: Caught[] = all
+    .filter((c) => c.reason === "known")
+    .map((c) => ({ candidate: c, name: suggestSecretName(c), label: (c.provider ?? "key").toLowerCase() }));
+  for (const c of all) {
+    if (c.reason !== "known" && c.score >= STRONG_CANDIDATE_SCORE) caught.push({ candidate: c, name: suggestSecretName(c), label: "key" });
+  }
+  const weak = all.filter((c) => c.reason !== "known" && c.score >= MODEL_CANDIDATE_SCORE && c.score < STRONG_CANDIDATE_SCORE);
+  if (weak.length > 0 && opts.confirm) {
+    const verdicts = await opts.confirm({ orgId: opts.orgId, text, candidates: weak, credentialRequested: opts.credentialRequested === true });
+    weak.forEach((c, i) => {
+      const verdict = verdicts[i];
+      if (verdict?.secret === true) caught.push({ candidate: c, name: suggestSecretName(c, verdict.provider), label: "key" });
+    });
+  }
+  return caught.sort((a, b) => a.candidate.start - b.candidate.start);
+}
+
 export async function scrubInboundSecrets(deps: {
   store: SecretStoreService;
   actor: SecretActor;
@@ -40,17 +80,20 @@ export async function scrubInboundSecrets(deps: {
   text: string;
   /** Where the message came from, for the note. */
   channel?: "web" | "channel";
+  /** Stage 2. Without it, only known formats and strong candidates are caught. */
+  confirm?: ConfirmIntake;
 }): Promise<ScrubResult> {
   const { store, actor, scope, text } = deps;
-  const candidates = detectSecrets(text).filter((c) => c.confidence === "known");
-  if (candidates.length === 0 || !store.enabled) return { text, saved: [], removed: 0 };
+  if (!store.enabled) return { text, saved: [], removed: 0 };
+  const caught = await catchSecrets(text, { orgId: actor.orgId, ...(deps.confirm ? { confirm: deps.confirm } : {}) });
+  if (caught.length === 0) return { text, saved: [], removed: 0 };
 
-  const replacements: { candidate: SecretCandidate; with: string }[] = [];
+  const replacements: { candidate: { start: number; end: number }; with: string }[] = [];
   const saved: string[] = [];
   let removed = 0;
-  for (const candidate of candidates) {
+  for (const { candidate, name: suggested, label } of caught) {
     try {
-      const name = await freeName(store, actor, scope, candidate.suggestedName);
+      const name = await freeName(store, actor, scope, suggested);
       await store.saveValue(actor, scope, name, candidate.value);
       const reference = secretReference(scope, name);
       saved.push(reference);
@@ -58,7 +101,7 @@ export async function scrubInboundSecrets(deps: {
     } catch (err) {
       if (!(err instanceof SecretStoreError)) throw err;
       removed += 1;
-      replacements.push({ candidate, with: `[removed ${candidate.label.toLowerCase()}]` });
+      replacements.push({ candidate, with: `[removed ${label}]` });
     }
   }
 
@@ -101,7 +144,16 @@ export async function scrubSessionInput(
 ): Promise<string> {
   if (!store?.enabled) return text;
   const scope: SecretScope = session.ownerType === "team" && session.ownerId ? { kind: "team", teamId: session.ownerId } : { kind: "personal" };
-  return (await scrubInboundSecrets({ store, actor: { orgId: session.orgId, userId: session.userId }, scope, text, channel })).text;
+  return (
+    await scrubInboundSecrets({
+      store,
+      actor: { orgId: session.orgId, userId: session.userId },
+      scope,
+      text,
+      channel,
+      ...(store.confirmIntake ? { confirm: store.confirmIntake } : {}),
+    })
+  ).text;
 }
 
 /**

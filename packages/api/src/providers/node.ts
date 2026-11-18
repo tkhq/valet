@@ -84,6 +84,7 @@ import { buildSecretTools } from "../engine/secret-tools.js";
 import { createCredentialKeyring, credentialCipher } from "../services/secret-store/credential-keys.js";
 import { createSecretStoreService, disabledSecretStore } from "../services/secret-store/service.js";
 import { secretUseServiceFromEnv } from "../services/secret-use.js";
+import { intakeConfirmer } from "../services/secret-store/intake-confirm.js";
 import { ServiceProbes } from "../plugins/service-probe.js";
 import { loadNodeModulesPlugins } from "../plugins/node-modules-loader.js";
 import { bundledPlugins } from "../plugins/registry.gen.js";
@@ -531,7 +532,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // instead of on a user's first save.
   const secretStoreProvider = secretStoreProviderFromEnv(process.env);
   const secretStore = secretStoreProvider
-    ? createSecretStoreService({ db, provider: secretStoreProvider })
+    ? createSecretStoreService({ db, provider: secretStoreProvider, confirmIntake: intakeConfirmer(db, engineCredentials) })
     : disabledSecretStore();
   // Half-set use service variables throw here, at boot.
   const secretUse = secretUseServiceFromEnv(process.env);

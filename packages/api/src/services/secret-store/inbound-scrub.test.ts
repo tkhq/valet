@@ -57,11 +57,18 @@ describe("scrubInboundSecrets", () => {
     expect(result.text).toMatch(/delete it there, and rotate the key/);
   });
 
-  it("leaves a message without a known key unchanged, including an assignment", async () => {
+  it("leaves a commit SHA and catches a credential assignment", async () => {
     const fake = fakeStore();
     const text = "deploy 3f9a2c1d8e7b6a5f4c3d2e1f0a9b8c7d6e5f4a3b with ACME_TOKEN=q8w7e6r5t4y3u2i1";
+    const result = await scrubInboundSecrets({ ...base, store: fake.store, text });
+    expect(fake.saved).toEqual([{ name: "ACME_TOKEN", value: "q8w7e6r5t4y3u2i1" }]);
+    expect(result.text).toContain("deploy 3f9a2c1d8e7b6a5f4c3d2e1f0a9b8c7d6e5f4a3b with ACME_TOKEN=secret://personal/ACME_TOKEN");
+  });
+
+  it("leaves a message with nothing key-like unchanged", async () => {
+    const fake = fakeStore();
+    const text = "deploy 3f9a2c1d8e7b6a5f4c3d2e1f0a9b8c7d6e5f4a3b to staging";
     expect(await scrubInboundSecrets({ ...base, store: fake.store, text })).toEqual({ text, saved: [], removed: 0 });
-    expect(fake.saved).toEqual([]);
   });
 
   it("saves to the team's secrets for a team session and to the person's own otherwise", async () => {
@@ -84,5 +91,65 @@ describe("scrubInboundSecrets", () => {
     expect(maskKnownSecrets(fake.store, `use ${OPENAI} now, ACME_TOKEN=q8w7e6r5t4y3u2i1`)).toBe("use [removed openai key] now, ACME_TOKEN=q8w7e6r5t4y3u2i1");
     expect(fake.saved).toEqual([]);
     expect(maskKnownSecrets(undefined, OPENAI)).toBe(OPENAI);
+  });
+});
+
+describe("scrubInboundSecrets stage 2", () => {
+  // Random values made for this test, not real keys.
+  const HETZNER = "q7Rk2PzW9vLmX4cT8bNe1JyH6uFa3GdS0oViKtYw5ZlQrBnMxCe7Ts2PjUh9Wd4A";
+  const DATADOG = "3f9c2b7e1a4d8f6c0b5e9a7d2c4f1e8b";
+
+  it("saves a strong formatless key without asking the model", async () => {
+    let calls = 0;
+    const fake = fakeStore();
+    const result = await scrubInboundSecrets({
+      ...base,
+      store: fake.store,
+      text: `here's my hetzner api key ${HETZNER} can you deploy`,
+      confirm: async ({ candidates }) => {
+        calls++;
+        return candidates.map(() => ({ secret: false }));
+      },
+    });
+    expect(calls).toBe(0);
+    expect(fake.saved).toEqual([{ name: "HETZNER_API_KEY", value: HETZNER }]);
+    expect(result.text).toContain("secret://personal/HETZNER_API_KEY");
+  });
+
+  it("leaves a weak candidate the model rejects", async () => {
+    const fake = fakeStore();
+    const text = `look at ${DATADOG} later`;
+    const result = await scrubInboundSecrets({ ...base, store: fake.store, text, confirm: async ({ candidates }) => candidates.map(() => ({ secret: false })) });
+    expect(fake.saved).toEqual([]);
+    expect(result.text).toBe(text);
+  });
+
+  it("saves a weak candidate the model confirms, named after its provider", async () => {
+    const fake = fakeStore();
+    await scrubInboundSecrets({
+      ...base,
+      store: fake.store,
+      text: `${DATADOG} <- that's the new one`,
+      confirm: async ({ candidates }) => candidates.map(() => ({ secret: true, provider: "algolia" })),
+    });
+    expect(fake.saved).toEqual([{ name: "ALGOLIA_API_KEY", value: DATADOG }]);
+  });
+
+  it("without a model verdict, catches only strong candidates", async () => {
+    const strong = fakeStore();
+    await scrubInboundSecrets({ ...base, store: strong.store, text: `hetzner key ${HETZNER}`, confirm: async ({ candidates }) => candidates.map(() => undefined) });
+    expect(strong.saved).toHaveLength(1);
+    const weak = fakeStore();
+    const text = `cherry-pick ${DATADOG} onto main`;
+    const result = await scrubInboundSecrets({ ...base, store: weak.store, text, confirm: async ({ candidates }) => candidates.map(() => undefined) });
+    expect(weak.saved).toEqual([]);
+    expect(result.text).toBe(text);
+  });
+
+  it("makes no model call when nothing looks like a key", async () => {
+    let calls = 0;
+    const fake = fakeStore();
+    await scrubInboundSecrets({ ...base, store: fake.store, text: "deploy the staging branch please", confirm: async () => { calls++; return []; } });
+    expect(calls).toBe(0);
   });
 });

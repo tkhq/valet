@@ -18,6 +18,7 @@
  * `/api/sandbox-secrets/resolve` is the one reader and passes the session
  * principal to `read`.
  */
+import type { ConfirmIntake } from "./intake-confirm.js";
 import { and, eq, sql } from "drizzle-orm";
 import type { AppDb, AppQueryable } from "../../lib/drizzle.js";
 import { secretStoreSpaces } from "../../schema/index.js";
@@ -202,6 +203,8 @@ export interface SecretUseLookup {
 
 export interface SecretStoreService {
   readonly enabled: boolean;
+  /** Stage 2 of secret intake: a model that confirms pasted-key candidates. */
+  readonly confirmIntake?: ConfirmIntake;
   /** The provider's name for users, or null when the store is off. */
   readonly providerLabel: string | null;
   list(actor: SecretActor, scope: SecretScope): Promise<SecretSummaryRow[]>;
@@ -263,6 +266,7 @@ export function readRefusal(scope: SecretScope): string {
 export function createSecretStoreService(deps: {
   db: AppDb;
   provider: SecretStoreProvider;
+  confirmIntake?: ConfirmIntake;
   now?: () => number;
   log?: (msg: string, err: unknown) => void;
 }): SecretStoreService {
@@ -469,6 +473,7 @@ export function createSecretStoreService(deps: {
 
   return {
     enabled: true,
+    ...(deps.confirmIntake ? { confirmIntake: deps.confirmIntake } : {}),
     providerLabel: provider.label,
 
     async list(actor, scope) {
