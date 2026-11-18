@@ -1,14 +1,13 @@
 import { useState } from "react";
+import { Link } from "@tanstack/react-router";
 import { Turnkey, WebauthnStamper } from "@turnkey/sdk-browser";
-import { useQueryClient } from "@tanstack/react-query";
 import { api } from "~/api/client";
-import { qkCommitSigning } from "~/api/commit-signing";
-import type { CommitSigningKeySummary, GetCommitSigningResponse } from "@valet/api/wire";
+import type { CommitSigningHistoryEntry, CommitSigningKeySummary, GetCommitSigningResponse } from "@valet/api/wire";
 import { Badge, Button, Spinner } from "~/components/primitives";
 import { FieldRow } from "~/components/settings/field-row";
 import { errorText } from "~/lib/error-text";
-import { formatDateOr } from "~/lib/format-when";
-import { useCommitSigning, useEnrollCommitSigning } from "~/api/commit-signing";
+import { formatDateOr, formatDateTime } from "~/lib/format-when";
+import { useCommitSigning, useEnrollCommitSigning, useFinishCommitSigningKey } from "~/api/commit-signing";
 import { useMe } from "~/api/settings";
 import { SigningKeyModal } from "~/components/settings/signing-key-modal";
 
@@ -30,7 +29,7 @@ export function CommitSigningSection() {
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [keyOpen, setKeyOpen] = useState(false);
-  const qc = useQueryClient();
+  const finish = useFinishCommitSigningKey();
 
   if (signingQ.isLoading) {
     return (
@@ -67,8 +66,7 @@ export function CommitSigningSection() {
       userVerification: "required",
       ...(credentialId ? { allowCredentials: [{ id: base64UrlToBytes(credentialId), type: "public-key" as const }] } : {}),
     }).stamp(body);
-    await api.finishCommitSigningKey({ body, ...signed });
-    await qc.invalidateQueries({ queryKey: qkCommitSigning.all() });
+    await finish.mutateAsync({ body, ...signed });
   };
 
   const onSetUp = async () => {
@@ -171,7 +169,50 @@ export function CommitSigningSection() {
           </ul>
         </FieldRow>
       )}
+      {data.history.length > 0 && (
+        <FieldRow label="Signed commits" hint="Each row is one passkey approval. The activity id finds the signature in your Turnkey organization.">
+          <ul className="space-y-3 text-sm text-ink">
+            {data.history.map((entry) => (
+              <SigningHistoryRow key={`${entry.sessionId}:${entry.commits[entry.commits.length - 1]?.new ?? ""}`} entry={entry} />
+            ))}
+          </ul>
+        </FieldRow>
+      )}
     </>
+  );
+}
+
+function SigningHistoryRow({ entry }: { entry: CommitSigningHistoryEntry }) {
+  return (
+    <li className="space-y-1">
+      <div className="flex flex-wrap items-center gap-x-2">
+        <span className="min-w-0 break-words">
+          {entry.repo} · {entry.branch}
+        </span>
+        <span className="text-xs text-muted">{formatDateTime(entry.signedAt)}</span>
+        <Link
+          to="/sessions/$sessionId"
+          params={{ sessionId: entry.sessionId }}
+          search={{ thread: entry.threadId }}
+          className="inline-flex min-h-11 items-center text-xs text-accent-600 underline sm:min-h-0"
+        >
+          approval
+        </Link>
+      </div>
+      {entry.commits.map((commit, i) => (
+        <div key={commit.new} className="text-xs text-muted">
+          <a
+            href={`https://github.com/${entry.repo}/commit/${commit.new}`}
+            target="_blank"
+            rel="noreferrer"
+            className="font-mono text-accent-600 underline"
+          >
+            {commit.new.slice(0, 7)}
+          </a>{" "}
+          · Turnkey activity <span className="break-all font-mono">{entry.activityIds[i] ?? "unknown"}</span>
+        </div>
+      ))}
+    </li>
   );
 }
 

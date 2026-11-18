@@ -36,7 +36,25 @@ export const COLLECTIONS = {
    * push, reuses them instead of asking for the passkey again.
    */
   signedChains: "signed_chains",
+  /**
+   * Scope `user`, key `<sessionId>:<resume key>`: one row per passkey-signed
+   * chain (`SigningHistoryDoc`), listed in Settings, Commit signing.
+   */
+  signingHistory: "signing_history",
 } as const;
+
+/** One passkey-signed chain, for the person's signing history. */
+export interface SigningHistoryDoc {
+  repo: string;
+  branch: string;
+  /** Oldest first: each unsigned commit and the signed commit that replaced it. */
+  commits: Array<{ old: string; new: string }>;
+  signedAt: number;
+  /** One Turnkey activity per signed commit, in the same order. */
+  activityIds: string[];
+  sessionId: string;
+  threadId: string;
+}
 
 export interface PresenceStepsDoc {
   signatures: Array<{

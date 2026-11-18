@@ -49,6 +49,7 @@ import {
   type PersonSigningKey,
   type PresenceStepsDoc,
   type SessionKeyDoc,
+  type SigningHistoryDoc,
   type SigningKeyDoc,
   type SigningKeyIndexDoc,
 } from "../store.js";
@@ -303,7 +304,19 @@ export function buildTurnkeyActionPlugin(overrides: Partial<SigningDeps> = {}): 
       const signatures = (steps?.doc.signatures ?? []).map((s) => Buffer.from(s.signatureHex, "hex"));
       const written = await writeChain(signatures);
       if ("error" in written) return fail(written.error);
-      if (steps) await chainsStore?.put(COLLECTIONS.signedChains, chainKey, steps.doc);
+      if (steps) {
+        await chainsStore?.put(COLLECTIONS.signedChains, chainKey, steps.doc);
+        const history: SigningHistoryDoc = {
+          repo,
+          branch,
+          commits: written.commits,
+          signedAt: deps.now(),
+          activityIds: steps.doc.signatures.map((s) => s.activityId),
+          sessionId: ctx.sessionId,
+          threadId: ctx.threadId,
+        };
+        await ctx.pluginStore?.user(ctx.userId).put(COLLECTIONS.signingHistory, `${ctx.sessionId}:${chainKey}`, history);
+      }
       return signed(written, false);
     },
   });

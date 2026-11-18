@@ -122,7 +122,7 @@ function seedUsage(client: QueryClient): void {
 }
 
 function seedIntegrations(client: QueryClient): void {
-  client.setQueryData(qkCommitSigning.all(), { configured: false, enrolled: false, keys: [] });
+  client.setQueryData(qkCommitSigning.all(), { configured: false, enrolled: false, keys: [], history: [] });
   client.setQueryData<ListPluginsResponse>(qkIntegrations.plugins(), stressPlugins);
   client.setQueryData<ListPluginsResponse>(qkIntegrations.plugins(INTEGRATIONS_TEAM_ID), stressPlugins);
   client.setQueryData<ListCredentialsResponse>(qkIntegrations.credentials("user"), stressUserCredentials);

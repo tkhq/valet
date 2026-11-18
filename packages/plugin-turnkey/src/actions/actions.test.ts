@@ -10,6 +10,7 @@ import {
   DEFAULT_KEY,
   type EnrollmentDoc,
   type PresenceStepsDoc,
+  type SigningHistoryDoc,
   type SigningKeyDoc,
   type SigningKeyIndexDoc,
 } from "../store.js";
@@ -164,6 +165,19 @@ describe("turnkey.sign_commits", () => {
     expect(head).not.toBe(UNSIGNED_2_SHA);
     expect(head).not.toBe(SIGNED_1_SHA);
     expect(s.turnkey.calls).toHaveLength(0);
+
+    const history = await s.store.user("user-1").list<SigningHistoryDoc>(COLLECTIONS.signingHistory);
+    expect(history.items.map((r) => r.doc)).toEqual([
+      {
+        repo: "tkhq/valet",
+        branch: "feature",
+        commits: [{ old: UNSIGNED_1_SHA, new: expect.any(String) }, { old: UNSIGNED_2_SHA, new: head }],
+        signedAt: NOW,
+        activityIds: ["act-0", "act-1"],
+        sessionId: "session-1",
+        threadId: "thread-1",
+      },
+    ]);
   });
 
   it("shows GitHub's view of a pushed commit and the sandbox's numstat for an unpushed one", async () => {
@@ -269,6 +283,7 @@ describe("turnkey.sign_commits", () => {
     expect(again).toMatchObject({ success: true, data: { head: (first.data as { head: string }).head, reused: true } });
     expect(ctx.gates).toHaveLength(0);
     expect(s.refs.get("feature")).toBe((first.data as { head: string }).head);
+    expect((await s.store.user("user-1").list(COLLECTIONS.signingHistory)).items).toHaveLength(1);
   });
 
   it("opens a new gate when a stored approval no longer verifies against the key", async () => {

@@ -6,6 +6,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type {
   GetCommitSigningResponse,
+  PresenceStepRequest,
   PostCommitSigningEnrollRequest,
   PostCommitSigningEnrollResponse,
 } from "@valet/api/wire";
@@ -26,6 +27,17 @@ export function useEnrollCommitSigning() {
   const qc = useQueryClient();
   return useMutation<PostCommitSigningEnrollResponse, Error, PostCommitSigningEnrollRequest>({
     mutationFn: (body) => api.enrollCommitSigning(body),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: qkCommitSigning.all() });
+    },
+  });
+}
+
+/** Posts the passkey-stamped key creation that finishes a two-step setup. */
+export function useFinishCommitSigningKey() {
+  const qc = useQueryClient();
+  return useMutation<unknown, Error, PresenceStepRequest>({
+    mutationFn: (body) => api.finishCommitSigningKey(body),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: qkCommitSigning.all() });
     },

@@ -7286,6 +7286,22 @@ export interface GetCommitSigningResponse {
   /** Values the browser needs to create the passkey. */
   passkey?: { apiBaseUrl: string; organizationId: string; rpId?: string };
   keys: CommitSigningKeySummary[];
+  /** Passkey-signed commits, newest first, at most 50. */
+  history: CommitSigningHistoryEntry[];
+}
+
+/** One passkey approval: the commits it signed and the Turnkey activity behind each signature. */
+export interface CommitSigningHistoryEntry {
+  repo: string;
+  branch: string;
+  /** Oldest first: each unsigned commit and the signed commit that replaced it. */
+  commits: Array<{ old: string; new: string }>;
+  signedAt: number;
+  /** One Turnkey activity per signed commit, in the same order. */
+  activityIds: string[];
+  /** The thread that holds the approval card. */
+  sessionId: string;
+  threadId: string;
 }
 
 export interface CommitSigningKeySummary {

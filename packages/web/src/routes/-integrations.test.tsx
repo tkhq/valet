@@ -23,8 +23,9 @@ import type {
 } from "@valet/api/wire";
 
 vi.mock("~/api/commit-signing", () => ({
-  useCommitSigning: () => ({ data: { configured: false, enrolled: false, keys: [] }, isLoading: false, error: null }),
+  useCommitSigning: () => ({ data: { configured: false, enrolled: false, keys: [], history: [] }, isLoading: false, error: null }),
   useEnrollCommitSigning: () => ({ mutateAsync: vi.fn(), isPending: false }),
+  useFinishCommitSigningKey: () => ({ mutateAsync: vi.fn(), isPending: false }),
 }));
 
 vi.mock("~/api/workflows", () => ({ useTriggerCatalog: () => ({ data: { catalog: [] } }) }));

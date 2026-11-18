@@ -30,6 +30,7 @@ import {
   DEFAULT_KEY,
   PLUGIN_NAME,
   type EnrollmentDoc,
+  type SigningHistoryDoc,
   type SigningKeyDoc,
   type SigningKeyIndexDoc,
 } from "@valet/plugin-turnkey/store";
@@ -40,6 +41,7 @@ import { resolveUserApiToken } from "../services/github-tokens.js";
 import type { AppEnv } from "../env.js";
 import { pluginStore } from "../services/plugin-store.js";
 import type {
+  CommitSigningHistoryEntry,
   CommitSigningKeySummary,
   GetCommitSigningResponse,
   PostCommitSigningEnrollRequest,
@@ -103,6 +105,11 @@ export function parseEnrollBody(body: unknown): PostCommitSigningEnrollRequest |
   };
 }
 
+/** Signing history for Settings: newest first, at most 50 rows. */
+export function recentHistory(docs: SigningHistoryDoc[]): CommitSigningHistoryEntry[] {
+  return [...docs].sort((a, b) => b.signedAt - a.signedAt).slice(0, 50);
+}
+
 /** An enrollment from the shipped per-approval design has no person key and must be set up again. */
 export function needsReenroll(doc: EnrollmentDoc): boolean {
   return doc.signingKey === undefined;
@@ -161,6 +168,7 @@ export function buildCommitSigningRouter(deps: CommitSigningRouteDeps = {}): Hon
     const store = pluginStore(c.var.providers.db, PLUGIN_NAME).user(user.id);
     const enrollment = await store.get<EnrollmentDoc>(COLLECTIONS.enrollment, DEFAULT_KEY);
     const keys = await store.list<SigningKeyDoc>(COLLECTIONS.signingKeys, { limit: 100 });
+    const history = await store.list<SigningHistoryDoc>(COLLECTIONS.signingHistory, { limit: 200 });
     const resp: GetCommitSigningResponse = {
       configured: config !== null,
       enrolled: enrollment !== null,
@@ -188,6 +196,7 @@ export function buildCommitSigningRouter(deps: CommitSigningRouteDeps = {}): Hon
       keys: keys.items
         .map((row) => summarize(row.doc))
         .sort((a, b) => b.notBefore - a.notBefore),
+      history: recentHistory(history.items.map((row) => row.doc)),
     };
     return c.json(resp);
   });
