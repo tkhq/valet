@@ -1,9 +1,5 @@
-import {
-  fauxAssistantMessage,
-
-  registerFauxProvider,
-  Type,
-} from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
+import { Type } from "typebox";
 import { fauxToolCall } from "../src/test-helpers/tool-intent.js";
 import { describe, expect, it } from "vitest";
 import {

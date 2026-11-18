@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { fauxAssistantMessage, registerFauxProvider, Type } from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
+import { Type } from "typebox";
 import { fauxToolCall } from "../src/test-helpers/tool-intent.js";
 import { buildPluginCatalog, builtinTools, Engine, InMemoryEventStream, InMemorySessionStore, pluginCatalogTools, UNATTENDED_WORKFLOW_DECISION, VirtualSandboxProvider, type ActionPlugin, type DecisionResolution, type PolicyResolver, type ToolDef } from "../src/index.js";
 import { CONTINUATION_TOOL_SCOPE_KEY, UNATTENDED_WORKFLOW_KEY } from "@valet/shared";

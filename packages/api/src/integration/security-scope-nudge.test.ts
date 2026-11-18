@@ -1,4 +1,5 @@
-import { fauxAssistantMessage, registerFauxProvider, Type } from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
+import { Type } from "typebox";
 import { fauxToolCall } from "@valet/engine/test-helpers";
 import { codeReviewPresetPlan } from "@valet/plugin-security";
 import { eq } from "drizzle-orm";

@@ -6,7 +6,8 @@
  * reads, and a pass inside such a turn summarizes only the turn's own work.
  */
 import { describe, it, expect } from "vitest";
-import { fauxAssistantMessage, registerFauxProvider, Type, type Context } from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, registerFauxProvider, type Context } from "@earendil-works/pi-ai/compat";
+import { Type } from "typebox";
 import { fauxToolCall } from "../src/test-helpers/tool-intent.js";
 import {
   Engine,

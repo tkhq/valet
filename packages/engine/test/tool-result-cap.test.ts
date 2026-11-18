@@ -3,7 +3,8 @@
  * model gets a preview and the path (Claude Code's tool-result limits).
  */
 import { describe, expect, it } from "vitest";
-import { fauxAssistantMessage, registerFauxProvider, Type } from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
+import { Type } from "typebox";
 import { fauxToolCall } from "../src/test-helpers/tool-intent.js";
 import { Engine, InMemoryEventStream, InMemorySessionStore, VirtualSandboxProvider, type ToolDef } from "../src/index.js";
 import { capToolError, capToolResult, estimateResultTokens, TOOL_RESULT_PREVIEW_CHARS } from "../src/tool-result-cap.js";

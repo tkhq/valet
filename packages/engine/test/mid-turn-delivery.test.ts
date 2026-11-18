@@ -5,13 +5,8 @@
  * running turn runs after it, in order.
  */
 import { describe, it, expect } from "vitest";
-import {
-  fauxAssistantMessage,
-
-  registerFauxProvider,
-  Type,
-  type FauxResponseStep,
-} from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, registerFauxProvider, type FauxResponseStep } from "@earendil-works/pi-ai/compat";
+import { Type } from "typebox";
 import { fauxToolCall } from "../src/test-helpers/tool-intent.js";
 import { TOOL_SCOPE_KEY } from "@valet/shared";
 import {

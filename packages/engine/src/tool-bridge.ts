@@ -1,6 +1,6 @@
 import { MAX_SOURCES_PER_CALL, normalizeSource, type SourceRecord, parseToolIntent, requiresToolIntent, stripToolIntent, withToolIntentSchema, actionInScope, toolInScope, scopeRefusal } from "@valet/shared";
 import { IsObject } from "typebox";
-import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
+import type { AgentTool, AgentToolParams, AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { TextContent, ImageContent } from "@earendil-works/pi-ai/compat";
 import type { ToolDef, ToolContext, ToolResult, ToolAttachment } from "./types.js";
 import { attrTruncate, withSpan } from "./tracing.js";
@@ -72,7 +72,7 @@ export function toAgentTool<TParams extends import("typebox").TSchema>(
         const args = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
         const parsed = stripToolIntent(def, args);
         // The SDK validates the original tool fields immediately after preparation.
-        return { ...parsed.args, [def.intent === "summary" ? "summary" : "intent"]: parsed.intent } as import("typebox").Static<TParams>;
+        return { ...parsed.args, [def.intent === "summary" ? "summary" : "intent"]: parsed.intent } as AgentToolParams<TParams>;
       },
     } : {}),
     // Sequential unless the tool opts in (TKAI-318). One sequential tool

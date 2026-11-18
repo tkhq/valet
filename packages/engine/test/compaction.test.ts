@@ -1,11 +1,7 @@
 import { COMPLETE_SUMMARY } from "./fixtures/compaction-summary.js";
 import { describe, it, expect } from "vitest";
-import {
-  fauxAssistantMessage,
-
-  registerFauxProvider,
-  Type,
-} from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
+import { Type } from "typebox";
 import { fauxToolCall } from "../src/test-helpers/tool-intent.js";
 import { clampMaxTokensToContext } from "@earendil-works/pi-ai/api/simple-options";
 import {

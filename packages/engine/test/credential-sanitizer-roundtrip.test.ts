@@ -1,11 +1,6 @@
 import { describe, expect, it } from "vitest";
-import {
-  fauxAssistantMessage,
-  registerFauxProvider,
-  Type,
-  type AssistantMessage,
-  type FauxResponseStep,
-} from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, registerFauxProvider, type AssistantMessage, type FauxResponseStep } from "@earendil-works/pi-ai/compat";
+import { Type } from "typebox";
 import { fauxToolCall } from "../src/test-helpers/tool-intent.js";
 import {
   Engine,

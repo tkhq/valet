@@ -1,18 +1,6 @@
 import { describe, expect, it } from "vitest";
-import {
-  createAssistantMessageEventStream,
-  fauxAssistantMessage,
-  fauxThinking,
-
-  registerApiProvider,
-  registerFauxProvider,
-  Type,
-  type AssistantMessage,
-  type Model,
-  type Api,
-  type TranscriptContext,
-  type SimpleStreamOptions,
-} from "@earendil-works/pi-ai/compat";
+import { createAssistantMessageEventStream, fauxAssistantMessage, fauxThinking, registerApiProvider, registerFauxProvider, type AssistantMessage, type Model, type Api, type TranscriptContext, type SimpleStreamOptions } from "@earendil-works/pi-ai/compat";
+import { Type } from "typebox";
 import { fauxToolCall } from "../src/test-helpers/tool-intent.js";
 import {
   completedSubmissionOutcome,
