@@ -83,6 +83,7 @@ describe("SecretsPage", () => {
   it("saves a use-only secret when a host is entered, with the picked header", () => {
     data = { enabled: true, provider: "Turnkey", canWrite: true, useAvailable: true, secrets: [] };
     render(<SecretsPage />);
+    expect(screen.getByText(/Set a host to make this secret use-only/)).toBeTruthy();
     fireEvent.change(screen.getByLabelText("Secret name"), { target: { value: "HETZNER" } });
     fireEvent.change(screen.getByLabelText("Secret value"), { target: { value: "tok" } });
     fireEvent.change(screen.getByLabelText("Only for host"), { target: { value: "https://api.hetzner.cloud/v1" } });

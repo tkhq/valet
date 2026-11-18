@@ -153,7 +153,7 @@ function SaveSecretForm({ target, useAvailable }: { target: SecretTarget; useAva
           <Input
             value={host}
             onChange={(e) => setHost(e.target.value)}
-            placeholder="Only for host (optional), for example api.hetzner.cloud"
+            placeholder="Only for host, for example api.hetzner.cloud"
             aria-label="Only for host"
             autoComplete="off"
             spellCheck={false}
@@ -186,9 +186,11 @@ function SaveSecretForm({ target, useAvailable }: { target: SecretTarget; useAva
           )}
         </div>
       )}
-      {hostTrimmed && (
+      {useAvailable && (
         <p className="text-xs text-muted">
-          The agent never gets this value. Valet sends it only to {hostTrimmed}, and only the response comes back.
+          {hostTrimmed
+            ? `The agent never gets this value. Valet sends it only to ${hostTrimmed}, and only the response comes back.`
+            : "Optional. Set a host to make this secret use-only: the agent can call that host with it but can never read it. Leave it empty and commands can read the value."}
         </p>
       )}
       <div className="flex items-center justify-end gap-2">
