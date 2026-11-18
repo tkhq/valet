@@ -37,6 +37,7 @@ import { sessionsRouter, listStandaloneSessions } from "./routes/sessions.js";
 import { evalsRouter, ratingsRouter } from "./routes/ratings.js";
 import { wakeupsRouter } from "./routes/wakeups.js";
 import { messagesRouter } from "./routes/messages.js";
+import { passkeyApprovalRouter } from "./routes/decision-passkey.js";
 import { adminRouter } from "./routes/admin.js";
 import { teamDeletionRequestsRouter } from "./routes/team-deletion-requests.js";
 import { teamsRouter } from "./routes/teams.js";
@@ -395,6 +396,7 @@ export function createApp(
   app.route("/api/sessions", sessionsRouter);
   // Messages + threads + file uploads + security + ratings share /api/sessions/:id/* — mounted under same prefix.
   app.route("/api/sessions", messagesRouter);
+  app.route("/api/sessions", passkeyApprovalRouter);
   app.route("/api/sessions", fileUploadRouter);
   app.route("/api/sessions", browserRouter);
   app.route("/api/sessions", securityRouter);

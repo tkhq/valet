@@ -35,11 +35,12 @@ export interface DecisionTarget { kind: "decision"; key: string; title: string; 
 export interface WorkflowTarget { kind: "workflow"; key: string; title: string; context?: string; runId: string; nodeId: string; iteration?: number; gateId?: string; policy: boolean }
 export type BulkTarget = DecisionTarget | WorkflowTarget;
 
-export type SkipReason = "needs_answer" | "needs_credential" | "waiting_on_other" | "shares_your_account" | "not_one_shot" | "policy_check_failed" | "high_risk" | "not_pending";
+export type SkipReason = "needs_passkey" | "needs_answer" | "needs_credential" | "waiting_on_other" | "shares_your_account" | "not_one_shot" | "policy_check_failed" | "high_risk" | "not_pending";
 
 export interface SkippedItem { key: string; title: string; reason: SkipReason }
 
 export const SKIP_REASON_TEXT: Record<SkipReason, string> = {
+  needs_passkey: "Needs your passkey. Answer it on its own.",
   needs_answer: "Needs a typed answer.",
   needs_credential: "Needs a credential.",
   waiting_on_other: "Waits on another member.",
@@ -59,6 +60,7 @@ function approverReason(approver: { userId: string } | undefined, meId: string |
 
 function decisionSkipReason({ gate }: DecisionItem, meId: string | undefined): SkipReason | undefined {
   if (gate.status !== "pending") return "not_pending";
+  if (gate.assurance === "presence") return "needs_passkey";
   if (gate.type !== "approval") return gate.type === "credential_request" ? "needs_credential" : "needs_answer";
   // An approval that waits on the person who asked is theirs to answer like
   // any other; a shared-account request still needs its own review.

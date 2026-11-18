@@ -1,14 +1,17 @@
 /**
  * Commit signing, per user (agent commit signing design).
  *
- *   GET  /api/me/commit-signing          state: configured, enrolled, keys
- *   POST /api/me/commit-signing/enroll   create the user's Turnkey sub-organization
- *   GET  /api/org/allowed-signers        `gpg.ssh.allowedSignersFile` text for the org
+ *   GET  /api/me/commit-signing               state: configured, enrolled, key, windows
+ *   POST /api/me/commit-signing/enroll        create the user's Turnkey sub-organization
+ *   POST /api/me/commit-signing/github-check  is the signing key on the user's GitHub account?
+ *   GET  /api/org/allowed-signers             `gpg.ssh.allowedSignersFile` text for the org
  *
  * Browser-session auth only: the sandbox rung never reaches these paths.
  * Enrollment takes the passkey attestation the browser produced with
  * `@turnkey/sdk-browser` and runs `enrollUser`, which leaves the passkey as
- * the only root of the new sub-organization.
+ * the only root of the new sub-organization and creates the person's signing
+ * key. The person adds that key to GitHub themselves; Valet only reads the
+ * public key list (`docs/specs/2026-11-17-commit-signing-user-registered-keys-design.md`).
  */
 import { Hono } from "hono";
 import { loadTurnkeyConfig, type TurnkeyDeploymentConfig } from "@valet/plugin-turnkey/config";
@@ -23,6 +26,9 @@ import {
   type SigningKeyIndexDoc,
 } from "@valet/plugin-turnkey/store";
 import { turnkeyOps, type TurnkeyOpsFactory } from "@valet/plugin-turnkey/turnkey-client";
+import { publicSigningKeyListed } from "@valet/plugin-turnkey/github-keys";
+import { deriveSecretKey } from "../lib/secret-crypto.js";
+import { resolveUserApiToken } from "../services/github-tokens.js";
 import type { AppEnv } from "../env.js";
 import { pluginStore } from "../services/plugin-store.js";
 import type {
@@ -30,12 +36,16 @@ import type {
   GetCommitSigningResponse,
   PostCommitSigningEnrollRequest,
   PostCommitSigningEnrollResponse,
+  PostCommitSigningGithubCheckResponse,
 } from "../wire/types.js";
 
 export interface CommitSigningRouteDeps {
   config?: () => TurnkeyDeploymentConfig | null;
   turnkey?: TurnkeyOpsFactory;
   rpId?: string;
+  /** Test seams: the user's GitHub login, and the public key list check. */
+  githubLogin?: (orgId: string, userId: string) => Promise<string | null>;
+  keyListed?: (login: string, publicKeyLine: string) => Promise<boolean>;
 }
 
 function loadConfig(deps: CommitSigningRouteDeps): TurnkeyDeploymentConfig | null {
@@ -83,6 +93,11 @@ export function parseEnrollBody(body: unknown): PostCommitSigningEnrollRequest |
   };
 }
 
+/** An enrollment from the shipped per-approval design has no person key and must be set up again. */
+export function needsReenroll(doc: EnrollmentDoc): boolean {
+  return doc.signingKey === undefined;
+}
+
 function summarize(doc: SigningKeyDoc): CommitSigningKeySummary {
   return {
     fingerprint: doc.fingerprint,
@@ -108,7 +123,17 @@ export function buildCommitSigningRouter(deps: CommitSigningRouteDeps = {}): Hon
     const resp: GetCommitSigningResponse = {
       configured: config !== null,
       enrolled: enrollment !== null,
-      ...(enrollment ? { subOrgId: enrollment.doc.subOrgId, enrolledAt: enrollment.doc.createdAt } : {}),
+      ...(enrollment
+        ? {
+            subOrgId: enrollment.doc.subOrgId,
+            enrolledAt: enrollment.doc.createdAt,
+            mode: enrollment.doc.mode ?? "session",
+            needsReenroll: needsReenroll(enrollment.doc),
+            ...(enrollment.doc.signingKey
+              ? { signingKey: { publicKey: enrollment.doc.signingKey.publicKey, fingerprint: enrollment.doc.signingKey.fingerprint } }
+              : {}),
+          }
+        : {}),
       ...(config
         ? {
             passkey: {
@@ -133,7 +158,7 @@ export function buildCommitSigningRouter(deps: CommitSigningRouteDeps = {}): Hon
     }
     const store = pluginStore(c.var.providers.db, PLUGIN_NAME).user(user.id);
     const existing = await store.get<EnrollmentDoc>(COLLECTIONS.enrollment, DEFAULT_KEY);
-    if (existing) {
+    if (existing && !needsReenroll(existing.doc)) {
       return c.json({ error: "Commit signing is already set up for this account." }, 409);
     }
 
@@ -166,8 +191,48 @@ export function buildCommitSigningRouter(deps: CommitSigningRouteDeps = {}): Hon
       discardedAgentPublicKey: discardedP256PublicKeyHex(),
     });
     await store.put(COLLECTIONS.enrollment, DEFAULT_KEY, doc);
+    // The person's key has no window: it goes in the allowed-signers file
+    // from enrollment on, so `git verify-commit` accepts passkey-signed commits.
+    if (doc.signingKey) {
+      const index: SigningKeyIndexDoc = {
+        userId: user.id,
+        ...(user.email ? { userEmail: user.email } : {}),
+        orgId: user.orgId,
+        sessionId: "",
+        userKey: `enrollment-${doc.subOrgId}`,
+        fingerprint: doc.signingKey.fingerprint,
+        publicKey: doc.signingKey.publicKey,
+        notBefore: doc.createdAt,
+        status: "active",
+      };
+      await pluginStore(c.var.providers.db, PLUGIN_NAME).global().put(COLLECTIONS.signingKeyIndex, index.userKey, index);
+    }
     const resp: PostCommitSigningEnrollResponse = { subOrgId: doc.subOrgId, enrolledAt: doc.createdAt };
     return c.json(resp, 201);
+  });
+
+  router.post("/github-check", async (c) => {
+    const user = c.var.user;
+    const store = pluginStore(c.var.providers.db, PLUGIN_NAME).user(user.id);
+    const enrollment = await store.get<EnrollmentDoc>(COLLECTIONS.enrollment, DEFAULT_KEY);
+    const key = enrollment?.doc.signingKey;
+    if (!key) {
+      return c.json({ error: "Set up commit signing first. Then add the key on GitHub and check again." }, 409);
+    }
+    const login = deps.githubLogin
+      ? await deps.githubLogin(user.orgId, user.id)
+      : await (async () => {
+          const { db, engineCredentials, encryptionKey } = c.var.providers;
+          const token = await resolveUserApiToken({ db, credentials: engineCredentials, key: deriveSecretKey(encryptionKey) }, user.orgId, user.id);
+          return token?.login ?? null;
+        })();
+    if (!login) {
+      const resp: PostCommitSigningGithubCheckResponse = { connected: false, listed: false };
+      return c.json(resp);
+    }
+    const listed = await (deps.keyListed ?? publicSigningKeyListed)(login, key.publicKey);
+    const resp: PostCommitSigningGithubCheckResponse = { connected: true, login, listed };
+    return c.json(resp);
   });
 
   return router;
@@ -187,7 +252,10 @@ export function renderAllowedSigners(rows: SigningKeyIndexDoc[]): string {
   return rows
     .map((row) => {
       const principal = row.userEmail ?? `user:${row.userId}@valet`;
-      return `${principal} valid-after="${sshTime(row.notBefore)}",valid-before="${sshTime(row.notAfter)}" ${row.publicKey}`;
+      const window = row.notAfter === undefined
+        ? `valid-after="${sshTime(row.notBefore)}"`
+        : `valid-after="${sshTime(row.notBefore)}",valid-before="${sshTime(row.notAfter)}"`;
+      return `${principal} ${window} ${row.publicKey}`;
     })
     .join("\n")
     .concat(rows.length > 0 ? "\n" : "");

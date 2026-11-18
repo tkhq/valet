@@ -367,6 +367,14 @@ export {
   findStickyTerminalGate,
 } from "./decision-gate.js";
 export {
+  gateAssurance,
+  isApprovingAction,
+  presenceRefusal,
+  PresenceRequiredError,
+  PRESENCE_REQUIRED_MESSAGE,
+  type ApprovalAssurance,
+} from "./gate-assurance.js";
+export {
   BUILTIN_COMMAND_NAMES,
   type CommandSource,
   type CommandInfo,

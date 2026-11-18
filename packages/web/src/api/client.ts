@@ -35,6 +35,9 @@ import type {
   GetCommitSigningResponse,
   PostCommitSigningEnrollRequest,
   PostCommitSigningEnrollResponse,
+  PostCommitSigningGithubCheckResponse,
+  PresenceStepRequest,
+  PresenceStepResponse,
   AllowWorkflowPermissionsRequest,
   AllowWorkflowPermissionsResponse,
   CancelWorkflowRunResponse,
@@ -1090,6 +1093,17 @@ export const api = {
       `/sessions/${encodeURIComponent(sessionId)}/decisions/${encodeURIComponent(gateId)}/resolve`,
       body,
     ),
+  getPasskeyStep: (sessionId: string, gateId: string) =>
+    request<PresenceStepResponse>(
+      "GET",
+      `/sessions/${encodeURIComponent(sessionId)}/decisions/${encodeURIComponent(gateId)}/passkey`,
+    ),
+  postPasskeyStep: (sessionId: string, gateId: string, body: PresenceStepRequest) =>
+    request<PresenceStepResponse>(
+      "POST",
+      `/sessions/${encodeURIComponent(sessionId)}/decisions/${encodeURIComponent(gateId)}/passkey`,
+      body,
+    ),
   withdrawDecision: (
     sessionId: string,
     gateId: string,
@@ -1317,6 +1331,8 @@ export const api = {
   getCommitSigning: () => request<GetCommitSigningResponse>("GET", "/me/commit-signing"),
   enrollCommitSigning: (body: PostCommitSigningEnrollRequest) =>
     request<PostCommitSigningEnrollResponse>("POST", "/me/commit-signing/enroll", body),
+  checkCommitSigningGithub: () =>
+    request<PostCommitSigningGithubCheckResponse>("POST", "/me/commit-signing/github-check"),
   getThreadProjects: (sessionId: string, expectedViewerId: string, signal?: AbortSignal) => request<ThreadProjectsResponse>("GET", `/me/thread-projects/${encodeURIComponent(sessionId)}?expectedViewerId=${encodeURIComponent(expectedViewerId)}`, undefined, signal),
   changeThreadProjects: (sessionId: string, operations: ThreadProjectsOperation[], expectedViewerId: string, signal?: AbortSignal) =>
     request<ThreadProjectsResponse>("PATCH", `/me/thread-projects/${encodeURIComponent(sessionId)}`, { expectedViewerId, operations }, signal),

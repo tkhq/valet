@@ -69,6 +69,7 @@ import type {
   WriteFence,
 } from "./types.js";
 import { credentialSecret, THREAD_USER_TIMEZONE_KEY } from "./types.js";
+import { presenceRefusal, PresenceRequiredError } from "./gate-assurance.js";
 import { reportError } from "./error-report.js";
 
 
@@ -1553,6 +1554,11 @@ export class Session {
   }
 
   async resolveDecision(gateId: string, resolution: DecisionResolution): Promise<void> {
+    // A gate that asked for a passkey accepts an approval only with verified
+    // presence evidence (`gate-assurance.ts`). Checked here, the one path
+    // every surface resolves through, before any waiter sees the answer.
+    const stored = await this.providers.store.getDecisionGate(this.id, gateId);
+    if (stored && presenceRefusal(stored, resolution)) throw new PresenceRequiredError();
     // Command gates first — they are session-level, not owned by any thread.
     if (this.commandGates.isPending(gateId)) {
       const existing = await this.providers.store.getDecisionGate(this.id, gateId);

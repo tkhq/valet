@@ -740,7 +740,7 @@ export function useNotificationDecisions(cursor?: string, enabled = true) {
 }
 
 // Approval-only views poll the notification inbox without a session stream.
-function invalidateDecisionState(qc: QueryClient, sessionId: string) {
+export function invalidateDecisionState(qc: QueryClient, sessionId: string) {
   void qc.invalidateQueries({ queryKey: qk.decisions(sessionId) });
   void qc.invalidateQueries({ queryKey: ["notification-decisions"] });
 }

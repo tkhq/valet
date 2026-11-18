@@ -688,12 +688,10 @@ async function runBootChain(): Promise<void> {
     db: providers.db, credentials: providers.engineCredentials, key: deriveSecretKey(encryptionKey),
   }, providers.db);
 
-  // Commit signing keys past their window: remove the GitHub key and close
-  // the row (agent commit signing design). Expiry is expected in normal
-  // operation, which is why this repair exists. The interval is `.unref()`'d.
-  signingKeySweep = startSigningKeySweep({
-    tokens: { db: providers.db, credentials: providers.engineCredentials, key: deriveSecretKey(encryptionKey) },
-  });
+  // Session-mode signing windows past their end: close the row (commit
+  // signing design). Expiry is expected in normal operation, which is why
+  // this repair exists. The interval is `.unref()`'d.
+  signingKeySweep = startSigningKeySweep({ db: providers.db });
 
   // GitHub App installations: pick up a new installation without anybody
   // pressing "Refresh installations". The tick wakes every minute and checks at

@@ -22,6 +22,12 @@ vi.mock("~/api/settings", () => ({
   useMe: () => ({ data: { email: "dev@example.com" }, isLoading: false, error: null }),
 }));
 
+const checkCommitSigningGithub = vi.fn();
+vi.mock("~/api/client", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("~/api/client")>()),
+  api: { checkCommitSigningGithub: () => checkCommitSigningGithub() },
+}));
+
 vi.mock("@turnkey/sdk-browser", () => ({
   Turnkey: class {
     passkeyClient() {
@@ -114,5 +120,29 @@ describe("CommitSigningSection", () => {
     expect(screen.getByText(/tkhq\/valet/)).toBeTruthy();
     expect(screen.getByText(/SHA256:abc/)).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Set up commit signing" })).toBeNull();
+  });
+
+  it("offers Set up again for an enrollment without a person key", () => {
+    signingData = { ...configured, enrolled: true, needsReenroll: true, subOrgId: "old" };
+    render(<CommitSigningSection />);
+    expect(screen.getByRole("button", { name: "Set up again" })).toBeTruthy();
+  });
+
+  it("shows the person's key and checks GitHub from the modal", async () => {
+    signingData = {
+      ...configured,
+      enrolled: true,
+      mode: "presence",
+      subOrgId: "sub-1",
+      signingKey: { publicKey: "ssh-ed25519 AAAAkey", fingerprint: "SHA256:person" },
+    };
+    checkCommitSigningGithub.mockResolvedValue({ connected: true, login: "octo", listed: false });
+    render(<CommitSigningSection />);
+    expect(screen.getByText("SHA256:person")).toBeTruthy();
+    expect(screen.getByText("Your passkey signs each commit.")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Add to GitHub" }));
+    expect(screen.getByText("ssh-ed25519 AAAAkey")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Check GitHub" }));
+    await waitFor(() => expect(screen.getByText(/Not on github.com\/octo yet/)).toBeTruthy());
   });
 });

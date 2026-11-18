@@ -5,6 +5,8 @@
  * and the cleanup sweep, so the shapes live here and nowhere else.
  */
 
+import type { ApprovalAssurance } from "@valet/engine";
+
 export const PLUGIN_NAME = "turnkey";
 
 export const COLLECTIONS = {
@@ -22,23 +24,61 @@ export const COLLECTIONS = {
    * their window, for `git verify-commit` on old commits.
    */
   signingKeyIndex: "signing_key_index",
+  /**
+   * Scope `session`, key = gate id: the signatures a passkey approval has
+   * collected so far (`PresenceStepsDoc`). The api writes it between steps.
+   */
+  presenceSteps: "presence_steps",
 } as const;
+
+export interface PresenceStepsDoc {
+  signatures: Array<{
+    activityId: string;
+    signatureHex: string;
+    /** SHA-256 of the exact payload the passkey approved. */
+    payloadSha256?: string;
+    approvedAtMs?: number;
+    authenticator?: { scheme: string; public_key: string };
+  }>;
+}
 
 export const DEFAULT_KEY = "default";
 export const CURRENT_KEY = "current";
 
-/** One Turnkey sub-organization per Valet user, created at enrollment. */
+/** The person's one Valet signing key, created at enrollment and added to GitHub by the person. */
+export interface PersonSigningKey {
+  privateKeyId: string;
+  /** Raw Ed25519 public key, hex, as Turnkey returns it. */
+  publicKeyHex: string;
+  /** `ssh-ed25519 AAAA...`. */
+  publicKey: string;
+  fingerprint: string;
+  activityId: string;
+}
+
+/**
+ * One Turnkey sub-organization per Valet user, created at enrollment.
+ *
+ * `presence` enrollments have no `valet-agent` and no parent grant: only the
+ * person's passkey can act in the sub-organization. `session` enrollments
+ * add `valet-agent`, its signing policy, and a parent grant for its session
+ * API keys. An enrollment without `signingKey` is from the shipped
+ * per-approval design and must be set up again.
+ */
 export interface EnrollmentDoc {
   subOrgId: string;
   /** The passkey root user. */
   passkeyUserId: string;
-  /** `valet-agent`, holder of the session API keys. */
-  agentUserId: string;
-  /** User tag on `valet-agent`, named in the allow policy. */
-  agentTagId: string;
-  /** Private key tag every signing key carries, named in the allow policy. */
+  /** Absent on enrollments from before assurance modes existed. */
+  mode?: ApprovalAssurance;
+  signingKey?: PersonSigningKey;
+  /** Private key tag the signing key carries, named in the agent policy. */
   signingTagId: string;
-  policyId: string;
+  /** `valet-agent`, holder of the session API keys. Session mode only. */
+  agentUserId?: string;
+  /** User tag on `valet-agent`, named in the allow policy. Session mode only. */
+  agentTagId?: string;
+  policyId?: string;
   createdAt: number;
 }
 
@@ -62,7 +102,8 @@ export interface SigningKeyDoc {
   fingerprint: string;
   /** `ssh-ed25519 AAAA...`. */
   publicKey: string;
-  githubKeyId: number;
+  /** Set only on keys from the shipped design, which Valet added to GitHub itself. */
+  githubKeyId?: number;
   turnkeySubOrgId: string;
   turnkeyPrivateKeyId: string;
   turnkeyCreateActivityId: string;
@@ -84,9 +125,10 @@ export interface SigningKeyIndexDoc {
   userKey: string;
   fingerprint: string;
   publicKey: string;
-  githubKeyId: number;
+  githubKeyId?: number;
   notBefore: number;
-  notAfter: number;
+  /** Absent for a person's enrollment key, which has no window. */
+  notAfter?: number;
   status: SigningKeyStatus;
 }
 

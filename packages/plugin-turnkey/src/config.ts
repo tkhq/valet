@@ -13,6 +13,11 @@ export interface TurnkeyDeploymentConfig {
   apiPrivateKey: string;
   /** `https://api.turnkey.com`, or a dev host. */
   apiBaseUrl: string;
+  /**
+   * What new enrollments allow. `presence` (default): the passkey stamps
+   * every signature. `session`: an approved window lets the sandbox sign.
+   */
+  assurance: "session" | "presence";
 }
 
 export const TURNKEY_ENV = {
@@ -20,6 +25,7 @@ export const TURNKEY_ENV = {
   apiPublicKey: "VALET_TURNKEY_API_PUBLIC_KEY",
   apiPrivateKey: "VALET_TURNKEY_API_PRIVATE_KEY",
   apiBaseUrl: "VALET_TURNKEY_API_BASE_URL",
+  assurance: "VALET_TURNKEY_SIGNING_ASSURANCE",
 } as const;
 
 export const DEFAULT_TURNKEY_API_BASE_URL = "https://api.turnkey.com";
@@ -51,5 +57,9 @@ export function loadTurnkeyConfig(env: Record<string, string | undefined>): Turn
   if (missing.length > 0) {
     throw new Error(`Commit signing is half configured. Set ${missing.join(", ")} or unset every VALET_TURNKEY_* variable.`);
   }
-  return { organizationId, apiPublicKey, apiPrivateKey, apiBaseUrl };
+  const rawAssurance = env[TURNKEY_ENV.assurance]?.trim() || "presence";
+  if (rawAssurance !== "presence" && rawAssurance !== "session") {
+    throw new Error(`${TURNKEY_ENV.assurance} must be "presence" or "session", not "${rawAssurance}".`);
+  }
+  return { organizationId, apiPublicKey, apiPrivateKey, apiBaseUrl, assurance: rawAssurance };
 }
