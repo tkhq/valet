@@ -55,11 +55,37 @@ const target = parseTarget(process.argv.slice(2));
 const outName = `valet-${outSuffixFor(target)}`;
 const outFile = resolve(apiRoot, "dist", outName);
 
-const args = ["build", "--compile", entry, "--outfile", outFile];
+const outOs = outSuffixFor(target).split("-")[0];
+if (outOs === "darwin" && process.platform !== "darwin") {
+  throw new Error("compile-binary: macOS binaries need codesign. Compile darwin targets on a macOS host.");
+}
+
+// compile-entry.mjs loads Sharp from the extracted assets with a bare
+// `require("sharp")`. Resolving a package's "main" needs its package.json.
+// Bun 1.3+ compiled binaries skip package.json at runtime unless this flag is
+// set; Bun 1.2 reads it by default and accepts the flag.
+const args = ["build", "--compile", "--compile-autoload-package-json", entry, "--outfile", outFile];
 if (target) args.push(`--target=${target}`);
 
 const res = spawnSync("bun", args, { stdio: "inherit", cwd: apiRoot });
 if (res.error) throw res.error;
 if (res.status !== 0) process.exit(res.status ?? 1);
+
+/** Run a command and exit with its status on failure. */
+function run(cmd, cmdArgs) {
+  const r = spawnSync(cmd, cmdArgs, { stdio: "inherit" });
+  if (r.error) throw r.error;
+  if (r.status !== 0) process.exit(r.status ?? 1);
+}
+
+// `bun build --compile` writes its ad-hoc signature before it finishes the
+// file, so one signed page no longer matches its hash (Bun 1.2.17 and 1.3.14).
+// `codesign --verify` reports "code or signature have been modified", and
+// some Macs kill the binary at launch ("Killed: 9"). Sign the final bytes,
+// then verify, so a bad signature fails the build instead of shipping.
+if (outOs === "darwin") {
+  run("codesign", ["--force", "--sign", "-", outFile]);
+  run("codesign", ["--verify", "--strict", outFile]);
+}
 
 console.log(`compile-binary -> packages/api/dist/${outName}${target ? ` (target ${target})` : ""}`);
