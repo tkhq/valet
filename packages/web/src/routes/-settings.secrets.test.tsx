@@ -80,22 +80,21 @@ describe("SecretsPage", () => {
     expect(saveMutate).toHaveBeenCalledWith({ name: "k", value: " v\n" }, expect.anything());
   });
 
-  it("saves a use-only secret only with a host, with the picked header", () => {
+  it("saves a use-only secret only with a host", () => {
     data = { enabled: true, provider: "Turnkey", canWrite: true, useAvailable: true, secrets: [] };
     render(<SecretsPage />);
     expect(screen.getByText(/Commands in a session can read this value/)).toBeTruthy();
     fireEvent.change(screen.getByLabelText("Secret name"), { target: { value: "HETZNER" } });
     fireEvent.change(screen.getByLabelText("Secret value"), { target: { value: "tok" } });
     fireEvent.click(screen.getByRole("checkbox", { name: "Use only with one host" }));
-    // The host is required and the header picker shows before any host.
-    expect(screen.getByLabelText("Header the secret goes in")).toBeTruthy();
+    // Checked, the host is required.
     expect((screen.getByRole("button", { name: "Save" }) as HTMLButtonElement).disabled).toBe(true);
-    fireEvent.change(screen.getByLabelText("Host"), { target: { value: "https://api.hetzner.cloud/v1" } });
+    fireEvent.change(screen.getByLabelText("Only for host"), { target: { value: "https://api.hetzner.cloud/v1" } });
     expect(screen.getByText(/The agent never gets this value/)).toBeTruthy();
-    fireEvent.change(screen.getByLabelText("Header the secret goes in"), { target: { value: "apiKey" } });
+    expect(screen.getByLabelText("Header the secret goes in")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     expect(saveMutate).toHaveBeenCalledWith(
-      { name: "HETZNER", value: "tok", use: { hosts: ["api.hetzner.cloud"], header: "x-api-key", format: "{secret}" } },
+      { name: "HETZNER", value: "tok", use: { hosts: ["api.hetzner.cloud"], header: "authorization", format: "Bearer {secret}" } },
       expect.anything(),
     );
   });
@@ -103,10 +102,15 @@ describe("SecretsPage", () => {
   it("pre-fills the host and header from a known key format", () => {
     data = { enabled: true, provider: "Turnkey", canWrite: true, useAvailable: true, secrets: [] };
     render(<SecretsPage />);
+    fireEvent.change(screen.getByLabelText("Secret name"), { target: { value: "ANTHROPIC_API_KEY" } });
     fireEvent.change(screen.getByLabelText("Secret value"), { target: { value: "sk-ant-" + "a".repeat(40) } });
     fireEvent.click(screen.getByRole("checkbox", { name: "Use only with one host" }));
-    expect((screen.getByLabelText("Host") as HTMLInputElement).value).toBe("api.anthropic.com");
-    expect((screen.getByLabelText("Header the secret goes in") as HTMLSelectElement).value).toBe("apiKey");
+    expect((screen.getByLabelText("Only for host") as HTMLInputElement).value).toBe("api.anthropic.com");
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(saveMutate).toHaveBeenCalledWith(
+      expect.objectContaining({ use: { hosts: ["api.anthropic.com"], header: "x-api-key", format: "{secret}" } }),
+      expect.anything(),
+    );
   });
 
   it("shows where a use-only secret goes and keeps its rule on replace", () => {

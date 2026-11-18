@@ -3,7 +3,9 @@ import { useId, useState, type FormEvent } from "react";
 import type { SecretSummary } from "@valet/api/wire";
 import { Button, Checkbox, EmptyRow, ErrorRow, Input, LoadingRow, TabBar, Textarea, tabPanelId, type TabDef } from "~/components/primitives";
 import { Section } from "~/components/settings/section";
-import { useDefaultsFor, useRuleText, usesText } from "~/lib/secret-use";
+import { detectSecrets, secretUseDefaultFor } from "@valet/shared";
+import { draftFromDefault, draftHost, ruleFromDraft, SecretUseFields, type SecretUseDraft } from "~/components/settings/secret-use-fields";
+import { useRuleText, usesText } from "~/lib/secret-use";
 import { useDeleteSecret, useSaveSecret, useSecrets, type SecretTarget } from "~/api/secrets";
 import { useMe, useTeams } from "~/api/settings";
 import { errorText } from "~/lib/error-text";
@@ -92,47 +94,35 @@ function ScopePanel({ target }: { target: SecretTarget }) {
   );
 }
 
-/** How the secret goes into the request, as a person picks it. */
-const HEADER_CHOICES = {
-  bearer: { label: "Authorization: Bearer", header: "authorization", format: "Bearer {secret}" },
-  apiKey: { label: "x-api-key", header: "x-api-key", format: "{secret}" },
-  custom: { label: "Other header", header: "", format: "{secret}" },
-} as const;
-type HeaderChoice = keyof typeof HEADER_CHOICES;
-
 function SaveSecretForm({ target, useAvailable }: { target: SecretTarget; useAvailable: boolean }) {
   const [name, setName] = useState("");
   const [value, setValue] = useState("");
   const [useOnly, setUseOnly] = useState(false);
-  const [host, setHost] = useState("");
-  const [choice, setChoice] = useState<HeaderChoice>("bearer");
-  const [customHeader, setCustomHeader] = useState("");
+  const [draft, setDraft] = useState<SecretUseDraft>(() => draftFromDefault(undefined));
   // Set once the person edits the host or header: a pasted key then no longer
   // pre-fills them.
   const [ruleTouched, setRuleTouched] = useState(false);
   const useOnlyId = useId();
   const save = useSaveSecret(target);
   const trimmed = name.trim();
-  const hostTrimmed = host.trim().replace(/^https?:\/\//, "").replace(/\/.*$/, "");
-  const header = choice === "custom" ? customHeader.trim() : HEADER_CHOICES[choice].header;
+  const rule = ruleFromDraft(draft);
+  const host = draftHost(draft);
   // A use-only secret needs a host: Valet never learns it from the first use.
-  const ruleReady = !useOnly || (hostTrimmed.length > 0 && header.length > 0);
-  const canSave = trimmed.length > 0 && value.length > 0 && !save.isPending && ruleReady;
+  const canSave = trimmed.length > 0 && value.length > 0 && !save.isPending && (!useOnly || rule !== undefined);
 
   function changeValue(next: string) {
     setValue(next);
     if (ruleTouched) return;
-    const known = useDefaultsFor(next);
-    if (known) {
-      setHost(known.host);
-      setChoice(known.header);
-    }
+    // A whole known key pre-fills where it goes; the person confirms by saving.
+    const [match] = detectSecrets(next.trim());
+    const def = match && match.confidence === "known" && match.value === next.trim() ? secretUseDefaultFor(match.label) : undefined;
+    if (def) setDraft(draftFromDefault(def));
   }
 
   function submit(e: FormEvent) {
     e.preventDefault();
     if (!canSave) return;
-    const use = useOnly ? { hosts: [hostTrimmed], header, format: HEADER_CHOICES[choice].format } : undefined;
+    const use = useOnly ? rule : undefined;
     save.mutate(
       { name: trimmed, value, ...(use ? { use } : {}) },
       {
@@ -140,9 +130,7 @@ function SaveSecretForm({ target, useAvailable }: { target: SecretTarget; useAva
           setName("");
           setValue("");
           setUseOnly(false);
-          setHost("");
-          setChoice("bearer");
-          setCustomHeader("");
+          setDraft(draftFromDefault(undefined));
           setRuleTouched(false);
         },
       },
@@ -178,53 +166,20 @@ function SaveSecretForm({ target, useAvailable }: { target: SecretTarget; useAva
         </div>
       )}
       {useAvailable && useOnly && (
-        <div className="flex flex-col gap-2 sm:flex-row">
-          <Input
-            value={host}
-            onChange={(e) => {
-              setHost(e.target.value);
-              setRuleTouched(true);
-            }}
-            placeholder="Host, for example api.hetzner.cloud"
-            aria-label="Host"
-            autoComplete="off"
-            spellCheck={false}
-            className="min-w-0 flex-1"
-          />
-          <select
-            value={choice}
-            onChange={(e) => {
-              setChoice(e.target.value as HeaderChoice);
-              setRuleTouched(true);
-            }}
-            aria-label="Header the secret goes in"
-            className="rounded-md border border-line bg-surface px-2 text-sm text-ink"
-          >
-            {Object.entries(HEADER_CHOICES).map(([id, c]) => (
-              <option key={id} value={id}>
-                {c.label}
-              </option>
-            ))}
-          </select>
-          {choice === "custom" && (
-            <Input
-              value={customHeader}
-              onChange={(e) => setCustomHeader(e.target.value)}
-              placeholder="Header name"
-              aria-label="Header name"
-              autoComplete="off"
-              spellCheck={false}
-              className="sm:w-40"
-            />
-          )}
-        </div>
+        <SecretUseFields
+          draft={draft}
+          onChange={(next) => {
+            setDraft(next);
+            setRuleTouched(true);
+          }}
+        />
       )}
       {useAvailable && (
         <p className="text-xs text-muted">
           {!useOnly
             ? "Commands in a session can read this value. Check Use only with one host to keep it from commands."
-            : hostTrimmed
-              ? `The agent never gets this value. Valet sends it only to ${hostTrimmed}, and only the response comes back.`
+            : host
+              ? `The agent never gets this value. Valet sends it only to ${host}, and only the response comes back.`
               : "Type the host the agent will call. The agent can call that host with this secret but can never read it."}
         </p>
       )}
