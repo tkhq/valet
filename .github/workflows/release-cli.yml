@@ -13,7 +13,8 @@ name: Release CLI
 # the embedded assets are platform-agnostic). Windows = WSL (run the
 # linux-x64 binary).
 #
-# macOS Gatekeeper: the binaries are ad-hoc signed (Bun's default), not
+# macOS Gatekeeper: compile-binary.mjs re-signs the binaries ad-hoc and
+# verifies the signature (Bun's own signature is invalid). They are not
 # Developer-ID-signed/notarized. A BROWSER download gets quarantined and
 # macOS shows a misleading "binary is damaged" dialog; `curl` downloads
 # carry no quarantine flag and just run. Both release bodies carry the
@@ -61,7 +62,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-14
+          - runner: macos-15
+            # GitHub retired the macos-14 image. Its jobs are cancelled before
+            # any step runs, and publish is then skipped.
             # darwin-x64 (Intel Macs) is cross-compiled from the arm64
             # runner; only the native arm64 binary is smoke-tested.
             targets: bun-darwin-arm64 bun-darwin-x64

@@ -99,3 +99,11 @@ This avoids the observed 2 GB default heap limit on macOS and leaves memory for 
 Required CI checks the source commit before publishing. Packaging emits workspace outputs with `tsc --build --noCheck`.
 The web build retains its typecheck. Both platform jobs retain compilation and native health and SPA smoke tests.
 Publishing still requires both platform jobs to succeed.
+
+## macOS signing and package resolution
+
+`build/compile-binary.mjs` signs each darwin binary ad-hoc after `bun build --compile` finishes, then runs `codesign --verify --strict`. Bun writes its own signature before it finishes the file, so one signed page does not match its hash. Bun 1.2.17 and 1.3.14 both show this defect. Some Macs kill such a binary at launch with `Killed: 9`, and others run it. A failed verify stops the build. The script refuses darwin targets on a non-macOS host, because `codesign` is not available there.
+
+The script also passes `--compile-autoload-package-json`. `compile-entry.mjs` loads Sharp from the extracted assets with a bare `require("sharp")`, and the resolver reads each package's `package.json` to find its entry file. Bun 1.3 and later compiled binaries skip `package.json` at runtime by default. Without the flag, a local build with a current Bun fails at start with `Cannot find package 'sharp'`. Bun 1.2.17, the CI pin, reads it by default and accepts the flag.
+
+The darwin job runs on `macos-15`. GitHub retired the `macos-14` image. A job on a retired image is cancelled before its first step, so the publish job was skipped and the `dev-v2-latest` assets stopped updating.
