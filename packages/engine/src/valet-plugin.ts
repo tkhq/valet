@@ -490,7 +490,7 @@ export interface ChannelTransport {
   reconcileAttention?(conversationKey: string, deliveryId: string, sendingAt: number, signal?: AbortSignal): Promise<(SendRef & { gateCard?: boolean }) | null>;
   /** Start a new message in a provider channel, without changing inbound subscriptions. */
   sendToChannel?(channelId: string, message: OutboundChannelMessage): Promise<SendRef>;
-  /** Send a notice visible only to one channel member. Failures must reject. */
+  /** Send a markdown notice visible only to one channel member. Failures must reject. */
   sendPrivateNotice?(channelId: string, userId: string, text: string): Promise<void>;
   sendMedia(conversationKey: string, attachment: OutboundChannelAttachment): Promise<SendRef>;
   sendGatePrompt(conversationKey: string, gate: ChannelGatePrompt): Promise<GatePromptRef>;

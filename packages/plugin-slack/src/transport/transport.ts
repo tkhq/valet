@@ -1119,7 +1119,7 @@ export class SlackTransport implements ChannelTransport {
   }
 
   async sendPrivateNotice(channelId: string, userId: string, text: string): Promise<void> {
-    await this.api.postEphemeral({ channel: channelId, user: userId, text });
+    await this.api.postEphemeral({ channel: channelId, user: userId, text: markdownToSlackMrkdwn(text), mrkdwn: true });
   }
 
   /**

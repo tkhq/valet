@@ -28,6 +28,7 @@ import {
   type InboundChannelEvent,
   type OutboundChannelAttachment,
   type OutboundChannelMessage,
+  type PromptAuthor,
   type QueueItem,
   type SessionEntry,
   type ValetPlugin,
@@ -293,12 +294,13 @@ describe("ChannelHost outbound delivery", () => {
     vi.restoreAllMocks();
   });
 
-  it("home channel receives a safe new notification, never a Slack-thread reply or foreign team", async () => {
+  it("home channel shows a private notice to the thread's asker only", async () => {
     await host.stop();
     class HomeTransport extends FakeTransport {
       override readonly channelType = "slack";
-      async sendToChannel(channelId: string, message: OutboundChannelMessage) {
-        return this.send(channelId, message);
+      notices: Array<{ channelId: string; userId: string; text: string }> = [];
+      async sendPrivateNotice(channelId: string, userId: string, text: string) {
+        this.notices.push({ channelId, userId, text });
       }
     }
     const home = new HomeTransport();
@@ -307,19 +309,39 @@ describe("ChannelHost outbound delivery", () => {
       plugins: [{ name: "home-test", version: "0", transports: [{ channelType: "slack", create: () => home }] }], resolveOrgId: async () => ORG_ID });
     await host.start();
     await testDb.appDb.insert(teams).values({ id: "home-team", orgId: ORG_ID, name: "Home", createdAt: Date.now(), slackHomeChannelId: "C0123456789" });
-    const event: AttentionEvent = { kind: "approval", owner: { type: "team", id: "home-team" }, title: "private approval content", body: "sensitive" };
-    await host.attentionDeliverer().deliverTeam?.(event);
-    expect(home.sent).toHaveLength(1);
-    expect(home.sent[0]?.conversationKey).toBe("C0123456789");
-    expect(home.sent[0]?.message.markdown).not.toContain("private");
-    expect(home.sent[0]?.message.markdown).not.toContain("sensitive");
-    expect(home.gatePrompts).toHaveLength(0);
+    await linkIdentity(testDb.appDb, { provider: "slack", externalId: "U77", userId: USER_ID });
     const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
-    const thread = session.thread("slack:COTHER:123.456");
-    await host.attentionDeliverer().deliverTeam?.({ ...event, sessionId: session.id, threadId: thread.id });
-    expect(home.sent).toHaveLength(1);
-    await host.attentionDeliverer().deliverTeam?.({ ...event, owner: { type: "team", id: "inaccessible-team" } });
-    expect(home.sent).toHaveLength(1);
+    const thread = session.thread("web:asked");
+    const message = (id: string, createdAt: number, author: PromptAuthor): SessionEntry =>
+      ({ id, sessionId: session.id, threadId: thread.id, parentId: null, createdAt, type: "message", role: "user", content: "hi", author });
+    await engineStore.appendEntries(session.id, thread.id, [
+      message("asked", 1, { id: USER_ID, interactive: true }),
+      // A later agent-composed prompt is not the asker.
+      message("relayed", 2, { id: "second-user", name: "Valet" }),
+    ]);
+    const deliver = host.attentionDeliverer().deliverTeam;
+    if (!deliver) throw new Error("Expected a team deliverer");
+    const event: AttentionEvent = { kind: "approval", owner: { type: "team", id: "home-team" }, sessionId: session.id, threadId: thread.id, title: "Approve the deploy", body: "details" };
+
+    await deliver(event, [USER_ID, "second-user"]);
+    expect(home.notices).toEqual([{ channelId: "C0123456789", userId: "U77", text: "**Approve the deploy**" }]);
+    expect(home.sent).toHaveLength(0);
+
+    // The asker is outside the event's audience, or has turned Slack notices off.
+    await deliver(event, ["second-user"]);
+    await setNotifyAttention(testDb.appDb, "slack", USER_ID, false);
+    await deliver(event, [USER_ID]);
+    await setNotifyAttention(testDb.appDb, "slack", USER_ID, true);
+    // No thread and no actor, a Slack-origin thread, or a foreign team.
+    await deliver({ ...event, sessionId: undefined, threadId: undefined }, [USER_ID]);
+    const slackThread = session.thread("slack:COTHER:123.456");
+    await deliver({ ...event, threadId: slackThread.id, actorUserId: USER_ID }, [USER_ID]);
+    await deliver({ ...event, owner: { type: "team", id: "inaccessible-team" } }, [USER_ID]);
+    expect(home.notices).toHaveLength(1);
+
+    // An event with no thread falls back to its actor.
+    await deliver({ ...event, sessionId: undefined, threadId: undefined, actorUserId: USER_ID }, [USER_ID]);
+    expect(home.notices).toHaveLength(2);
   });
 
   async function emitTerminalTurn(args: {
