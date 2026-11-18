@@ -27,7 +27,7 @@
 import type { Appearance } from "@valet/shared";
 import { slackEventChannel } from "../services/thread-access.js";
 import type { EventHead } from "../services/event-columns.js";
-import type { ChannelOrigin, NormalizedEvent, PluginEvent, PluginEventHandler, PluginThreads, Principal, PromptAuthor, SignalContent, ValetPlugin } from "@valet/engine";
+import type { ChannelOrigin, NormalizedEvent, PluginEvent, PluginEventHandler, Principal, PromptAuthor, SignalContent, ValetPlugin } from "@valet/engine";
 import { readThreadPolicy, type AssistantThreadPolicy } from "@valet/shared";
 import type { RunHost, RunParams, WorkflowStore, WorkflowTriggerPayload } from "@valet/workflow";
 import { and, arrayContains, asc, eq, inArray, lte, sql, type SQL } from "drizzle-orm";
@@ -71,7 +71,7 @@ import {
   type PluginDeliveryRecorder,
 } from "../observability/delivery-metrics.js";
 import { readStoredTarget } from "./target-names.js";
-import type { PluginThreadsScope } from "../plugins/plugin-threads.js";
+import type { PluginThreadsScope, RunPluginThreads } from "../plugins/plugin-threads.js";
 import { pluginStore } from "../services/plugin-store.js";
 import { buildPluginMemory } from "../plugins/plugin-memory.js";
 import { pluginHandlerConfig } from "./subscription-write.js";
@@ -111,8 +111,11 @@ function pluginServices(plugin: ValetPlugin): Set<string> {
 
 /** What the dispatcher needs to run plugin event handlers. */
 export interface PluginHandlerHost {
-  /** `PluginThreads` for one handler run (`buildPluginThreads` in production). */
-  threads(scope: PluginThreadsScope): PluginThreads;
+  /**
+   * `PluginThreads` for one handler run (`buildPluginThreads` in
+   * production). The dispatcher calls `release` when the run ends.
+   */
+  threads(scope: PluginThreadsScope): RunPluginThreads;
   /** The org's app credential for `service`, or null when it is not connected. */
   appToken(orgId: string, service: string, scope?: { owner?: string }): Promise<string | null>;
   /**
@@ -1132,37 +1135,45 @@ export class EventDispatcher {
     const actorUserId = actorUserIdFor(owner);
     const services = pluginServices(plugin);
     const store = pluginStore(this.deps.db, plugin.name);
-    await handler.handle(
-      {
-        id: event.id,
-        key: event.eventKey,
-        dedupeKey: event.dedupeKey,
-        occurredAt: new Date(event.occurredAt).toISOString(),
-        // Written by ingest from NormalizedEvent; same narrowing as `refs` above.
-        ...(event.actor ? { actor: event.actor as NonNullable<PluginEvent["actor"]> } : {}),
-        refs: event.refs as Record<string, string>,
-        summary: event.summary,
-        payload: event.payload,
-        ...(event.subjects ? { subjects: event.subjects } : {}),
-      },
-      {
-        orgId: sub.orgId,
-        owner,
-        actorUserId,
-        threads: host.threads({ plugin, orgId: sub.orgId, owner, actorUserId, deliveryId, signal, cancelChildren }),
-        config,
-        store: owner.type === "team" ? store.team(owner.id) : store.user(owner.id),
-        memory: buildPluginMemory(this.deps.db, owner, actorUserId, sub.orgId, plugin),
-        appToken: async (service, scope) => {
-          if (!services.has(service)) {
-            throw new Error(`Plugin ${plugin.name} did not declare service ${service}. Declare a credential for it in the plugin manifest.`);
-          }
-          return host.appToken(sub.orgId, service, scope);
+    const threads = host.threads({ plugin, orgId: sub.orgId, owner, actorUserId, deliveryId, signal, cancelChildren });
+    try {
+      await handler.handle(
+        {
+          id: event.id,
+          key: event.eventKey,
+          dedupeKey: event.dedupeKey,
+          occurredAt: new Date(event.occurredAt).toISOString(),
+          // Written by ingest from NormalizedEvent; same narrowing as `refs` above.
+          ...(event.actor ? { actor: event.actor as NonNullable<PluginEvent["actor"]> } : {}),
+          refs: event.refs as Record<string, string>,
+          summary: event.summary,
+          payload: event.payload,
+          ...(event.subjects ? { subjects: event.subjects } : {}),
         },
-        signal,
-        ...(valetBuildSha() ? { build: valetBuildSha() } : {}),
-      },
-    );
+        {
+          orgId: sub.orgId,
+          owner,
+          actorUserId,
+          threads,
+          config,
+          store: owner.type === "team" ? store.team(owner.id) : store.user(owner.id),
+          memory: buildPluginMemory(this.deps.db, owner, actorUserId, sub.orgId, plugin),
+          appToken: async (service, scope) => {
+            if (!services.has(service)) {
+              throw new Error(`Plugin ${plugin.name} did not declare service ${service}. Declare a credential for it in the plugin manifest.`);
+            }
+            return host.appToken(sub.orgId, service, scope);
+          },
+          signal,
+          ...(valetBuildSha() ? { build: valetBuildSha() } : {}),
+        },
+      );
+    } finally {
+      // A plugin thread session is idle between runs. Left `active`, each
+      // one would count toward the org session ceiling for good.
+      await threads.release().catch((err: unknown) => reportError({ area: "events", reason: "plugin_threads_release" },
+        `plugin ${plugin.name}: releasing the thread sessions of delivery ${deliveryId} failed`, err));
+    }
   }
 
   /** The event's natural subject from the plugin that owns its service, or null (spec Part D). */

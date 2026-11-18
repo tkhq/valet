@@ -7,14 +7,14 @@ import { randomUUID } from "node:crypto";
 import { Type } from "typebox";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
-import type { PluginEventContext, PluginEventHandler, PluginThreads, ValetPlugin } from "@valet/engine";
+import type { PluginEventContext, PluginEventHandler, ValetPlugin } from "@valet/engine";
 import type { RunHost as WorkflowRunHost } from "@valet/workflow";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
 import { eventDeliveries, eventSubscriptions, events } from "../schema/index.js";
 import githubPlugin from "@valet/plugin-github/plugin";
 import { EventDispatcher, type PluginHandlerHost } from "./dispatcher.js";
-import type { PluginThreadsScope } from "../plugins/plugin-threads.js";
+import type { PluginThreadsScope, RunPluginThreads } from "../plugins/plugin-threads.js";
 import type { PluginDeliveryOutcome, PluginDeliveryRecorder } from "../observability/delivery-metrics.js";
 
 const ORG = "org-1";
@@ -40,8 +40,8 @@ function pluginWith(handle: PluginEventHandler["handle"], extra: Partial<PluginE
   };
 }
 
-/** Threads that fail if a handler uses them; these tests do not. */
-const noThreads: PluginThreads = {
+/** Threads that fail if a handler uses them; these tests do not. Release is a no-op. */
+const noThreads: RunPluginThreads = {
   ensure: async () => { throw new Error("threads are not used in this test"); },
   post: async () => { throw new Error("threads are not used in this test"); },
   record: async () => { throw new Error("threads are not used in this test"); },
@@ -49,6 +49,7 @@ const noThreads: PluginThreads = {
   awaitChild: async () => { throw new Error("threads are not used in this test"); },
   awaitReply: async () => { throw new Error("threads are not used in this test"); },
   stopChild: async () => { throw new Error("threads are not used in this test"); },
+  release: async () => {},
 };
 
 function handlerHost(appToken: PluginHandlerHost["appToken"] = async () => null): PluginHandlerHost {
@@ -189,6 +190,30 @@ describe("EventDispatcher plugin target", () => {
     expect(row.status).toBe("failed");
     expect(row.attempts).toBe(1);
     expect(row.lastError).toContain("review failed");
+    await d.stop();
+  });
+
+  it.each([
+    ["ends", async () => {}, "delivered"],
+    ["throws", async () => { throw new Error("review failed"); }, "failed"],
+  ] as const)("releases the run's thread sessions after the handler %s", async (_label, body, status) => {
+    const { deliveryId } = await seed();
+    const order: string[] = [];
+    const threads: RunPluginThreads = { ...noThreads, release: vi.fn(async () => { order.push("release"); }) };
+    const d = dispatcher(pluginWith(async () => { order.push("handle"); await body(); }), { ...handlerHost(), threads: () => threads });
+    await d.pollOnce();
+    expect((await settled(deliveryId)).status).toBe(status);
+    expect(order).toEqual(["handle", "release"]);
+    await d.stop();
+  });
+
+  it("keeps a delivered run delivered when the release fails", async () => {
+    const { deliveryId } = await seed();
+    const threads: RunPluginThreads = { ...noThreads, release: vi.fn(async () => { throw new Error("db down"); }) };
+    const d = dispatcher(pluginWith(async () => {}), { ...handlerHost(), threads: () => threads });
+    await d.pollOnce();
+    expect((await settled(deliveryId)).status).toBe("delivered");
+    expect(threads.release).toHaveBeenCalledTimes(1);
     await d.stop();
   });
 
