@@ -267,6 +267,20 @@ describe('channelWebhooksRouter Telegram', () => {
       });
     });
 
+    it('retries the re-registration when setWebhook fails', async () => {
+      getTransportMock.mockReturnValue({ parseInbound: vi.fn() });
+      const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => new Response('down', { status: 502 }));
+      vi.stubGlobal('fetch', fetchMock);
+
+      await post('/telegram/webhook/user-retry', {});
+      fetchMock.mockImplementation(async () => new Response(JSON.stringify({ ok: true }), { status: 200 }));
+      await post('/telegram/webhook/user-retry', {});
+      await post('/telegram/webhook/user-retry', {});
+
+      const setWebhookCalls = fetchMock.mock.calls.filter((call) => String(call[0]).endsWith('/setWebhook'));
+      expect(setWebhookCalls).toHaveLength(2);
+    });
+
     it('does not accept Slack or other channels on the unsigned route', async () => {
       const res = await post('/slack/webhook/user-1', { [TELEGRAM_SECRET_HEADER]: secret });
 

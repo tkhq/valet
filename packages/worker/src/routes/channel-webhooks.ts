@@ -37,7 +37,7 @@ function constantTimeEqual(a: string, b: string): boolean {
  * Bots connected before webhook secrets existed call without the header; the
  * first such call re-registers the webhook with the secret and is refused,
  * and Telegram retries it with the header. The set bounds that to one
- * setWebhook per user per isolate.
+ * successful setWebhook per user per isolate; a failed one is retried.
  */
 const telegramSecretBackfilled = new Set<string>();
 
@@ -69,9 +69,10 @@ channelWebhooksRouter.post('/:channelType/webhook/:userId', async (c) => {
   const presented = c.req.header(TELEGRAM_SECRET_HEADER);
   if (!presented) {
     if (!telegramSecretBackfilled.has(userId)) {
-      telegramSecretBackfilled.add(userId);
       const url = new URL(c.req.url);
-      await registerTelegramWebhook(c.env, userId, botToken, `${url.origin}${url.pathname}`);
+      const registered = await registerTelegramWebhook(c.env, userId, botToken, `${url.origin}${url.pathname}`)
+        .catch(() => false);
+      if (registered) telegramSecretBackfilled.add(userId);
     }
     return c.json({ error: 'Missing webhook secret' }, 401);
   }
