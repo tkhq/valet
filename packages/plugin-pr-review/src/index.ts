@@ -80,6 +80,7 @@ export { directoryMemory } from "./context/memory-dir.js";
 export { FOCUS_PROMPTS, REVIEW_FOCUSES, REVIEWER_SYSTEM_PROMPT, buildReviewPrompt, type ReviewFocus } from "./prompt.js";
 export * from "./types.js";
 export {
+  acceptsEvent,
   createReviewHandler,
   excluded,
   flaggedCodeChanged,
@@ -88,6 +89,7 @@ export {
   manualReviewOptions,
   POINTERS_COLLECTION,
   pullTarget,
+  renderAlreadyReviewed,
   ReviewSettingsSchema,
   type FindingPointer,
   type ManualReviewOptions,
@@ -95,5 +97,6 @@ export {
   type ReviewSettings,
 } from "./handler.js";
 export { githubClient, GitHubError, type GitHubClient } from "./github.js";
+export { isMentionEvent, MENTION_EVENTS, mentionCommand, reviewRequest, type CommentSurface, type ReviewRequest } from "./mention.js";
 export { parseFindings, renderFinding, renderSummary, type PostedFinding } from "./render.js";
 export { classifyOutcome, FINDINGS_COLLECTION, recordKey, type FindingOutcome, type FindingPlacement, type FindingRecord } from "./records.js";

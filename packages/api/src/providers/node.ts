@@ -1,5 +1,6 @@
 import { actionIdResolver } from "../plugins/action-id.js";
 import { githubInstallationTokenFor } from "../events/derive.js";
+import { loadAppConfig } from "../services/github-app.js";
 import { buildPluginThreads, stopPluginDeliveryChildren } from "../plugins/plugin-threads.js";
 import { externalUsageRetention } from "../services/external-usage.js";
 import { taggingDrain } from "../tagging/worker.js";
@@ -990,6 +991,12 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
         return async (orgId: string, service: string, scope?: { owner?: string }) =>
           service === "github" ? githubToken(orgId, scope?.owner) : null;
       })(),
+      // A GitHub App acts on GitHub as its bot user, `<app-slug>[bot]`.
+      appLogin: async (orgId: string, service: string) => {
+        if (service !== "github") return null;
+        const config = await loadAppConfig({ credentials: engineCredentials }, orgId);
+        return config ? `${config.appSlug}[bot]` : null;
+      },
     },
   });
 

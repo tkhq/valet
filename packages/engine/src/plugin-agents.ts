@@ -172,6 +172,12 @@ export interface PluginEventContext {
    */
   appToken(service: string, scope?: { owner?: string }): Promise<string | null>;
   /**
+   * The login of the org's app account for one of this plugin's services,
+   * such as `my-app[bot]` for a GitHub App, or null when none is connected.
+   * The service rule is the one `appToken` follows.
+   */
+  appLogin(service: string): Promise<string | null>;
+  /**
    * Aborts when the run must stop: the line was turned off, a newer event
    * superseded this run, another process took the delivery, or the server
    * is shutting down. `ctx.threads` waits end with an `AbortError` then.
@@ -183,6 +189,14 @@ export interface PluginEventContext {
    * can be compared across versions.
    */
   build?: string;
+}
+
+/** What `PluginEventHandler.accepts` receives besides the event. */
+export interface PluginAcceptContext {
+  /** This line's settings for the handler, as `PluginEventContext.config` has them. */
+  config: Record<string, unknown>;
+  /** As `PluginEventContext.appLogin`. */
+  appLogin(service: string): Promise<string | null>;
 }
 
 /** An event delivered to a plugin handler, with its stored id. */
@@ -222,6 +236,14 @@ export interface PluginEventHandler {
    * Events with no natural subject run in parallel.
    */
   concurrency?: "parallel" | "supersede";
+  /**
+   * Whether the handler acts on this event. The host asks before the run
+   * starts and before it supersedes anything. False skips the delivery, so
+   * an event the handler ignores (such as a comment that does not mention
+   * it) cannot cancel a run in flight. Absent: every matched event runs.
+   * A throw fails the delivery. Keep it cheap: it runs once per delivery.
+   */
+  accepts?(event: PluginEvent, ctx: PluginAcceptContext): boolean | Promise<boolean>;
   handle(event: PluginEvent, ctx: PluginEventContext): Promise<void>;
 }
 
