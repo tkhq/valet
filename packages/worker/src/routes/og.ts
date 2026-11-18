@@ -27,70 +27,94 @@ async function getFont(): Promise<ArrayBuffer> {
 
 export const ogRouter = new Hono<{ Bindings: Env; Variables: Variables }>();
 
+const GENERIC_SESSION_TITLE = 'Valet session';
+
+interface SessionCard {
+  title: string;
+  description: string;
+  repo: string;
+  workspace: string;
+}
+
 /**
- * GET /og/meta/session/:id
- * Returns OG metadata for a session (public, no auth)
+ * Resolves an active share link to the session details shown in link
+ * previews. Previews by bare session ID never reach this: the ID is not an
+ * access grant, so those get the generic card.
  */
-ogRouter.get('/meta/session/:id', async (c) => {
-  const { id } = c.req.param();
-
-  const session = await getSession(c.get('db'), id);
-  if (!session) {
-    return c.json({ error: 'Session not found' }, 404);
-  }
-
-  const gitState = await getSessionGitState(c.get('db'), id);
+async function sessionCardForShareToken(db: Variables['db'], token: string): Promise<SessionCard | null> {
+  const link = await getShareLink(db, token);
+  if (!link) return null;
+  const session = await getSession(db, link.sessionId);
+  if (!session) return null;
+  const gitState = await getSessionGitState(db, link.sessionId);
 
   const sessionName = session.title || session.workspace || 'Untitled Session';
-  const title = `Join session: ${sessionName}`;
-  const parts: string[] = [];
-  if (gitState?.sourceRepoFullName) parts.push(gitState.sourceRepoFullName);
-  if (session.workspace) parts.push(session.workspace);
-  const description = parts.length > 0 ? parts.join(' · ') : 'Valet session';
+  const repo = gitState?.sourceRepoFullName || '';
+  const workspace = session.workspace || '';
+  const parts = [repo, workspace].filter(Boolean);
+  return {
+    title: `Join session: ${sessionName}`,
+    description: parts.length > 0 ? parts.join(' · ') : GENERIC_SESSION_TITLE,
+    repo,
+    workspace,
+  };
+}
 
-  // Build absolute image URL based on the request origin
+/**
+ * GET /og/meta/session/:id
+ * Generic OG metadata for a session URL (public, no auth). Reveals nothing
+ * about the session, not even whether it exists.
+ */
+ogRouter.get('/meta/session/:id', (c) => {
+  const { id } = c.req.param();
   const url = new URL(c.req.url);
-  const imageUrl = `${url.origin}/og/image/session/${id}`;
-
-  return c.json({ title, description, imageUrl });
+  return c.json({
+    title: GENERIC_SESSION_TITLE,
+    description: GENERIC_SESSION_TITLE,
+    imageUrl: `${url.origin}/og/image/session/${encodeURIComponent(id)}`,
+  });
 });
 
 /**
  * GET /og/meta/session-token/:token
- * Resolves a share token to session metadata
+ * OG metadata for a share link: the holder of an active link may see the
+ * session title, repo and workspace.
  */
 ogRouter.get('/meta/session-token/:token', async (c) => {
   const { token } = c.req.param();
-
-  const link = await getShareLink(c.get('db'), token);
-  if (!link) {
+  const card = await sessionCardForShareToken(c.get('db'), token);
+  if (!card) {
     return c.json({ error: 'Invalid share link' }, 404);
   }
-
-  // Redirect to the session ID variant
   const url = new URL(c.req.url);
-  return c.redirect(`${url.origin}/og/meta/session/${link.sessionId}`);
+  return c.json({
+    title: card.title,
+    description: card.description,
+    imageUrl: `${url.origin}/og/image/session-token/${encodeURIComponent(token)}`,
+  });
 });
 
 /**
  * GET /og/image/session/:id
- * Generates a dynamic OG image (PNG) for a session
+ * Generic OG image for a session URL.
  */
-ogRouter.get('/image/session/:id', async (c) => {
-  const { id } = c.req.param();
+ogRouter.get('/image/session/:id', () => renderSessionCardImage(GENERIC_SESSION_TITLE, '', ''));
 
-  const session = await getSession(c.get('db'), id);
-  if (!session) {
-    return c.json({ error: 'Session not found' }, 404);
+/**
+ * GET /og/image/session-token/:token
+ * OG image for a share link.
+ */
+ogRouter.get('/image/session-token/:token', async (c) => {
+  const { token } = c.req.param();
+  const card = await sessionCardForShareToken(c.get('db'), token);
+  if (!card) {
+    return c.json({ error: 'Invalid share link' }, 404);
   }
+  return renderSessionCardImage(card.title, card.repo, card.workspace);
+});
 
-  const gitState = await getSessionGitState(c.get('db'), id);
-
-  const sessionName = session.title || session.workspace || 'Untitled Session';
-  const title = `Join session: ${sessionName}`;
-  const repo = gitState?.sourceRepoFullName || '';
-  const workspace = session.workspace || '';
-
+/** Renders the 1200x630 session card PNG. */
+async function renderSessionCardImage(title: string, repo: string, workspace: string): Promise<Response> {
   const font = await getFont();
 
   // satori accepts virtual DOM objects — cast to satisfy React types
@@ -255,7 +279,7 @@ ogRouter.get('/image/session/:id', async (c) => {
       'Cache-Control': 'no-cache',
     },
   });
-});
+}
 
 /**
  * GET /og/meta/invite/:code
