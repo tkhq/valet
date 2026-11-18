@@ -32,7 +32,7 @@ import { resolveDefaultAssistant } from "../assistants/service.js";
 import { assistants } from "../schema/index.js";
 
 const orgId = "org-res";
-const ANTHROPIC_MODEL = "claude-haiku-4-5";
+const ANTHROPIC_MODEL = "claude-haiku-5-5";
 const OPENAI_MODEL = "gpt-4.1";
 const GOOGLE_MODEL = "gemini-2.5-pro";
 
@@ -509,7 +509,7 @@ describe("EngineHost model resolution wiring", () => {
     // is configured, so resolution attaches the model via the
     // no-credentials path, which carries the namespaced canonical id.
     expect(session.options.modelSpec).toBe("s");
-    expect(session.options.model.id).toBe("anthropic/claude-haiku-4-5");
+    expect(session.options.model.id).toBe("anthropic/claude-haiku-5-5");
   });
 
   it("wires runtime fallback to the assistant organization's configured tier", async () => {
@@ -573,13 +573,13 @@ describe("EngineHost model resolution wiring", () => {
     // enabled: true (default), but no org credential was ever saved for
     // this row — same state as an admin deleting the key via DELETE
     // .../:id/key without also rewriting the tier's target list.
-    await setOrgTierMap(db, "local-org", { ...DEFAULT_TIER_MAP, s: [`${row.id}/m1`, "anthropic/claude-haiku-4-5"] });
+    await setOrgTierMap(db, "local-org", { ...DEFAULT_TIER_MAP, s: [`${row.id}/m1`, "anthropic/claude-haiku-5-5"] });
 
     const session = await defaultAssistantSessionFor(api.providers,
       { type: "user", id: "local-user" },
       { actorUserId: "local-user", orgId: "local-org" },
     );
-    expect(session.options.model.id).toBe("anthropic/claude-haiku-4-5");
+    expect(session.options.model.id).toBe("anthropic/claude-haiku-5-5");
   });
 
   it("new-session precedence: the tier fallback walks past a disabled provider to the next target", async () => {
@@ -593,13 +593,13 @@ describe("EngineHost model resolution wiring", () => {
       models: [{ id: "m1", name: "M1", contextWindow: 8000 }],
     });
     await updateLlmProvider(db, "local-org", row.id, { enabled: false });
-    await setOrgTierMap(db, "local-org", { ...DEFAULT_TIER_MAP, s: [`${row.id}/m1`, "anthropic/claude-haiku-4-5"] });
+    await setOrgTierMap(db, "local-org", { ...DEFAULT_TIER_MAP, s: [`${row.id}/m1`, "anthropic/claude-haiku-5-5"] });
 
     const session = await defaultAssistantSessionFor(api.providers,
       { type: "user", id: "local-user" },
       { actorUserId: "local-user", orgId: "local-org" },
     );
-    expect(session.options.model.id).toBe("anthropic/claude-haiku-4-5");
+    expect(session.options.model.id).toBe("anthropic/claude-haiku-5-5");
   });
 
   it("new-session precedence: every tier target inactive throws a corrective, tier-specific error — no fallback beyond the tier itself", async () => {
@@ -671,7 +671,7 @@ describe("EngineHost model resolution wiring", () => {
       orgId: "local-org",
       workspace: "/tmp",
     });
-    expect(session.options.model.id).toBe("anthropic/claude-haiku-4-5");
+    expect(session.options.model.id).toBe("anthropic/claude-haiku-5-5");
   });
 
   it("shared team assistant ignores the first waker's personal default (TKAI-255 review round)", async () => {
@@ -701,7 +701,7 @@ describe("EngineHost model resolution wiring", () => {
       { type: "team", id: team.id },
       { actorUserId: "local-user", orgId: "local-org" },
     );
-    expect(session.options.model.id).toBe("anthropic/claude-haiku-4-5");
+    expect(session.options.model.id).toBe("anthropic/claude-haiku-5-5");
   });
 
   it("a team default on an inactive provider falls through to the tier fallback (TKAI-255 review round)", async () => {
@@ -727,7 +727,7 @@ describe("EngineHost model resolution wiring", () => {
       workspace: "/tmp",
       ownerTeamId: team.id,
     });
-    expect(session.options.model.id).toBe("anthropic/claude-haiku-4-5");
+    expect(session.options.model.id).toBe("anthropic/claude-haiku-5-5");
   });
 
   it("new-session precedence: a team assistant session uses the team's default (TKAI-255)", async () => {
@@ -886,7 +886,7 @@ describe("EngineHost model resolution wiring", () => {
         { actorUserId: "local-user", orgId: "local-org" },
       );
       expect(session.options.modelSpec).toBe("s");
-      expect(session.options.model.id).toBe("claude-haiku-4-5");
+      expect(session.options.model.id).toBe("claude-haiku-5-5");
     });
 
     it("beats the \"s\" fallback when nothing else is set", async () => {
@@ -898,7 +898,7 @@ describe("EngineHost model resolution wiring", () => {
         { actorUserId: "local-user", orgId: "local-org" },
       );
       expect(session.options.modelSpec).toBe("m");
-      expect(session.options.model.id).toBe("claude-sonnet-4-6");
+      expect(session.options.model.id).toBe("claude-sonnet-5-5");
     });
 
     it("falls through to \"s\" when a provider change leaves the org default tier with no active target", async () => {
@@ -914,7 +914,7 @@ describe("EngineHost model resolution wiring", () => {
         { actorUserId: "local-user", orgId: "local-org" },
       );
       expect(session.options.modelSpec).toBe("s");
-      expect(session.options.model.id).toBe("claude-haiku-4-5");
+      expect(session.options.model.id).toBe("claude-haiku-5-5");
     });
 
     it("falls through to \"s\" when the default tier's provider stays enabled but loses its key", async () => {
@@ -942,7 +942,7 @@ describe("EngineHost model resolution wiring", () => {
         workspace: "/tmp",
       });
       expect(keyless.options.modelSpec).toBe("s");
-      expect(keyless.options.model.id).toBe("claude-haiku-4-5");
+      expect(keyless.options.model.id).toBe("claude-haiku-5-5");
     });
 
     it("falls through to \"s\" when a keyed custom provider no longer lists the default tier's model", async () => {
@@ -967,7 +967,7 @@ describe("EngineHost model resolution wiring", () => {
         workspace: "/tmp",
       });
       expect(session.options.modelSpec).toBe("s");
-      expect(session.options.model.id).toBe("claude-haiku-4-5");
+      expect(session.options.model.id).toBe("claude-haiku-5-5");
     });
 
     it("a user default beats the org default tier", async () => {
@@ -1010,7 +1010,7 @@ describe("EngineHost model resolution wiring", () => {
         { actorUserId: "local-user", orgId: "local-org" },
       );
       expect(session.options.modelSpec).toBe("l");
-      expect(session.options.model.id).toBe("claude-opus-4-7");
+      expect(session.options.model.id).toBe("claude-opus-5-5");
     });
 
     it("a child without an explicit model stays on the \"s\" tier", async () => {
@@ -1033,7 +1033,7 @@ describe("EngineHost model resolution wiring", () => {
       });
       expect(parent.options.modelSpec).toBe("l");
       expect(child.options.modelSpec).toBe("s");
-      expect(child.options.model.id).toBe("claude-haiku-4-5");
+      expect(child.options.model.id).toBe("claude-haiku-5-5");
     });
   });
 
@@ -1045,7 +1045,7 @@ describe("EngineHost model resolution wiring", () => {
       await db.update(users).set({ defaultModel: "claude-opus-4-5" }).where(eq(users.id, "local-user"));
 
       const assistant = await resolveDefaultAssistant(db, "local-org", { type: "user", id: "local-user" });
-      // "l" tier resolves to anthropic/claude-opus-4-7 by built-in default
+      // "l" tier resolves to anthropic/claude-opus-5-5 by built-in default
       // (model-tiers.ts) — distinct from the user's "claude-opus-4-5" pick,
       // so the two tiers are distinguishable.
       await db.update(users).set({ defaultModel: "l" }).where(eq(users.id, "local-user"));

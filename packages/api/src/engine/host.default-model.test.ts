@@ -1,7 +1,7 @@
 /**
  * split-settings design decision 9 / Task 4: `users.default_model` feeds
  * `EngineHost`'s session builders through the `resolveModel()` seam that
- * used to be hardcoded to `claude-haiku-4-5`.
+ * used to be hardcoded to `claude-haiku-5-5`.
  *
  * Restore-no-clobber (spec-pinned): `Session.rehydrate`
  * (`packages/engine/src/session.ts`) takes `options.model` verbatim from
@@ -53,7 +53,7 @@ describe("EngineHost default model", () => {
     // Haiku. No org key is configured, so resolution attaches the model
     // via the no-credentials path, which carries the namespaced id.
     expect(session.options.modelSpec).toBe("s");
-    expect(session.options.model.id).toBe("anthropic/claude-haiku-4-5");
+    expect(session.options.model.id).toBe("anthropic/claude-haiku-5-5");
   });
 
   it("child session: explicit modelId wins over the owner's default", async () => {
@@ -105,8 +105,8 @@ describe("EngineHost default model", () => {
       workspace: "/tmp",
     });
 
-    // The 's' tier resolves to claude-haiku-4-5 via the default tier map.
-    expect(child.options.model.id).toBe("claude-haiku-4-5");
+    // The 's' tier resolves to claude-haiku-5-5 via the default tier map.
+    expect(child.options.model.id).toBe("claude-haiku-5-5");
     vi.unstubAllEnvs();
   });
 

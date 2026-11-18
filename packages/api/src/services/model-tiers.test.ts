@@ -44,9 +44,9 @@ describe("model-tiers", () => {
 
   it("uses Astra when explicitly configured in a tier", async () => {
     vi.stubEnv("OPENAI_API_KEY", "env-openai");
-    await setOrgTierMap(db, orgId, { ...DEFAULT_TIER_MAP, l: ["openai/gpt-6-astra", "openai/gpt-6.1-sol"] });
-    expect(await resolveTier(db, credentials, orgId, "l")).toBe("openai/gpt-6-astra");
-    expect((await resolvableTiers(db, credentials, orgId)).get("l")).toBe("openai/gpt-6-astra");
+    await setOrgTierMap(db, orgId, { ...DEFAULT_TIER_MAP, l: ["openai/gpt-6.2-astra", "openai/gpt-6.2-sol"] });
+    expect(await resolveTier(db, credentials, orgId, "l")).toBe("openai/gpt-6.2-astra");
+    expect((await resolvableTiers(db, credentials, orgId)).get("l")).toBe("openai/gpt-6.2-astra");
   });
 
   it("treats amazon-bedrock like the other known kinds: active with no row, inactive when its row is disabled", async () => {
@@ -63,20 +63,40 @@ describe("model-tiers", () => {
     expect(Object.values(DEFAULT_TIER_MAP).flat().some((id) => id.includes("astra"))).toBe(false);
   });
 
-  it("upgrades saved Sol recommendations without changing explicit model IDs or other tiers", async () => {
+  it("defaults each tier to the latest Claude model", () => {
+    expect(DEFAULT_TIER_MAP).toEqual({
+      xs: ["anthropic/claude-haiku-5-5"],
+      s: ["anthropic/claude-haiku-5-5"],
+      m: ["anthropic/claude-sonnet-5-5"],
+      l: ["anthropic/claude-opus-5-5"],
+      xl: ["anthropic/claude-fable-5-2"],
+    });
+  });
+
+  it("upgrades saved recommendations without changing explicit model IDs or other tiers", async () => {
     vi.stubEnv("OPENAI_API_KEY", "env-openai");
-    await setOrgTierMap(db, orgId, { ...DEFAULT_TIER_MAP, l: ["openai/gpt-5.6-sol", "anthropic/claude-opus-4-7"] });
-    expect((await getOrgTierMap(db, orgId)).l).toEqual(["openai/gpt-6.1-sol", "anthropic/claude-opus-4-7"]);
-    expect(await resolveTier(db, credentials, orgId, "l")).toBe("openai/gpt-6.1-sol");
-    expect((await getOrgTierMap(db, orgId)).s).toEqual(DEFAULT_TIER_MAP.s);
+    await setOrgTierMap(db, orgId, {
+      ...DEFAULT_TIER_MAP,
+      m: ["claude-sonnet-4-6", "prov_custom/claude-sonnet-4-6"],
+      l: ["openai/gpt-5.6-sol", "openai/gpt-6-astra", "anthropic/claude-opus-4-7"],
+      xl: ["anthropic/claude-fable-5-1", "anthropic/claude-fable-5-2"],
+    });
+    const map = await getOrgTierMap(db, orgId);
+    expect(map.m).toEqual(["anthropic/claude-sonnet-5-5", "prov_custom/claude-sonnet-4-6"]);
+    expect(map.l).toEqual(["openai/gpt-6.2-sol", "openai/gpt-6.2-astra", "anthropic/claude-opus-5-5"]);
+    expect(map.xl).toEqual(["anthropic/claude-fable-5-2"]);
+    expect(map.s).toEqual(DEFAULT_TIER_MAP.s);
+    expect(await resolveTier(db, credentials, orgId, "l")).toBe("openai/gpt-6.2-sol");
   });
 
   it("does not bypass an org allowlist when upgrading a saved recommendation", async () => {
-    await setOrgTierMap(db, orgId, { ...DEFAULT_TIER_MAP, l: ["openai/gpt-5.6-sol"] });
-    await setApprovedModels(db, orgId, ["openai/gpt-5.6-sol"]);
-    expect((await getOrgTierMap(db, orgId)).l).toEqual(["openai/gpt-5.6-sol"]);
-    await setApprovedModels(db, orgId, ["openai/gpt-6.1-sol"]);
-    expect((await getOrgTierMap(db, orgId)).l).toEqual(["openai/gpt-6.1-sol"]);
+    await setOrgTierMap(db, orgId, { ...DEFAULT_TIER_MAP, l: ["openai/gpt-5.6-sol", "claude-opus-4-7"] });
+    await setApprovedModels(db, orgId, ["openai/gpt-5.6-sol", "claude-opus-4-7"]);
+    expect((await getOrgTierMap(db, orgId)).l).toEqual(["openai/gpt-5.6-sol", "claude-opus-4-7"]);
+    await setApprovedModels(db, orgId, ["openai/gpt-6.1-sol", "claude-opus-5-5"]);
+    expect((await getOrgTierMap(db, orgId)).l).toEqual(["openai/gpt-6.1-sol", "anthropic/claude-opus-5-5"]);
+    await setApprovedModels(db, orgId, ["openai/gpt-6.2-sol"]);
+    expect((await getOrgTierMap(db, orgId)).l).toEqual(["openai/gpt-6.2-sol", "claude-opus-4-7"]);
   });
 
   describe("getOrgTierMap", () => {
@@ -103,9 +123,9 @@ describe("model-tiers", () => {
       vi.stubEnv("ANTHROPIC_API_KEY", "env-anthropic");
       const resolved = await resolveModelSpec(db, credentials, orgId, "l");
       expect(resolved).not.toBeNull();
-      // Default l → anthropic/claude-opus-4-7
+      // Default l → anthropic/claude-opus-5-5
       expect(resolved!.model.provider).toBe("anthropic");
-      expect(resolved!.model.id).toBe("claude-opus-4-7");
+      expect(resolved!.model.id).toBe("claude-opus-5-5");
     });
 
     it("returns the tier as canonicalId, not the resolved model spec", async () => {
@@ -161,12 +181,12 @@ describe("model-tiers", () => {
 
       const custom: TierMap = {
         ...DEFAULT_TIER_MAP,
-        m: [`${row.id}/m1`, "anthropic/claude-sonnet-4-6"],
+        m: [`${row.id}/m1`, "anthropic/claude-sonnet-5-5"],
       };
       await setOrgTierMap(db, orgId, custom);
 
       const resolved = await resolveModelSpec(db, credentials, orgId, "m");
-      expect(resolved!.model.id).toBe("claude-sonnet-4-6");
+      expect(resolved!.model.id).toBe("claude-sonnet-5-5");
       expect(resolved!.canonicalId).toBe("m");
     });
 
@@ -187,12 +207,12 @@ describe("model-tiers", () => {
       vi.stubEnv("ANTHROPIC_API_KEY", "env-anthropic");
       const custom: TierMap = {
         ...DEFAULT_TIER_MAP,
-        s: ["anthropic/claude-sonnet-4-6"],
+        s: ["anthropic/claude-sonnet-5-5"],
       };
       await setOrgTierMap(db, orgId, custom);
 
       const resolved = await resolveModelSpec(db, credentials, orgId, "s");
-      expect(resolved!.model.id).toBe("claude-sonnet-4-6");
+      expect(resolved!.model.id).toBe("claude-sonnet-5-5");
       expect(resolved!.canonicalId).toBe("s");
     });
 
@@ -222,20 +242,20 @@ describe("model-tiers", () => {
 
     it("a cycle skips to the next target in the tier", async () => {
       vi.stubEnv("ANTHROPIC_API_KEY", "env-anthropic");
-      await setOrgTierMap(db, orgId, { ...DEFAULT_TIER_MAP, m: ["m", "anthropic/claude-sonnet-4-6"] });
+      await setOrgTierMap(db, orgId, { ...DEFAULT_TIER_MAP, m: ["m", "anthropic/claude-sonnet-5-5"] });
 
-      expect(await resolveTier(db, credentials, orgId, "m")).toBe("anthropic/claude-sonnet-4-6");
-      expect((await resolvableTiers(db, credentials, orgId)).get("m")).toBe("anthropic/claude-sonnet-4-6");
+      expect(await resolveTier(db, credentials, orgId, "m")).toBe("anthropic/claude-sonnet-5-5");
+      expect((await resolvableTiers(db, credentials, orgId)).get("m")).toBe("anthropic/claude-sonnet-5-5");
     });
 
     it("a target that names another tier resolves through that tier", async () => {
       vi.stubEnv("ANTHROPIC_API_KEY", "env-anthropic");
       await setOrgTierMap(db, orgId, { ...DEFAULT_TIER_MAP, xs: ["s"] });
 
-      expect(await resolveTier(db, credentials, orgId, "xs")).toBe("anthropic/claude-haiku-4-5");
+      expect(await resolveTier(db, credentials, orgId, "xs")).toBe("anthropic/claude-haiku-5-5");
       const resolved = await resolveModelSpec(db, credentials, orgId, "xs");
       expect(resolved?.canonicalId).toBe("xs");
-      expect(resolved?.model.id).toBe("claude-haiku-4-5");
+      expect(resolved?.model.id).toBe("claude-haiku-5-5");
     });
   });
 
@@ -244,7 +264,7 @@ describe("model-tiers", () => {
       vi.stubEnv("ANTHROPIC_API_KEY", "env-anthropic");
       const usable = await resolvableTiers(db, credentials, orgId);
       expect([...usable.keys()].sort()).toEqual([...TIER_TOKENS].sort());
-      expect(usable.get("m")).toBe("anthropic/claude-sonnet-4-6");
+      expect(usable.get("m")).toBe("anthropic/claude-sonnet-5-5");
     });
 
     it("lists no tier when the target's known kind has no key anywhere", async () => {
@@ -259,7 +279,7 @@ describe("model-tiers", () => {
     it("accepts a row's own key when the deployment env has none", async () => {
       const row = await createLlmProvider(db, { orgId, kind: "anthropic", name: "Anthropic" });
       await saveKey(row.id, "org-anthropic");
-      expect((await resolvableTiers(db, credentials, orgId)).get("m")).toBe("anthropic/claude-sonnet-4-6");
+      expect((await resolvableTiers(db, credentials, orgId)).get("m")).toBe("anthropic/claude-sonnet-5-5");
     });
 
     it("lists no tier when only an unrelated provider has a key", async () => {
@@ -275,9 +295,9 @@ describe("model-tiers", () => {
       vi.stubEnv("OPENAI_API_KEY", "env-openai");
       await setOrgTierMap(db, orgId, {
         ...DEFAULT_TIER_MAP,
-        m: ["anthropic/claude-sonnet-4-6", "openai/gpt-6.1-sol"],
+        m: ["anthropic/claude-sonnet-5-5", "openai/gpt-6.2-sol"],
       });
-      expect(await resolveTier(db, credentials, orgId, "m")).toBe("anthropic/claude-sonnet-4-6");
+      expect(await resolveTier(db, credentials, orgId, "m")).toBe("anthropic/claude-sonnet-5-5");
       const usable = await resolvableTiers(db, credentials, orgId);
       expect(usable.has("m")).toBe(false);
       expect(usable.has("l")).toBe(false);
@@ -297,10 +317,10 @@ describe("model-tiers", () => {
       await updateLlmProvider(db, orgId, row.id, { enabled: false });
       await setOrgTierMap(db, orgId, {
         ...DEFAULT_TIER_MAP,
-        m: [`${row.id}/m1`, "openai/gpt-6.1-sol"],
+        m: [`${row.id}/m1`, "openai/gpt-6.2-sol"],
       });
-      expect(await resolveTier(db, credentials, orgId, "m")).toBe("openai/gpt-6.1-sol");
-      expect((await resolvableTiers(db, credentials, orgId)).get("m")).toBe("openai/gpt-6.1-sol");
+      expect(await resolveTier(db, credentials, orgId, "m")).toBe("openai/gpt-6.2-sol");
+      expect((await resolvableTiers(db, credentials, orgId)).get("m")).toBe("openai/gpt-6.2-sol");
     });
 
     it("skips a tier whose target provider the org disabled", async () => {
@@ -325,11 +345,11 @@ describe("model-tiers", () => {
   describe("tierTargetsNotApproved", () => {
     it("returns null when approved list is null (unrestricted)", () => {
       const tierMap: TierMap = {
-        xs: ["anthropic/claude-haiku-4-5"],
-        s: ["anthropic/claude-sonnet-4-6"],
+        xs: ["anthropic/claude-haiku-5-5"],
+        s: ["anthropic/claude-sonnet-5-5"],
         m: ["openai/gpt-4-turbo"],
-        l: ["anthropic/claude-opus-4-7"],
-        xl: ["anthropic/claude-opus-4-7"],
+        l: ["anthropic/claude-opus-5-5"],
+        xl: ["anthropic/claude-opus-5-5"],
       };
       const err = tierTargetsNotApproved(tierMap, null);
       expect(err).toBeNull();
@@ -337,17 +357,17 @@ describe("model-tiers", () => {
 
     it("returns null when all tier specs are approved", () => {
       const tierMap: TierMap = {
-        xs: ["anthropic/claude-haiku-4-5"],
-        s: ["anthropic/claude-sonnet-4-6"],
+        xs: ["anthropic/claude-haiku-5-5"],
+        s: ["anthropic/claude-sonnet-5-5"],
         m: ["openai/gpt-4-turbo"],
-        l: ["anthropic/claude-opus-4-7"],
-        xl: ["anthropic/claude-opus-4-7"],
+        l: ["anthropic/claude-opus-5-5"],
+        xl: ["anthropic/claude-opus-5-5"],
       };
       const approved = [
-        "anthropic/claude-haiku-4-5",
-        "anthropic/claude-sonnet-4-6",
+        "anthropic/claude-haiku-5-5",
+        "anthropic/claude-sonnet-5-5",
         "openai/gpt-4-turbo",
-        "anthropic/claude-opus-4-7",
+        "anthropic/claude-opus-5-5",
       ];
       const err = tierTargetsNotApproved(tierMap, approved);
       expect(err).toBeNull();
@@ -355,17 +375,17 @@ describe("model-tiers", () => {
 
     it("returns error message when a tier contains an unapproved spec", () => {
       const tierMap: TierMap = {
-        xs: ["anthropic/claude-haiku-4-5"],
-        s: ["anthropic/claude-sonnet-4-6"],
+        xs: ["anthropic/claude-haiku-5-5"],
+        s: ["anthropic/claude-sonnet-5-5"],
         m: ["openai/gpt-4-turbo"],
-        l: ["anthropic/claude-opus-4-7"],
-        xl: ["anthropic/claude-opus-4-7"],
+        l: ["anthropic/claude-opus-5-5"],
+        xl: ["anthropic/claude-opus-5-5"],
       };
       const approved = [
-        "anthropic/claude-haiku-4-5",
-        "anthropic/claude-sonnet-4-6",
+        "anthropic/claude-haiku-5-5",
+        "anthropic/claude-sonnet-5-5",
         // openai/gpt-4-turbo is NOT approved
-        "anthropic/claude-opus-4-7",
+        "anthropic/claude-opus-5-5",
       ];
       const err = tierTargetsNotApproved(tierMap, approved);
       expect(err).toBe(
@@ -375,17 +395,17 @@ describe("model-tiers", () => {
 
     it("returns error for the first unapproved spec found", () => {
       const tierMap: TierMap = {
-        xs: ["anthropic/claude-haiku-4-5"],
-        s: ["anthropic/claude-sonnet-4-6"],
+        xs: ["anthropic/claude-haiku-5-5"],
+        s: ["anthropic/claude-sonnet-5-5"],
         m: ["openai/gpt-4-turbo", "custom/model-x"],
-        l: ["anthropic/claude-opus-4-7"],
-        xl: ["anthropic/claude-opus-4-7"],
+        l: ["anthropic/claude-opus-5-5"],
+        xl: ["anthropic/claude-opus-5-5"],
       };
       const approved = [
-        "anthropic/claude-haiku-4-5",
-        "anthropic/claude-sonnet-4-6",
+        "anthropic/claude-haiku-5-5",
+        "anthropic/claude-sonnet-5-5",
         // Neither openai/gpt-4-turbo nor custom/model-x is approved
-        "anthropic/claude-opus-4-7",
+        "anthropic/claude-opus-5-5",
       ];
       const err = tierTargetsNotApproved(tierMap, approved);
       // Should return error for the first unapproved spec

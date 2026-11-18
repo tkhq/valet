@@ -85,7 +85,7 @@ describe("/api/org/model-tiers defaultTier", () => {
     expect(await getOrgDefaultTier(db, "local-org")).toBeNull();
   });
 
-  it.each(["opus", "anthropic/claude-opus-4-7", "M", 3])("rejects %s, which is not a tier token", async (value) => {
+  it.each(["opus", "anthropic/claude-opus-5-5", "M", 3])("rejects %s, which is not a tier token", async (value) => {
     api = await bootTestApi();
     const res = await patchTiers(api.baseUrl, { defaultTier: value });
     expect(res.status).toBe(400);
@@ -114,10 +114,10 @@ describe("/api/org/model-tiers defaultTier", () => {
     api = await bootTestApi();
     await disableLargeTier(api);
 
-    const res = await patchTiers(api.baseUrl, { l: ["anthropic/claude-opus-4-7"], defaultTier: "l" });
+    const res = await patchTiers(api.baseUrl, { l: ["anthropic/claude-opus-5-5"], defaultTier: "l" });
     expect(res.status).toBe(200);
     expect(await getOrgDefaultTier(api.providers.db, "local-org")).toBe("l");
-    expect((await getOrgTierMap(api.providers.db, "local-org")).l).toEqual(["anthropic/claude-opus-4-7"]);
+    expect((await getOrgTierMap(api.providers.db, "local-org")).l).toEqual(["anthropic/claude-opus-5-5"]);
   });
 
   it.each([
@@ -142,7 +142,7 @@ describe("/api/org/model-tiers defaultTier", () => {
     const { db } = api.providers;
     // Saved directly: a map saved before the PATCH refused tier tokens.
     await setOrgTierMap(db, "local-org", { ...DEFAULT_TIER_MAP, m: ["s"] });
-    const model = "anthropic/claude-sonnet-4-6";
+    const model = "anthropic/claude-sonnet-5-5";
 
     // The page sends the full list: first it adds a model, then it removes "s".
     expect((await patchTiers(api.baseUrl, { m: ["s", model] })).status).toBe(200);
@@ -201,7 +201,7 @@ describe("/api/org/model-tiers defaultTier", () => {
     // A default that an earlier change already broke does not block other
     // tier edits. The response reports it as unusable.
     await setOrgTierMap(db, "local-org", { ...DEFAULT_TIER_MAP, m: ["l"], l: [target] });
-    const other = await patchTiers(api.baseUrl, { xs: ["anthropic/claude-haiku-4-5"] });
+    const other = await patchTiers(api.baseUrl, { xs: ["anthropic/claude-haiku-5-5"] });
     expect(other.status).toBe(200);
     expect(((await other.json()) as GetModelTiersResponse).defaultTierResolvable).toBe(false);
   });
@@ -233,9 +233,9 @@ describe("/api/org/model-tiers defaultTier", () => {
     },
     {
       name: "a competing edit removes the tier token that this request keeps",
-      seed: { ...DEFAULT_TIER_MAP, m: ["s", "anthropic/claude-sonnet-4-6"] },
-      competing: { m: ["anthropic/claude-sonnet-4-6"] },
-      request: { m: ["s", "anthropic/claude-sonnet-4-6"] },
+      seed: { ...DEFAULT_TIER_MAP, m: ["s", "anthropic/claude-sonnet-5-5"] },
+      competing: { m: ["anthropic/claude-sonnet-5-5"] },
+      request: { m: ["s", "anthropic/claude-sonnet-5-5"] },
       error: /^Tier "m" cannot target the tier token "s"/,
     },
   ])("checks the state under the lock when $name", async ({ seed, competing, request, error }) => {

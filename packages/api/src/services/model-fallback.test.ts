@@ -11,7 +11,7 @@ import { resolveModelSpec } from "./model-resolution.js";
 import { DEFAULT_TIER_MAP, setOrgTierMap } from "./model-tiers.js";
 
 const orgId = "fallback-org";
-const primary = "anthropic/claude-haiku-4-5";
+const primary = "anthropic/claude-haiku-5-5";
 const secondary = "openai/gpt-4.1";
 const third = "google/gemini-2.5-pro";
 let fixture: Awaited<ReturnType<typeof freshTestPgDb>>;
@@ -61,7 +61,7 @@ describe("runtime model fallback policy", () => {
   it("uses the concrete model's matching tier and does not choose arbitrary catalog entries", async () => {
     vi.stubEnv("OPENAI_API_KEY", "openai-key");
     await setOrgTierMap(fixture.appDb, orgId, { ...DEFAULT_TIER_MAP, xs: [primary, secondary] });
-    expect(await fallback("claude-haiku-4-5")).toMatchObject({ canonicalId: secondary });
+    expect(await fallback("claude-haiku-5-5")).toMatchObject({ canonicalId: secondary });
     expect(await fallback("anthropic/not-in-any-tier")).toBeNull();
     // An explicitly selected tier keeps its own chain even if another tier could work.
     expect(await fallback("l")).toBeNull();
