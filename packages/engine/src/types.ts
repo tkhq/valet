@@ -1278,6 +1278,38 @@ export interface DecisionGateRequest {
   dedupeKey?: string;
 }
 
+/**
+ * A proof of presence: the approver's passkey stamped each listed Turnkey
+ * activity with user verification, and Turnkey executed it. This is the
+ * verifier state carried in an AuthZEN approval's `state` member. Member
+ * names follow AuthZEN's JSON style; `amr` uses RFC 8176 values.
+ */
+export interface PresenceProof {
+  /** The party that verified the passkey assertions. */
+  iss: "turnkey";
+  /** The approver's Turnkey sub-organization, where the activities ran. */
+  organization_id: string;
+  /** RFC 8176: `pop` (possession of the passkey) and `user` (a user presence test). */
+  amr: Array<"pop" | "user">;
+  /** The Turnkey user whose passkey approved, and the authenticator Turnkey recorded on its vote. */
+  approver: { user_id: string; authenticator?: { scheme: string; public_key: string } };
+  /** One entry per passkey tap, each binding the tap to the exact bytes it approved. */
+  activities: Array<{ activity_id: string; payload_sha256: string; approved_at: string }>;
+}
+
+/**
+ * An approval object in the shape of the AuthZEN Access Request and Approval
+ * Profile (section 8.1): a stable opaque `id`, RFC 3339 `approved_at` and
+ * `approved_until`, and `state` carrying the verifier's proof. A gate
+ * approval is single use, so `approved_until` equals `approved_at`.
+ */
+export interface AuthzenApproval {
+  id: string;
+  approved_at: string;
+  approved_until: string;
+  state: PresenceProof;
+}
+
 export interface DecisionResolution {
   /** Transient engine-supplied context from the actual gate, not a caller's
    * answer. Empty means a legacy gate had no context. Not persisted here. */
@@ -1289,6 +1321,13 @@ export interface DecisionResolution {
   resolvedBy: string;
   resolvedAt: number;
   source?: { channelType?: string; channelId?: string; messageId?: string };
+  /**
+   * `presence` only when the host verified a passkey tap through Turnkey
+   * (`gate-assurance.ts`). Absent means a `session` approval.
+   */
+  assurance?: "session" | "presence";
+  /** The proof of presence behind a `presence` approval, as an AuthZEN approval object. */
+  approval?: AuthzenApproval;
   /**
    * The resolved gate's ordinal (see `DecisionGate.ordinal`), stamped on by
    * `Thread.requestDecision` — both on the live-registration path (from the

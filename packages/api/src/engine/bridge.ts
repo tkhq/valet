@@ -1,5 +1,5 @@
 import { secretRequestOf } from "./secret-tools.js";
-import { MID_TURN_DELIVERY_KEY, toolApprovalGateContext } from "@valet/engine";
+import { gateAssurance, MID_TURN_DELIVERY_KEY, toolApprovalGateContext } from "@valet/engine";
 import type {
   CommandResultEntry,
   DeliveredBusEvent,
@@ -19,6 +19,7 @@ import type {
   Message,
   MessagePart as WireMessagePart,
   MessageSignal as WireMessageSignal,
+  PresenceGateView,
   WireEvent,
   WireQueuedItem,
 } from "../wire/types.js";
@@ -46,6 +47,7 @@ export function engineGateToWire(g: EngineDecisionGate): WireDecisionGate {
   const riskLevel = WIRE_RISK_LEVELS.find((level) => level === toolContext?.riskLevel);
   const tool = gateTool(g.body, toolContext);
   const secretRequest = g.type === "credential_request" ? secretRequestOf(g.context) : undefined;
+  const presence = gateAssurance(g) === "presence" ? presenceViewOf(g.context) : undefined;
   return {
     id: g.id,
     sessionId: g.sessionId,
@@ -65,7 +67,31 @@ export function engineGateToWire(g: EngineDecisionGate): WireDecisionGate {
     ...(riskLevel ? { riskLevel } : {}),
     ...(tool ? { tool } : {}),
     ...(secretRequest ? { secretRequest } : {}),
+    ...(presence ? { assurance: "presence" as const, presence } : {}),
   };
+}
+
+/**
+ * The card's view of a passkey gate. A `git_commits` gate shows each
+ * commit's id, subject, and author; the commit objects and signing ids in
+ * `context.signing` stay on the server.
+ */
+export function presenceViewOf(context: Record<string, unknown> | undefined): PresenceGateView {
+  const raw = context?.presence;
+  if (typeof raw !== "object" || raw === null || !("kind" in raw) || raw.kind !== "git_commits") return { kind: "challenge" };
+  const repo = "repo" in raw && typeof raw.repo === "string" ? raw.repo : "";
+  const branch = "branch" in raw && typeof raw.branch === "string" ? raw.branch : "";
+  const list = "commits" in raw && Array.isArray(raw.commits) ? raw.commits : [];
+  const commits = list.flatMap((c: unknown) =>
+    typeof c === "object" && c !== null && "sha" in c && typeof c.sha === "string"
+      ? [{
+          sha: c.sha,
+          subject: "subject" in c && typeof c.subject === "string" ? c.subject : "",
+          author: "author" in c && typeof c.author === "string" ? c.author : "",
+        }]
+      : [],
+  );
+  return { kind: "git_commits", repo, branch, commits };
 }
 
 const WIRE_RISK_LEVELS = ["low", "medium", "high", "critical"] as const;

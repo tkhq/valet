@@ -3,7 +3,6 @@ import {
   agentSigningPolicy,
   clampWindowMinutes,
   formatWindow,
-  githubKeyTitle,
   signingGateRequest,
   signingGateResumeKey,
 } from "./gate.js";
@@ -15,7 +14,7 @@ describe("signing gate", () => {
     expect(req.title).toBe("Sign commits");
     expect(req.body).toBe(
       "Sign commits in tkhq/valet, branch valet/x (pull request #42), valid for 2 h?\n" +
-        "The key is deleted after the window or when the pull request closes.",
+        "Git in the sandbox can sign any commit until the window ends.",
     );
     expect(req.actions?.map((a) => a.id)).toEqual(["approve", "reject"]);
     expect(req.actions?.[0]?.approves).toBe(true);
@@ -47,17 +46,6 @@ describe("window", () => {
     expect(formatWindow(120)).toBe("2 h");
     expect(formatWindow(90)).toBe("1 h 30 min");
     expect(formatWindow(45)).toBe("45 min");
-  });
-});
-
-describe("github key title", () => {
-  it("names the session, the pull request, and the expiry", () => {
-    const title = githubKeyTitle(
-      "sess-1",
-      { repo: "tkhq/valet", branch: "x", prNumber: 7, windowMinutes: 60 },
-      new Date("2026-09-12T10:00:00Z"),
-    );
-    expect(title).toBe("valet session sess-1 tkhq/valet#7 until 2026-09-12T10:00:00.000Z");
   });
 });
 

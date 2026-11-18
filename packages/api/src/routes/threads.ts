@@ -13,6 +13,7 @@ import { authorizedWorkspaceOwner } from "./workspace-runtime.js";
 import { keepVisibleThreads, threadEntry, threadsVisibleTo } from "./_thread-access.js";
 import { ensureDefaultAssistantSession, findDefaultAssistant } from "../assistants/service.js";
 import { readOptionalJsonObject } from "../lib/optional-json-body.js";
+import { getPresenceStep, postPresenceStep } from "./decision-passkey.js";
 import { fullToolResult } from "../services/transcript-trim.js";
 import {
   abortThread, branchPreview, cancelQueuedItem, createThread, duplicateThread, editPreview, forkThread, moveThread, getThreadChannelActivity, getThreadContext, getThreadRecap, listDecisions, listMessages,
@@ -199,3 +200,5 @@ threadsRouter.post("/:threadId/resume", c => inThread(c, resumeThread, "content"
 threadsRouter.get("/:threadId/decisions", c => inThread(c, listDecisions, "decision", "read"));
 threadsRouter.post("/:threadId/decisions/:gateId/resolve", c => inThread(c, resolveDecision, "decision"));
 threadsRouter.post("/:threadId/decisions/:gateId/withdraw", c => inThread(c, withdrawDecision, "decision"));
+threadsRouter.get("/:threadId/decisions/:gateId/passkey", c => inThread(c, getPresenceStep, "decision"));
+threadsRouter.post("/:threadId/decisions/:gateId/passkey", c => inThread(c, postPresenceStep, "decision"));

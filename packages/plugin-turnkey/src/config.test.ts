@@ -19,10 +19,16 @@ describe("loadTurnkeyConfig", () => {
       apiPublicKey: "02aa",
       apiPrivateKey: "bb",
       apiBaseUrl: DEFAULT_TURNKEY_API_BASE_URL,
+      assurance: "presence",
     });
     expect(loadTurnkeyConfig({ ...full, VALET_TURNKEY_API_BASE_URL: " https://api.dev " })?.apiBaseUrl).toBe(
       "https://api.dev",
     );
+  });
+
+  it("reads the signing assurance and refuses an unknown one", () => {
+    expect(loadTurnkeyConfig({ ...full, VALET_TURNKEY_SIGNING_ASSURANCE: "session" })?.assurance).toBe("session");
+    expect(() => loadTurnkeyConfig({ ...full, VALET_TURNKEY_SIGNING_ASSURANCE: "always" })).toThrow(/presence" or "session/);
   });
 
   it("names the missing variables of a partial set", () => {

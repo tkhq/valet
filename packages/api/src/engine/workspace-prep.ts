@@ -356,8 +356,9 @@ export async function installCredentialHelper(
   // Commit signing (agent commit signing design): git signs in SSH format
   // through `valet-sign`, which execs `tk ssh git-sign`. Signing stays OFF
   // here (`commit.gpgsign` is unset); `turnkey.request_signing_key` turns it
-  // on after the user approves a key, so commits before approval stay
-  // unsigned instead of failing.
+  // on after the user approves a window (session mode), so commits before
+  // approval stay unsigned instead of failing. Passkey mode never signs in
+  // the sandbox: `turnkey.sign_commits` rewrites the branch after approval.
   const signProgram = await sandbox.exec(
     `git config --global gpg.format ssh && git config --global gpg.ssh.program ${shQuote(SIGN_PROGRAM_PATH)}`,
   );

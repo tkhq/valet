@@ -7,15 +7,18 @@ import { errorText } from "~/lib/error-text";
 import { formatDateOr } from "~/lib/format-when";
 import { useCommitSigning, useEnrollCommitSigning } from "~/api/commit-signing";
 import { useMe } from "~/api/settings";
+import { SigningKeyModal } from "~/components/settings/signing-key-modal";
 
 /**
  * Personal · Integrations · Commit signing (agent commit signing design).
  *
- * One passkey tap creates the user's Turnkey sub-organization; the browser
- * makes the passkey with `@turnkey/sdk-browser` and posts the attestation.
- * After that the row lists the signing keys agents have been granted, newest
- * first. There is no disconnect here yet: the sub-organization is the
- * issuance record, and removing it is a Turnkey action the passkey owns.
+ * One passkey tap creates the user's Turnkey sub-organization and their
+ * Valet signing key; the browser makes the passkey with
+ * `@turnkey/sdk-browser` and posts the attestation. The person then adds the
+ * key to GitHub themselves (`SigningKeyModal`). An enrollment from before
+ * per-person keys shows "Set up again". There is no disconnect here yet:
+ * the sub-organization is the issuance record, and removing it is a Turnkey
+ * action the passkey owns.
  */
 export function CommitSigningSection() {
   const signingQ = useCommitSigning();
@@ -23,6 +26,7 @@ export function CommitSigningSection() {
   const enroll = useEnrollCommitSigning();
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  const [keyOpen, setKeyOpen] = useState(false);
 
   if (signingQ.isLoading) {
     return (
@@ -66,15 +70,19 @@ export function CommitSigningSection() {
     }
   };
 
-  if (!data.enrolled) {
+  if (!data.enrolled || data.needsReenroll) {
     return (
       <FieldRow
         label="Status"
-        hint="Agents sign commits with a key held in Turnkey after you approve each pull request. Your passkey is the root of that Turnkey organization."
+        hint={
+          data.needsReenroll
+            ? "Your setup is from an older version. Set up again to get your own signing key. You then add it to GitHub yourself."
+            : "Your passkey signs each commit an agent makes, through a key held in Turnkey. Your passkey is the root of that Turnkey organization."
+        }
         {...(error ? { error } : {})}
       >
         <Button type="button" disabled={creating || enroll.isPending} onClick={() => void onSetUp()}>
-          {creating || enroll.isPending ? "Setting up…" : "Set up commit signing"}
+          {creating || enroll.isPending ? "Setting up…" : data.needsReenroll ? "Set up again" : "Set up commit signing"}
         </Button>
       </FieldRow>
     );
@@ -91,10 +99,24 @@ export function CommitSigningSection() {
           <div className="text-xs text-muted">
             Turnkey organization <span className="break-all font-mono">{data.subOrgId}</span>
           </div>
+          <div className="text-xs text-muted">
+            {data.mode === "session" ? "Approved windows sign commits." : "Your passkey signs each commit."}
+          </div>
         </div>
       </FieldRow>
+      {data.signingKey && (
+        <FieldRow label="Signing key" hint="Add this key to your GitHub account as a Signing Key. Valet cannot add it for you.">
+          <div className="space-y-1.5 text-sm text-ink">
+            <div className="break-all font-mono text-xs">{data.signingKey.fingerprint}</div>
+            <Button type="button" size="sm" variant="secondary" onClick={() => setKeyOpen(true)}>
+              Add to GitHub
+            </Button>
+          </div>
+          <SigningKeyModal open={keyOpen} onOpenChange={setKeyOpen} publicKey={data.signingKey.publicKey} />
+        </FieldRow>
+      )}
       {data.keys.length > 0 && (
-        <FieldRow label="Signing keys" hint="One key per approved pull request. Keys close at the end of their window.">
+        <FieldRow label="Signing windows" hint="Windows close at their end time.">
           <ul className="space-y-2 text-sm text-ink">
             {data.keys.slice(0, 10).map((key) => (
               <SigningKeyRow key={key.fingerprint} item={key} />

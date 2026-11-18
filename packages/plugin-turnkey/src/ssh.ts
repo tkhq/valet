@@ -56,3 +56,51 @@ export function opensshEd25519PublicKey(rawHex: string): OpenSshPublicKey {
     fingerprint: `SHA256:${digest}`,
   };
 }
+
+const SSHSIG_MAGIC = new TextEncoder().encode("SSHSIG");
+const GIT_NAMESPACE = "git";
+const SSHSIG_HASH = "sha512";
+
+function utf8(text: string): Uint8Array {
+  return new TextEncoder().encode(text);
+}
+
+function ed25519PublicKeyBlob(rawHex: string): Uint8Array {
+  return concat([sshString(utf8(KEY_TYPE)), sshString(ed25519PublicKeyFromHex(rawHex))]);
+}
+
+/**
+ * The bytes an SSH signature over `message` covers (PROTOCOL.sshsig):
+ * `"SSHSIG" || string(namespace) || string(reserved) || string(hash) || string(H(message))`.
+ * Git signs with namespace `git` and SHA-512. Turnkey signs these bytes as a
+ * raw Ed25519 payload with no further hashing.
+ */
+export function sshsigSignedData(message: Uint8Array): Buffer {
+  const digest = createHash(SSHSIG_HASH).update(message).digest();
+  return Buffer.from(
+    concat([SSHSIG_MAGIC, sshString(utf8(GIT_NAMESPACE)), sshString(new Uint8Array()), sshString(utf8(SSHSIG_HASH)), sshString(digest)]),
+  );
+}
+
+/**
+ * The armored `SSH SIGNATURE` block git stores in a commit's `gpgsig` header,
+ * for a raw 64-byte Ed25519 signature over `sshsigSignedData(message)`. Base64
+ * lines are 70 characters, as `ssh-keygen -Y sign` writes them.
+ */
+export function armorSshSignature(publicKeyHex: string, signature: Uint8Array): string {
+  if (signature.length !== 64) throw new Error(`expected a 64-byte Ed25519 signature, got ${signature.length} bytes`);
+  const version = new Uint8Array(4);
+  new DataView(version.buffer).setUint32(0, 1);
+  const blob = concat([
+    SSHSIG_MAGIC,
+    version,
+    sshString(ed25519PublicKeyBlob(publicKeyHex)),
+    sshString(utf8(GIT_NAMESPACE)),
+    sshString(new Uint8Array()),
+    sshString(utf8(SSHSIG_HASH)),
+    sshString(concat([sshString(utf8(KEY_TYPE)), sshString(signature)])),
+  ]);
+  const b64 = Buffer.from(blob).toString("base64");
+  const lines = b64.match(/.{1,70}/g) ?? [];
+  return ["-----BEGIN SSH SIGNATURE-----", ...lines, "-----END SSH SIGNATURE-----"].join("\n") + "\n";
+}

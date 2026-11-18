@@ -90,6 +90,46 @@ export interface TurnkeyOps {
     expirationSeconds: number;
   }): Promise<{ apiKeyId: string; activityId: string }>;
   deleteApiKeys(args: { subOrgId: string; userId: string; apiKeyIds: string[] }): Promise<void>;
+  /** Reads an activity in a sub-organization. The parent key stays a member after it leaves the root quorum. */
+  getActivity(args: { subOrgId: string; activityId: string }): Promise<TurnkeyActivity>;
+}
+
+/** The fields of a Turnkey activity that a passkey step checks. */
+export interface TurnkeyActivity {
+  id: string;
+  organizationId: string;
+  status: string;
+  type: string;
+  /** `scheme` and `publicKey` name the credential that signed the vote; for a passkey, its WebAuthn key. */
+  votes: Array<{ userId: string; selection: string; scheme?: string; publicKey?: string; createdAtMs?: number }>;
+  result?: { signRawPayloadResult?: { r: string; s: string } };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+/** Narrows a Turnkey activity JSON object to the fields a passkey step checks. */
+export function parseTurnkeyActivity(value: unknown): TurnkeyActivity | null {
+  if (!isRecord(value)) return null;
+  const { id, organizationId, status, type } = value;
+  if (typeof id !== "string" || typeof organizationId !== "string" || typeof status !== "string" || typeof type !== "string") return null;
+  const votes = Array.isArray(value.votes)
+    ? value.votes.flatMap((v: unknown) => {
+        if (!isRecord(v) || typeof v.userId !== "string" || typeof v.selection !== "string") return [];
+        const seconds = isRecord(v.createdAt) ? Number(v.createdAt.seconds) : NaN;
+        return [{
+          userId: v.userId,
+          selection: v.selection,
+          ...(typeof v.scheme === "string" ? { scheme: v.scheme } : {}),
+          ...(typeof v.publicKey === "string" ? { publicKey: v.publicKey } : {}),
+          ...(Number.isFinite(seconds) ? { createdAtMs: seconds * 1000 } : {}),
+        }];
+      })
+    : [];
+  const raw = isRecord(value.result) ? value.result.signRawPayloadResult : undefined;
+  const sig = isRecord(raw) && typeof raw.r === "string" && typeof raw.s === "string" ? { r: raw.r, s: raw.s } : undefined;
+  return { id, organizationId, status, type, votes, ...(sig ? { result: { signRawPayloadResult: sig } } : {}) };
 }
 
 /**
@@ -195,6 +235,12 @@ export function turnkeyOps(config: TurnkeyDeploymentConfig): TurnkeyOps {
     },
     async deleteApiKeys({ subOrgId, userId, apiKeyIds }) {
       await api.deleteApiKeys({ organizationId: subOrgId, userId, apiKeyIds });
+    },
+    async getActivity({ subOrgId, activityId }) {
+      const res = await api.getActivity({ organizationId: subOrgId, activityId });
+      const activity = parseTurnkeyActivity(res.activity);
+      if (!activity) throw new Error(`Turnkey returned an unreadable activity ${activityId}.`);
+      return activity;
     },
   };
 }

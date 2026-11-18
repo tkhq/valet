@@ -1,204 +1,270 @@
 import { describe, expect, it } from "vitest";
+import type { DecisionGateRequest, DecisionResolution } from "@valet/engine";
+import { gitObjectId, planCommitChain } from "../commits.js";
+import { NOT_CONFIGURED_MESSAGE } from "../config.js";
+import { SIGNING_KEY_MISSING_MESSAGE } from "../github-keys.js";
+import { presenceStepsKey, signingContextOf } from "../presence.js";
 import {
   COLLECTIONS,
   CURRENT_KEY,
   DEFAULT_KEY,
-  type SigningKeyIndexDoc,
   type EnrollmentDoc,
+  type PresenceStepsDoc,
   type SigningKeyDoc,
+  type SigningKeyIndexDoc,
 } from "../store.js";
-import { GITHUB_PERMISSION_MESSAGE } from "../github-keys.js";
-import { NOT_CONFIGURED_MESSAGE } from "../config.js";
 import {
-  EXPECTED_FINGERPRINT,
-  EXPECTED_LINE,
-  fakeContext,
-  fakeGithub,
-  fakeTurnkey,
-  memoryPluginStore,
-} from "../test-helpers/fakes.js";
-import { buildTurnkeyActionPlugin, NOT_ENROLLED_MESSAGE, NO_GITHUB_MESSAGE, REJECTED_MESSAGE } from "./actions.js";
+  PUBLIC_HEX,
+  SIGNED_1_SHA,
+  UNSIGNED_1,
+  UNSIGNED_1_SHA,
+  UNSIGNED_2,
+  UNSIGNED_2_SHA,
+  signWithTestKey,
+} from "../test-helpers/commit-fixtures.js";
+import { fakeContext, fakeGithub, fakeTurnkey, memoryPluginStore } from "../test-helpers/fakes.js";
+import {
+  buildTurnkeyActionPlugin,
+  NO_GITHUB_MESSAGE,
+  NOT_ENROLLED_MESSAGE,
+  PRESENCE_MODE_MESSAGE,
+  REENROLL_MESSAGE,
+  REJECTED_MESSAGE,
+  SESSION_MODE_MESSAGE,
+} from "./actions.js";
 
 const ENV = {
   VALET_TURNKEY_ORGANIZATION_ID: "parent-org",
   VALET_TURNKEY_API_PUBLIC_KEY: "02aa",
   VALET_TURNKEY_API_PRIVATE_KEY: "bb",
 };
+const NOW = Date.parse("2026-09-12T10:00:00Z");
+const KEY_LINE = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKVmz5Xwr6nl6ySk7DPrC7gAbwoQ1aEX2QLe7Vc3MjA2";
 
-const ENROLLMENT: EnrollmentDoc = {
+const PRESENCE: EnrollmentDoc = {
   subOrgId: "suborg-1",
   passkeyUserId: "passkey-user",
-  agentUserId: "agent-user",
-  agentTagId: "utag-1",
+  mode: "presence",
+  signingKey: { privateKeyId: "pk-person", publicKeyHex: PUBLIC_HEX, publicKey: KEY_LINE, fingerprint: "SHA256:person", activityId: "act-0" },
   signingTagId: "ktag-1",
-  policyId: "policy-1",
   createdAt: 1,
 };
+const SESSION: EnrollmentDoc = { ...PRESENCE, mode: "session", agentUserId: "agent-user", agentTagId: "utag-1", policyId: "policy-1" };
 
-const NOW = Date.parse("2026-09-12T10:00:00Z");
+/** A repository with two unsigned commits on `feature`, answering the git commands sign_commits runs. */
+function repoExec(refs: Map<string, string>) {
+  return (command: string) => {
+    const ok = (stdout: string) => ({ exitCode: 0, stdout, stderr: "" });
+    if (command.endsWith("git rev-parse --show-object-format")) return ok("sha1\n");
+    if (command.endsWith("git rev-parse --abbrev-ref HEAD")) return ok("feature\n");
+    if (command.endsWith("git rev-parse HEAD")) return ok(`${refs.get("feature")}\n`);
+    if (command.includes("git rev-list")) return ok(`${UNSIGNED_1_SHA}\n${UNSIGNED_2_SHA}\n`);
+    if (command.endsWith(`git cat-file commit ${UNSIGNED_1_SHA}`)) return ok(UNSIGNED_1);
+    if (command.endsWith(`git cat-file commit ${UNSIGNED_2_SHA}`)) return ok(UNSIGNED_2);
+    const write = /printf '%s' '([A-Za-z0-9+/=]+)' \| base64 -d \| git hash-object/.exec(command);
+    if (write) return ok(`${gitObjectId(Buffer.from(write[1]!, "base64").toString("utf8"))}\n`);
+    const update = /git update-ref 'refs\/heads\/feature' ([0-9a-f]{40}) ([0-9a-f]{40})$/.exec(command);
+    if (update) {
+      refs.set("feature", update[1]!);
+      return ok("");
+    }
+    return undefined;
+  };
+}
 
-function setup(opts: { enrolled?: boolean; githubToken?: string | null; approve?: boolean } = {}) {
+function setup(opts: { enrollment?: EnrollmentDoc | null; githubToken?: string | null; approve?: boolean; listed?: boolean } = {}) {
   const turnkey = fakeTurnkey();
   const github = fakeGithub();
   const store = memoryPluginStore();
-  const ctx = fakeContext({
-    pluginStore: store,
-    githubToken: opts.githubToken,
-    decision: async () => ({
-      actionId: opts.approve === false ? "reject" : "approve",
+  const refs = new Map([["feature", UNSIGNED_2_SHA]]);
+  // Stands in for the api's passkey endpoint: signs each commit with the
+  // test key, records the signatures, and resolves with presence evidence.
+  const decision = async (req: DecisionGateRequest): Promise<DecisionResolution> => {
+    if (opts.approve === false) return { actionId: "reject", resolvedBy: "user-1", resolvedAt: NOW };
+    const signing = signingContextOf(req.context);
+    if (!signing) return { actionId: "approve", resolvedBy: "user-1", resolvedAt: NOW };
+    const signatures: Buffer[] = [];
+    let plan = planCommitChain({ ...signing, signatures });
+    while (plan.nextPayload) {
+      signatures.push(signWithTestKey(plan.nextPayload));
+      plan = planCommitChain({ ...signing, signatures });
+    }
+    const doc: PresenceStepsDoc = { signatures: signatures.map((s, i) => ({ activityId: `act-${i}`, signatureHex: s.toString("hex") })) };
+    await store.session("session-1").put(COLLECTIONS.presenceSteps, presenceStepsKey(req.resumeKey ?? "", 1), doc);
+    return {
+      actionId: "approve",
       resolvedBy: "user-1",
       resolvedAt: NOW,
-    }),
-  });
-  const plugin = buildTurnkeyActionPlugin({ turnkey: () => turnkey, github: () => github, env: ENV, now: () => NOW });
-  const request = plugin.actions.find((a) => a.id === "turnkey.request_signing_key");
-  const revoke = plugin.actions.find((a) => a.id === "turnkey.revoke_signing_key");
-  if (!request || !revoke) throw new Error("actions missing");
-  const enroll = async () => {
-    if (opts.enrolled !== false) await store.user("user-1").put(COLLECTIONS.enrollment, DEFAULT_KEY, ENROLLMENT);
+      assurance: "presence",
+      approval: {
+        id: "apr_1",
+        approved_at: "2026-09-12T10:00:00.000Z",
+        approved_until: "2026-09-12T10:00:00.000Z",
+        state: {
+          iss: "turnkey",
+          organization_id: "suborg-1",
+          amr: ["pop", "user"],
+          approver: { user_id: "passkey-user" },
+          activities: doc.signatures.map((s) => ({ activity_id: s.activityId, payload_sha256: "", approved_at: "2026-09-12T10:00:00.000Z" })),
+        },
+      },
+      gateOrdinal: 1,
+    };
   };
-  return { turnkey, github, store, ctx, plugin, request, revoke, enroll };
+  const ctx = fakeContext({ pluginStore: store, githubToken: opts.githubToken, decision, exec: repoExec(refs) });
+  const plugin = buildTurnkeyActionPlugin({
+    turnkey: () => turnkey,
+    github: () => github,
+    keyListed: async () => opts.listed !== false,
+    env: ENV,
+    now: () => NOW,
+  });
+  const find = (id: string) => {
+    const a = plugin.actions.find((x) => x.id === id);
+    if (!a) throw new Error(`${id} missing`);
+    return a;
+  };
+  const enroll = async () => {
+    const doc = opts.enrollment === undefined ? PRESENCE : opts.enrollment;
+    if (doc) await store.user("user-1").put(COLLECTIONS.enrollment, DEFAULT_KEY, doc);
+  };
+  return { turnkey, store, ctx, refs, sign: find("turnkey.sign_commits"), request: find("turnkey.request_signing_key"), revoke: find("turnkey.revoke_signing_key"), enroll };
 }
 
+const signArgs = { repo: "tkhq/valet", branch: "feature", base: "origin/main" };
 const scope = { repo: "tkhq/valet", branch: "valet/x", pr_number: 7 };
 
-describe("turnkey.request_signing_key", () => {
-  it("gates, creates the key, registers it on GitHub, records it, and turns signing on", async () => {
+describe("turnkey.sign_commits", () => {
+  it("opens a passkey gate, then writes the signed commits and moves the branch", async () => {
     const s = setup();
+    await s.enroll();
+    const res = await s.sign.execute(signArgs, s.ctx);
+    expect(res.success).toBe(true);
+
+    const gate = s.ctx.gates[0];
+    expect(gate?.title).toBe("Sign 2 commits");
+    expect(gate?.context).toMatchObject({
+      assurance: "presence",
+      presence: {
+        kind: "git_commits",
+        repo: "tkhq/valet",
+        branch: "feature",
+        commits: [
+          { sha: UNSIGNED_1_SHA, subject: "first commit", author: "Valet Test <valet@example.com>" },
+          { sha: UNSIGNED_2_SHA, subject: "second commit" },
+        ],
+      },
+    });
+    expect(gate?.actions?.[0]).toMatchObject({ id: "approve", approves: true });
+    expect(s.ctx.execs.some((c) => c.includes("cd '/workspace/valet'"))).toBe(true);
+
+    const head = s.refs.get("feature");
+    expect(res.data).toMatchObject({ head, commits: [{ old: UNSIGNED_1_SHA }, { old: UNSIGNED_2_SHA, new: head }] });
+    // The committer email is the account's noreply address, so the chain differs from the fixture's.
+    expect(head).not.toBe(UNSIGNED_2_SHA);
+    expect(head).not.toBe(SIGNED_1_SHA);
+    expect(s.turnkey.calls).toHaveLength(0);
+  });
+
+  it("refuses more than 10 commits with the fix", async () => {
+    const s = setup();
+    await s.enroll();
+    const many = Array.from({ length: 11 }, (_, i) => i.toString(16).padStart(40, "0")).join("\n");
+    const ctx = fakeContext({
+      pluginStore: s.store,
+      exec: (c) => (c.includes("git rev-list") ? { exitCode: 0, stdout: many, stderr: "" } : repoExec(s.refs)(c)),
+    });
+    const res = await s.sign.execute(signArgs, ctx);
+    expect(res.success).toBe(false);
+    expect(res.error).toContain("Squash them to 10 or fewer");
+    expect(ctx.gates).toHaveLength(0);
+  });
+
+  it("refuses when the key is not on GitHub, before opening a gate", async () => {
+    const s = setup({ listed: false });
+    await s.enroll();
+    expect(await s.sign.execute(signArgs, s.ctx)).toEqual({ success: false, error: SIGNING_KEY_MISSING_MESSAGE });
+    expect(s.ctx.gates).toHaveLength(0);
+  });
+
+  it("names the fix for a missing, old, or session-mode enrollment", async () => {
+    const none = setup({ enrollment: null });
+    expect(await none.sign.execute(signArgs, none.ctx)).toEqual({ success: false, error: NOT_ENROLLED_MESSAGE });
+    const { signingKey: _drop, ...old } = PRESENCE;
+    const legacy = setup({ enrollment: old });
+    await legacy.enroll();
+    expect(await legacy.sign.execute(signArgs, legacy.ctx)).toEqual({ success: false, error: REENROLL_MESSAGE });
+    const session = setup({ enrollment: SESSION });
+    await session.enroll();
+    expect(await session.sign.execute(signArgs, session.ctx)).toEqual({ success: false, error: SESSION_MODE_MESSAGE });
+  });
+
+  it("leaves the branch alone when the user rejects", async () => {
+    const s = setup({ approve: false });
+    await s.enroll();
+    expect(await s.sign.execute(signArgs, s.ctx)).toEqual({ success: false, error: REJECTED_MESSAGE });
+    expect(s.refs.get("feature")).toBe(UNSIGNED_2_SHA);
+  });
+
+  it("refuses an approval without presence evidence", async () => {
+    const s = setup();
+    await s.enroll();
+    const ctx = fakeContext({ pluginStore: s.store, exec: repoExec(s.refs) });
+    const res = await s.sign.execute(signArgs, ctx);
+    expect(res.success).toBe(false);
+    expect(res.error).toContain("no passkey signatures");
+    expect(s.refs.get("feature")).toBe(UNSIGNED_2_SHA);
+  });
+});
+
+describe("turnkey.request_signing_key (session mode)", () => {
+  it("gates, records the window with the person's key, and turns signing on without touching GitHub", async () => {
+    const s = setup({ enrollment: SESSION });
     await s.enroll();
     const res = await s.request.execute(scope, s.ctx);
     expect(res.success).toBe(true);
-    expect(res.data).toMatchObject({
-      fingerprint: EXPECTED_FINGERPRINT,
-      private_key_id: "pk-1",
-      not_after: "2026-09-12T12:00:00.000Z",
-    });
-
-    // The gate carried the exact scope.
-    expect(s.ctx.gates).toHaveLength(1);
+    expect(res.data).toMatchObject({ fingerprint: "SHA256:person", private_key_id: "pk-person", not_after: "2026-09-12T12:00:00.000Z" });
     expect(s.ctx.gates[0]?.body).toContain("Sign commits in tkhq/valet, branch valet/x (pull request #7), valid for 2 h?");
-
-    // Turnkey: one Ed25519 key with the signing tag, in the user's
-    // sub-organization, then the sandbox's session key, which expires with
-    // the window so Turnkey stops signing when the window ends.
-    expect(s.turnkey.calls.map((c) => c.op)).toEqual(["createSigningKey", "createApiKey"]);
-    expect(s.turnkey.calls[0]?.args).toMatchObject({ subOrgId: "suborg-1", tagIds: ["ktag-1"] });
-    expect(s.turnkey.calls[1]?.args).toMatchObject({
-      subOrgId: "suborg-1",
-      name: "session:session-1",
-      publicKey: `02${"ab".repeat(32)}`,
-      expirationSeconds: 120 * 60,
-    });
-    expect(s.ctx.execs.some((c) => c.includes("api-key generate"))).toBe(true);
-
-    // GitHub: the OpenSSH line under a title that names the session and expiry.
-    const [registered] = [...s.github.keys.values()];
-    expect(registered).toEqual({
-      title: "valet session session-1 tkhq/valet#7 until 2026-09-12T12:00:00.000Z",
-      key: EXPECTED_LINE,
-    });
-
-    // Store: the user's history row and the session's current pointer.
+    expect(s.turnkey.calls.map((c) => c.op)).toEqual(["createApiKey"]);
+    expect(s.turnkey.calls[0]?.args).toMatchObject({ subOrgId: "suborg-1", userId: "agent-user", expirationSeconds: 120 * 60 });
     const current = await s.store.session("session-1").get<SigningKeyDoc>(COLLECTIONS.signingKeys, CURRENT_KEY);
-    expect(current?.doc).toMatchObject({
-      status: "active",
-      fingerprint: EXPECTED_FINGERPRINT,
-      githubKeyId: 100,
-      turnkeyPrivateKeyId: "pk-1",
-      notBefore: NOW,
-      notAfter: NOW + 120 * 60_000,
-      gateId: "gate-1",
-    });
-    const history = await s.store.user("user-1").list<SigningKeyDoc>(COLLECTIONS.signingKeys);
-    expect(history.items).toHaveLength(1);
+    expect(current?.doc).toMatchObject({ status: "active", turnkeyPrivateKeyId: "pk-person", notAfter: NOW + 120 * 60_000 });
+    expect(current?.doc).not.toHaveProperty("githubKeyId");
     const index = await s.store.global().list<SigningKeyIndexDoc>(COLLECTIONS.signingKeyIndex);
-    expect(index.items).toHaveLength(1);
-    expect(index.items[0]?.doc).toMatchObject({
-      userId: "user-1",
-      userKey: history.items[0]?.key,
-      githubKeyId: 100,
-      status: "active",
-    });
-
-    // Sandbox: the key id for valet-sign, then git pointed at the public key.
-    expect(s.ctx.execs.some((c) => c.includes("TURNKEY_PRIVATE_KEY_ID=pk-1") && c.includes("TURNKEY_ORGANIZATION_ID=suborg-1"))).toBe(true);
-    expect(s.ctx.execs.some((c) => c.includes(`user.signingkey 'key::${EXPECTED_LINE}'`) && c.includes("committer.email '100+octo@users.noreply.github.com'") && c.includes("commit.gpgsign true"))).toBe(
-      true,
-    );
+    expect(index.items[0]?.doc).toMatchObject({ publicKey: KEY_LINE, status: "active" });
+    expect(s.ctx.execs.some((c) => c.includes("TURNKEY_PRIVATE_KEY_ID=pk-person"))).toBe(true);
   });
 
-  it("does nothing when the user rejects", async () => {
-    const s = setup({ approve: false });
-    await s.enroll();
-    const res = await s.request.execute(scope, s.ctx);
-    expect(res).toEqual({ success: false, error: REJECTED_MESSAGE });
-    expect(s.turnkey.calls).toHaveLength(0);
-    expect(s.github.keys.size).toBe(0);
-    expect(s.ctx.execs).toHaveLength(0);
-  });
-
-  it("names the fix when the deployment is not configured", async () => {
+  it("points a presence-mode account at sign_commits", async () => {
     const s = setup();
-    const plugin = buildTurnkeyActionPlugin({ turnkey: () => s.turnkey, github: () => s.github, env: {} });
+    await s.enroll();
+    expect(await s.request.execute(scope, s.ctx)).toEqual({ success: false, error: PRESENCE_MODE_MESSAGE });
+  });
+
+  it("names the fix when not configured or GitHub is not connected", async () => {
+    const s = setup({ enrollment: SESSION });
+    const plugin = buildTurnkeyActionPlugin({ env: {} });
     const request = plugin.actions.find((a) => a.id === "turnkey.request_signing_key");
-    const res = await request?.execute(scope, s.ctx);
-    expect(res).toEqual({ success: false, error: NOT_CONFIGURED_MESSAGE });
-  });
-
-  it("names the fix when the user has not enrolled", async () => {
-    const s = setup({ enrolled: false });
-    const res = await s.request.execute(scope, s.ctx);
-    expect(res).toEqual({ success: false, error: NOT_ENROLLED_MESSAGE });
-    expect(s.ctx.gates).toHaveLength(0);
-  });
-
-  it("names the fix when GitHub is not connected, before opening a gate", async () => {
-    const s = setup({ githubToken: null });
-    await s.enroll();
-    const res = await s.request.execute(scope, s.ctx);
-    expect(res).toEqual({ success: false, error: NO_GITHUB_MESSAGE });
-    expect(s.ctx.gates).toHaveLength(0);
-  });
-
-  it("surfaces the GitHub App permission error and records nothing", async () => {
-    const s = setup();
-    await s.enroll();
-    s.github.failCreateWith = new Error(GITHUB_PERMISSION_MESSAGE);
-    await expect(s.request.execute(scope, s.ctx)).rejects.toThrow(/SSH signing keys/);
-    const current = await s.store.session("session-1").get(COLLECTIONS.signingKeys, CURRENT_KEY);
-    expect(current).toBeNull();
-    // The session key pair was made first; signing was never turned on.
-    expect(s.ctx.execs.some((c) => c.includes("commit.gpgsign true"))).toBe(false);
-  });
-
-  it("clamps the window to 24 hours", async () => {
-    const s = setup();
-    await s.enroll();
-    const res = await s.request.execute({ ...scope, window_minutes: 100_000 }, s.ctx);
-    expect(res.data).toMatchObject({ not_after: "2026-09-13T10:00:00.000Z" });
-    expect(s.ctx.gates[0]?.body).toContain("valid for 24 h?");
+    expect(await request?.execute(scope, s.ctx)).toEqual({ success: false, error: NOT_CONFIGURED_MESSAGE });
+    const noGithub = setup({ enrollment: SESSION, githubToken: null });
+    await noGithub.enroll();
+    expect(await noGithub.request.execute(scope, noGithub.ctx)).toEqual({ success: false, error: NO_GITHUB_MESSAGE });
   });
 });
 
 describe("turnkey.revoke_signing_key", () => {
-  it("removes the GitHub key, marks the row revoked, and turns signing off in its session", async () => {
-    const s = setup();
+  it("marks the window revoked, deletes the session key, and turns signing off", async () => {
+    const s = setup({ enrollment: SESSION });
     await s.enroll();
     await s.request.execute(scope, s.ctx);
-    const res = await s.revoke.execute({ fingerprint: EXPECTED_FINGERPRINT }, s.ctx);
-    expect(res).toEqual({ success: true, data: { fingerprint: EXPECTED_FINGERPRINT, status: "revoked" } });
-    expect(s.github.keys.size).toBe(0);
-    const history = await s.store.user("user-1").list<SigningKeyDoc>(COLLECTIONS.signingKeys);
-    expect(history.items[0]?.doc).toMatchObject({ status: "revoked", closedAt: NOW });
+    const res = await s.revoke.execute({ fingerprint: "SHA256:person" }, s.ctx);
+    expect(res).toEqual({ success: true, data: { fingerprint: "SHA256:person", status: "revoked" } });
     expect(await s.store.session("session-1").get(COLLECTIONS.signingKeys, CURRENT_KEY)).toBeNull();
-    const index = await s.store.global().list<SigningKeyIndexDoc>(COLLECTIONS.signingKeyIndex);
-    expect(index.items[0]?.doc.status).toBe("revoked");
     expect(s.ctx.execs.at(-1)).toContain("--unset commit.gpgsign");
-    // The session key is deleted now, not left to expire with the window.
-    expect(s.turnkey.calls.map((c) => c.op)).toEqual(["createSigningKey", "createApiKey", "deleteApiKeys"]);
+    expect(s.turnkey.calls.map((c) => c.op)).toEqual(["createApiKey", "deleteApiKeys"]);
   });
 
-  it("refuses a fingerprint that is not the user's", async () => {
+  it("refuses a fingerprint with no open window", async () => {
     const s = setup();
     const res = await s.revoke.execute({ fingerprint: "SHA256:nope" }, s.ctx);
     expect(res.success).toBe(false);

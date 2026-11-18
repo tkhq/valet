@@ -31,6 +31,7 @@ import {
   type QueueItem,
   type SessionEntry,
   type ValetPlugin,
+  PRESENCE_REQUIRED_MESSAGE,
 } from "@valet/engine";
 import { PgSessionStore, PgEventStream } from "@valet/store-postgres";
 import { eq } from "drizzle-orm";
@@ -47,7 +48,7 @@ import { savedGatePrompts } from "./gate-prompts.js";
 import { workflowGateKey, type WorkflowApprovalPort } from "./workflow-gates.js";
 import { wireAttentionRouter } from "../orchestrator/attention-wiring.js";
 import { linkIdentity, setNotifyAttention } from "./identity-links.js";
-import { ChannelHost, type ChannelHostDeps } from "./host.js";
+import { ChannelHost, PASSKEY_CARD_NOTE, type ChannelHostDeps } from "./host.js";
 import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js";
 import { parentDelegationMetadata } from "../orchestrator/children.js";
 import { CHILD_REPLY_MAX_ATTEMPTS, childReplyRetryDelayMs } from "./child-replies.js";
@@ -1950,7 +1951,7 @@ describe("ChannelHost outbound delivery", () => {
    */
   async function openChannelGate(
     owner: { type: "user" | "team"; id: string } = { type: "user", id: USER_ID },
-    shape: Pick<DecisionGate, "type" | "title" | "actions"> = {
+    shape: Pick<DecisionGate, "type" | "title" | "actions"> & { context?: Record<string, unknown> } = {
       type: "approval",
       title: "Approve the thing?",
       actions: [
@@ -2026,6 +2027,35 @@ describe("ChannelHost outbound delivery", () => {
     await vi.waitFor(() => expect(fakeTransport.answered).toContainEqual({
       callbackId: "cb-non-member", text: "Only members of Ops can approve. Ask a team member to answer it.",
     }));
+  });
+
+  it("posts a passkey gate without Approve, says to approve in Valet, and refuses a Slack Approve click", async () => {
+    const shape = {
+      type: "credential_request" as const,
+      title: "Sign 1 commit",
+      actions: [
+        { id: "approve", label: "Sign with passkey", style: "primary" as const, approves: true },
+        { id: "reject", label: "Reject", style: "danger" as const },
+      ],
+      context: { assurance: "presence" },
+    };
+    const { sessionId, threadId, gateId, ref } = await openChannelGate(undefined, shape);
+    const prompt = fakeTransport.gatePrompts[0]?.prompt;
+    expect(prompt?.actions.map((a) => a.id)).toEqual(["reject"]);
+    expect(prompt?.body).toContain(PASSKEY_CARD_NOTE);
+
+    // The engine persists a gate before it announces it; the callback path reads the stored row.
+    await engineStore.saveDecisionGate(sessionId, threadId, {
+      id: gateId, sessionId, threadId, queueItemId: `qi-${gateId}`, resumeKey: `rk-${gateId}`, ordinal: 1,
+      ...shape, status: "pending", createdAt: Date.now(), updatedAt: Date.now(),
+    });
+    await host.handleUpdate("fake", inbound({
+      dispatchId: `fake:${randomUUID()}`,
+      kind: "gate_callback",
+      gateCallback: { actionId: "approve", callbackId: "cb-passkey", ref },
+    }));
+    await vi.waitFor(() => expect(fakeTransport.answered).toContainEqual({ callbackId: "cb-passkey", text: PRESENCE_REQUIRED_MESSAGE }));
+    expect((await engineStore.getDecisionGate(sessionId, gateId))?.status).toBe("pending");
   });
 
   it("tells the channel to answer an open question with a reply", async () => {

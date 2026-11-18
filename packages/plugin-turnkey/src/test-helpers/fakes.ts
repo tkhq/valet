@@ -15,7 +15,7 @@ import type {
   PluginStoreScope,
   ScopedPluginStore,
 } from "@valet/engine";
-import type { GitHubSigningKeys } from "../github-keys.js";
+import type { GitHubAccount } from "../github-keys.js";
 import type { TurnkeyOps } from "../turnkey-client.js";
 
 // Raw Ed25519 public key from `ssh-keygen`; see ssh.test.ts for the derived line and fingerprint.
@@ -78,33 +78,28 @@ export function fakeTurnkey(): FakeTurnkey {
     async deleteApiKeys(args) {
       calls.push({ op: "deleteApiKeys", args });
     },
+    async getActivity(args) {
+      calls.push({ op: "getActivity", args });
+      return { id: args.activityId, organizationId: args.subOrgId, status: "ACTIVITY_STATUS_PENDING", type: "ACTIVITY_TYPE_SIGN_RAW_PAYLOAD_V2", votes: [] };
+    },
   };
 }
 
-export interface FakeGitHub extends GitHubSigningKeys {
-  keys: Map<number, { title: string; key: string }>;
-  failCreateWith?: Error;
+export interface FakeGitHub extends GitHubAccount {
+  /** Signing key lines the fake account lists publicly. */
+  listed: Set<string>;
 }
 
 export function fakeGithub(): FakeGitHub {
-  const keys = new Map<number, { title: string; key: string }>();
-  let next = 100;
-  const fake: FakeGitHub = {
-    keys,
-    async create(title, key) {
-      if (fake.failCreateWith) throw fake.failCreateWith;
-      const id = next++;
-      keys.set(id, { title, key });
-      return { id };
-    },
-    async remove(id) {
-      keys.delete(id);
+  return {
+    listed: new Set(),
+    async login() {
+      return "octo";
     },
     async noreplyEmail() {
       return "100+octo@users.noreply.github.com";
     },
   };
-  return fake;
 }
 
 function scopeKey(scope: PluginStoreScope): string {
@@ -166,6 +161,8 @@ export interface FakeContextOptions {
   githubToken?: string | null;
   decision?: (req: DecisionGateRequest) => Promise<DecisionResolution>;
   pluginStore?: PluginStore;
+  /** Answers a sandbox command; return undefined for the default (exit 0, empty output). */
+  exec?: (command: string) => { exitCode: number; stdout: string; stderr: string } | undefined;
 }
 
 export function fakeContext(opts: FakeContextOptions = {}): PluginActionContext & { execs: string[]; gates: DecisionGateRequest[] } {
@@ -203,6 +200,8 @@ export function fakeContext(opts: FakeContextOptions = {}): PluginActionContext 
       rm: async () => notImplemented(),
       exec: async (command: string) => {
         execs.push(command);
+        const answered = opts.exec?.(command);
+        if (answered) return answered;
         if (command === "id -u; id -g") return { exitCode: 0, stdout: "1000\n1000\n", stderr: "" };
         if (command === `cat ${SESSION_KEY_FILE}`) {
           return { exitCode: 0, stdout: JSON.stringify({ public_key: `02${"ab".repeat(32)}`, private_key: "cd".repeat(32) }), stderr: "" };

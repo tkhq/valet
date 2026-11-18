@@ -24,6 +24,7 @@ import { errorText } from "~/lib/error-text";
 
 import { acceptImages, readImage, filesFromClipboard, toPromptAttachments, IMAGE_ACCEPT_ATTRIBUTE, type ComposerImage } from "./composer-images";
 import { ComposerImageStrip } from "./composer-image-strip";
+import { PasskeyApproval } from "./passkey-approval";
 import { SecretRequestForm } from "./secret-request-form";
 import { GatePayloadPreview, hasGatePayloadPreview, splitGateBody } from "./gate-payload";
 
@@ -461,6 +462,19 @@ function DecisionGateResponse({
             </div>
           </div>
           </>
+        ) : gate.presence ? (
+          <PasskeyApproval
+            sessionId={sessionId}
+            gate={gate}
+            view={gate.presence}
+            inset={inset}
+            busy={busy}
+            onDone={() => {
+              rememberGateChoice(gate.id, "approve");
+              onAnswered?.();
+            }}
+            onReject={() => void pickAction(gate.actions.find((a) => a.id === "reject" || a.id === "deny")?.id ?? "reject")}
+          />
         ) : gate.secretRequest ? (
           <SecretRequestForm
             request={gate.secretRequest}

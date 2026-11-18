@@ -4,6 +4,7 @@
 **Status:** Proposed (Phase 1 in progress)
 **Relates to:** `docs/specs/2026-09-01-sandbox-secret-broker-design.md`, `docs/specs/2026-08-02-sandbox-reconcile-design.md`, `docs/plans/2026-03-06-ssh-2of2-commit-signing-design.md` (superseded)
 **Supersedes:** the TVC signer kernel spec in `tkhq/test-tvc-signer-kernel` (`spec/v1-draft`)
+**Changed by:** `docs/specs/2026-11-17-commit-signing-user-registered-keys-design.md`. Valet no longer adds keys to GitHub, each person has one signing key made at enrollment, and the default mode has the person's passkey sign each commit. The per-approval keys, the GitHub key writes, and the unscoped parent grant below are replaced. The sandbox `tk ssh git-sign` window remains as session mode.
 
 ## Purpose
 

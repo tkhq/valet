@@ -1882,7 +1882,16 @@ export interface DecisionGate {
   /** Present on a `request_secret` card: where the value is saved and under
    * which name. The card saves the value, then answers with the reference. */
   secretRequest?: { scope: "personal" | "team"; teamId?: string; name: string; purpose: string; sendsTo?: string; replace?: boolean };
+  /** `presence`: approving needs the approver's passkey through
+   * `/decisions/:gateId/passkey`. The plain resolve route refuses Approve. */
+  assurance?: "presence";
+  /** What a passkey gate signs, for the card. */
+  presence?: PresenceGateView;
 }
+
+export type PresenceGateView =
+  | { kind: "challenge" }
+  | { kind: "git_commits"; repo: string; branch: string; commits: Array<{ sha: string; subject: string; author: string }> };
 
 export interface DecisionResolution {
   attachments?: Array<{ url: string; mimeType: string; name?: string }>;
@@ -7253,6 +7262,12 @@ export interface GetCommitSigningResponse {
   enrolled: boolean;
   subOrgId?: string;
   enrolledAt?: number;
+  /** `presence`: the passkey signs every commit. `session`: an approved window signs. */
+  mode?: "session" | "presence";
+  /** The enrollment predates per-person keys; the person must set up again. */
+  needsReenroll?: boolean;
+  /** The person's Valet signing key, to add to GitHub as a Signing Key. */
+  signingKey?: { publicKey: string; fingerprint: string };
   /** Values the browser needs to create the passkey. */
   passkey?: { apiBaseUrl: string; organizationId: string; rpId?: string };
   keys: CommitSigningKeySummary[];
@@ -7284,4 +7299,29 @@ export interface PostCommitSigningEnrollRequest {
 export interface PostCommitSigningEnrollResponse {
   subOrgId: string;
   enrolledAt: number;
+}
+
+/**
+ * `GET|POST /api/sessions/:id/decisions/:gateId/passkey`: the next passkey
+ * step of a `presence` gate, or done. `body` is the unsigned Turnkey request
+ * to stamp with the passkey and post back unchanged.
+ */
+export type PresenceStepResponse =
+  | { done: false; index: number; total: number; label: string; body: string }
+  | { done: true };
+
+/** `POST /api/sessions/:id/decisions/:gateId/passkey` */
+export interface PresenceStepRequest {
+  body: string;
+  stampHeaderName: string;
+  stampHeaderValue: string;
+}
+
+/** `POST /api/me/commit-signing/github-check` */
+export interface PostCommitSigningGithubCheckResponse {
+  /** The user has a usable GitHub connection. */
+  connected: boolean;
+  login?: string;
+  /** GitHub lists the Valet signing key as one of the account's SSH signing keys. */
+  listed: boolean;
 }

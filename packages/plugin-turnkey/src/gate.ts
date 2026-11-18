@@ -43,7 +43,7 @@ export function signingGateRequest(scope: SigningScope): DecisionGateRequest {
     title: "Sign commits",
     body:
       `Sign commits in ${scope.repo}, branch ${scope.branch}${pr}, valid for ${formatWindow(scope.windowMinutes)}?\n` +
-      "The key is deleted after the window or when the pull request closes.",
+      "Git in the sandbox can sign any commit until the window ends.",
     actions: [
       { id: "approve", label: "Approve", style: "primary", approves: true },
       { id: "reject", label: "Reject", style: "danger" },
@@ -58,16 +58,32 @@ export function signingGateRequest(scope: SigningScope): DecisionGateRequest {
   };
 }
 
-/** The title shown next to the key in the user's GitHub settings. */
-export function githubKeyTitle(sessionId: string, scope: SigningScope, notAfter: Date): string {
-  const pr = scope.prNumber === undefined ? "" : `#${scope.prNumber}`;
-  return `valet session ${sessionId} ${scope.repo}${pr} until ${notAfter.toISOString()}`;
-}
-
-/** The Turnkey private key name; one key per approval. */
-export function signingKeyName(sessionId: string, scope: SigningScope): string {
-  const pr = scope.prNumber === undefined ? "" : `#${scope.prNumber}`;
-  return `valet ${scope.repo}${pr} ${sessionId}`.slice(0, 120);
+/**
+ * The passkey gate for `turnkey.sign_commits`. Each approving step is a
+ * passkey-stamped Turnkey signature, so the approve action is marked
+ * `approves` and the engine refuses it without presence evidence.
+ */
+export function commitSigningGateRequest(args: {
+  repo: string;
+  branch: string;
+  headSha: string;
+  commits: Array<{ sha: string; subject: string; author: string }>;
+  context: Record<string, unknown>;
+}): DecisionGateRequest {
+  const n = args.commits.length;
+  return {
+    type: "credential_request",
+    title: n === 1 ? "Sign 1 commit" : `Sign ${n} commits`,
+    body:
+      `Sign ${n === 1 ? "this commit" : `these ${n} commits`} in ${args.repo}, branch ${args.branch}, with your passkey?\n` +
+      `Your passkey asks once per commit.`,
+    actions: [
+      { id: "approve", label: "Sign with passkey", style: "primary", approves: true },
+      { id: "reject", label: "Reject", style: "danger" },
+    ],
+    resumeKey: `sign-commits:${args.repo}:${args.branch}:${args.headSha}`,
+    context: args.context,
+  };
 }
 
 /**
@@ -93,13 +109,15 @@ export function agentSigningPolicy(agentTagId: string, signingTagId: string): {
 }
 
 /**
- * The parent key's standing grant in a user's sub-organization. Enrollment
- * takes the parent key out of the root quorum, so without this policy it
- * could not create the per-approval signing key or the session API key.
- * It covers exactly those calls, and the session key delete. It cannot sign,
- * export, or change users, tags, or policies.
+ * The parent key's standing grant in a session-mode sub-organization.
+ * Enrollment takes the parent key out of the root quorum, so without this
+ * policy it could not create the window's session API key. The condition
+ * names `valet-agent` through `activity.params.user_id`, so the grant cannot
+ * add a credential to the passkey user or any other user. It cannot create
+ * keys, sign, export, or change users, tags, or policies. Presence-mode
+ * sub-organizations get no parent grant at all.
  */
-export function parentKeyPolicy(parentUserId: string): {
+export function parentKeyPolicy(parentUserId: string, agentUserId: string): {
   policyName: string;
   effect: "EFFECT_ALLOW";
   condition: string;
@@ -107,11 +125,12 @@ export function parentKeyPolicy(parentUserId: string): {
   notes: string;
 } {
   return {
-    policyName: "valet-parent: issue signing and session keys",
+    policyName: "valet-parent: session keys for valet-agent",
     effect: "EFFECT_ALLOW",
     condition:
-      "activity.type in ['ACTIVITY_TYPE_CREATE_PRIVATE_KEYS_V2', 'ACTIVITY_TYPE_CREATE_API_KEYS_V2', 'ACTIVITY_TYPE_DELETE_API_KEYS']",
+      "activity.type in ['ACTIVITY_TYPE_CREATE_API_KEYS_V2', 'ACTIVITY_TYPE_DELETE_API_KEYS'] && " +
+      `activity.params.user_id == '${agentUserId}'`,
     consensus: `approvers.any(user, user.id == '${parentUserId}')`,
-    notes: "Valet commit signing. Issues one signing key and one expiring session API key per approval.",
+    notes: "Valet commit signing, session mode. Creates and deletes the expiring session API key on valet-agent.",
   };
 }

@@ -33,6 +33,14 @@
       "types": "./dist/ssh.d.ts",
       "default": "./dist/ssh.js"
     },
+    "./commits": {
+      "types": "./dist/commits.d.ts",
+      "default": "./dist/commits.js"
+    },
+    "./presence": {
+      "types": "./dist/presence.d.ts",
+      "default": "./dist/presence.js"
+    },
     "./gate": {
       "types": "./dist/gate.d.ts",
       "default": "./dist/gate.js"
@@ -48,6 +56,10 @@
     "./sandbox": {
       "types": "./dist/sandbox.d.ts",
       "default": "./dist/sandbox.js"
+    },
+    "./test-helpers/commit-fixtures": {
+      "types": "./dist/test-helpers/commit-fixtures.d.ts",
+      "default": "./dist/test-helpers/commit-fixtures.js"
     },
     "./test-helpers": {
       "types": "./dist/test-helpers/fakes.d.ts",

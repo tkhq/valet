@@ -47,6 +47,10 @@ import {
   type Thread,
   type Unsubscribe,
   type ValetPlugin,
+  gateAssurance,
+  isApprovingAction,
+  presenceRefusal,
+  PRESENCE_REQUIRED_MESSAGE,
   reportError,
 } from "@valet/engine";
 import type { WorkflowStore } from "@valet/workflow";
@@ -155,6 +159,23 @@ function gateResolutionLabel(
 /** Outcome lines for the two endings that carry no decision. Each one names
  * the next action: the card is the reader's only sign that the work stopped,
  * and neither ending leaves a button to press. */
+/** The line a passkey gate's channel card carries in place of its Approve button. */
+export const PASSKEY_CARD_NOTE = "This approval needs your passkey. Open it in Valet to approve.";
+
+/**
+ * A passkey gate's channel card. Slack and other channels cannot run
+ * WebAuthn, so the card keeps its non-approving buttons (Reject), drops
+ * Approve, and says to approve in Valet. The card's body already ends with
+ * the "Open in Valet" link. Idempotent: a second pass changes nothing.
+ */
+export function passkeyCardPrompt<T extends { body?: string; actions: DecisionAction[] }>(prompt: T): T {
+  if (prompt.body?.includes(PASSKEY_CARD_NOTE)) return prompt;
+  return {
+    ...prompt,
+    actions: prompt.actions.filter((a) => !isApprovingAction(prompt.actions, a.id)),
+    body: [PASSKEY_CARD_NOTE, prompt.body].filter((part): part is string => part !== undefined).join("\n\n"),
+  };
+}
 const GATE_EXPIRED_LABEL = "⏳ Expired: no one answered in time. Start the run again in Valet.";
 const GATE_WITHDRAWN_LABEL =
   "🚫 Withdrawn: the run was stopped. Start it again in Valet if you still need it.";
@@ -1478,10 +1499,11 @@ export class ChannelHost {
     // settle its approvals. Say so on the card, so its buttons are not a dead end.
     const who = source?.owner?.type === "team" ? await this.teamApproverNote(source.owner.id) : undefined;
     const body = [digest.body, who, link].filter((part): part is string => part !== undefined).join("\n\n") || undefined;
+    const card = { gateId: gate.id, title: digest.title, body, fields: digest.fields, actions: gate.actions };
     await this.sendAndRecordGatePrompt(
       transport,
       mapped.conversationKey,
-      { gateId: gate.id, title: digest.title, body, fields: digest.fields, actions: gate.actions },
+      gateAssurance(gate) === "presence" ? passkeyCardPrompt(card) : card,
       sessionId,
     );
   }
@@ -1516,6 +1538,10 @@ export class ChannelHost {
     signal?.throwIfAborted();
     const sender = await this.workspaceSenderForSession(sessionId, sourceGate?.queueItemId, signal);
     signal?.throwIfAborted();
+    // A passkey gate approves only in the Valet web app, where the browser
+    // can use the passkey. The card keeps its other buttons (Reject) and
+    // says where to approve.
+    if (sourceGate && gateAssurance(sourceGate) === "presence") prompt = passkeyCardPrompt(prompt);
     // An open question (one with no options) has no button, so the card says
     // how to answer it: a reply under the card (`answerCardReply`).
     const body = prompt.actions.length > 0 ? prompt.body
@@ -2392,6 +2418,10 @@ export class ChannelHost {
         gateCallback.callbackId,
         "This approval was already resolved. Open the session in Valet to see the outcome.",
       );
+      return;
+    }
+    if (presenceRefusal(gate, { actionId: gateCallback.actionId })) {
+      await transport?.answerCallback?.(gateCallback.callbackId, PRESENCE_REQUIRED_MESSAGE);
       return;
     }
     try {

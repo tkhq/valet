@@ -35,6 +35,7 @@ import {
   parseReasoningLevel,
   ValidationError,
 } from "@valet/engine";
+import { presenceRefusal, PRESENCE_REQUIRED_MESSAGE } from "@valet/engine";
 import { exportSeedBundle, planForkSeed, readBranchNote, readThreadEdit, walkTranscriptDag, WORKSPACE_FILES, type ForkSeedRecord, type PromptAuthor, type QueueItem, type SessionEntry, type Session as EngineSession, type Thread } from "@valet/engine";
 import { isAgentCaller, type AuthVia, type RequestPrincipal } from "../lib/request-principal.js";
 import type { AppEnv } from "../env.js";
@@ -2223,7 +2224,7 @@ export async function resumeThread(c: Context<AppEnv>, sessionId: string, thread
 // / `Session.withdrawDecision` — which finds the thread that owns the gate
 // and unblocks it.
 
-async function canAnswerDecision(c: Context<AppEnv>, session: SessionOwnerLike, sessionId: string): Promise<boolean> {
+export async function canAnswerDecision(c: Context<AppEnv>, session: SessionOwnerLike, sessionId: string): Promise<boolean> {
   if (session.ownerType === "org" && sessionId.startsWith("wf:")) {
     return c.var.principal.type === "user" && session.ownerId === c.var.user.orgId
       && await isOrgAdminUser(c);
@@ -2233,7 +2234,7 @@ async function canAnswerDecision(c: Context<AppEnv>, session: SessionOwnerLike, 
 
 /** The 403 for a caller who may see a gate but not answer it. A shared
  * thread's guest never answers: approvals stay with the thread's owner. */
-function decisionDenied(c: Context<AppEnv>) {
+export function decisionDenied(c: Context<AppEnv>) {
   const error = c.var.threadShareGuest
     ? "Only the thread owner can answer approvals in a shared thread. Ask the owner to answer it."
     : "Only the session owner or a member of its team can resolve this approval. Ask one of them.";
@@ -2278,7 +2279,7 @@ export async function loadDecisionSession(c: Context<AppEnv>, id: string, thread
 /** Pending gates on threads this request may see. Another pod may have made
  * the thread after this one loaded the session, so a thread missing here is
  * read from the store. A gate whose thread is gone stays hidden. */
-async function visibleGates(c: Context<AppEnv>, session: { ownerType: string; decisionApproverOnly?: boolean }, engineSession: EngineSession) {
+export async function visibleGates(c: Context<AppEnv>, session: { ownerType: string; decisionApproverOnly?: boolean }, engineSession: EngineSession) {
   const visible = threadsVisibleTo(c, session);
   const pending = await engineSession.pendingDecisionGates();
   const shown = await Promise.all(pending.map(async (gate) => {
@@ -2406,6 +2407,12 @@ export async function resolveDecision(c: Context<AppEnv>, sessionId: string, thr
   if (secretRequest) {
     const refusal = secretRequestAnswerRefusal(secretRequest, { actionId: body.actionId, value: body.value });
     if (refusal) return c.json({ error: refusal }, 400);
+  }
+  // A passkey gate approves only through the passkey endpoint, which checks
+  // the stamp with Turnkey. The engine refuses it too; this answers first
+  // with the fix. Reject stays one click.
+  if (presenceRefusal(gate, { actionId: body.actionId })) {
+    return c.json({ error: PRESENCE_REQUIRED_MESSAGE }, 400);
   }
   if (body.attachments?.length && gate.type !== "question") {
     return c.json({ error: "Images can only answer questions. Use the approval buttons for this request." }, 400);
