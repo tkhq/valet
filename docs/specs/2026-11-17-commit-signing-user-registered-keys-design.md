@@ -45,12 +45,33 @@ Every decision gate carries an assurance:
 - `session`: a signed-in person clicked Approve. This is every approval today.
 - `presence`: the approver's passkey stamped a Turnkey activity with user verification, and Turnkey executed it. Turnkey checks the assertion. Valet only reads the completed activity back.
 
-`presence` is a property of the evidence, not of the card. The names match the authorization contracts: `ApprovalRequirement.tier` uses the same two values, and `ApprovalFact` gains `assurance`, so a policy can require `presence` through the `approval_tier` obligation. The contracts are not on `dev-v2` yet. This work ships the gate field, the engine check, and the passkey endpoint on their own. The contract fields land with the contracts.
+`presence` is a property of the proof, not of the card.
+
+### Proof of presence, in AuthZEN terms
+
+A passkey approval is a proof of presence: evidence that a person was present at the moment of the action, not only signed in. The AuthZEN specifications do not define a "proof of presence" object. They define the pieces this design uses, and the names come from them:
+
+| Concept | AuthZEN or RFC source | In Valet |
+| --- | --- | --- |
+| Requirement for presence | Obligations profile, `step-up` obligation (`acr_value`, `amr_values`) | A gate's `context.assurance: "presence"`. In policy terms, a `step-up` obligation with `amr_values: ["pop", "user"]`. |
+| Presence methods | RFC 8176 `amr` values: `user` (user presence test), `pop` (proof of possession of a key) | `amr: ["pop", "user"]` in the proof. |
+| The approval fact | Access Request and Approval Profile, section 8.1 `approval` object: `id`, `approved_at`, `approved_until`, `state` | `DecisionResolution.approval`, one per resolved passkey gate. A gate approval is single use, so `approved_until` equals `approved_at`. |
+| Verifier state | The approval's opaque `state`, which the verifier must check for integrity, issuer, and binding | `state` is a `PresenceProof`: `iss: "turnkey"`, `organization_id`, `amr`, `approver` (`user_id` and the vote's `authenticator`: `scheme`, `public_key`), and `activities` (`activity_id`, `payload_sha256`, `approved_at`), one per passkey tap. |
+
+`payload_sha256` binds each tap to the exact bytes it approved. A replayed or substituted approval cannot cover other bytes.
+
+Where each part of the authority stack does its job:
+
+- **Facts (policy information point):** Turnkey's completed activities are the trusted facts. Valet reads them back with the parent key. It does not trust the browser's account of what happened.
+- **Approvals verifier:** the passkey endpoint. It checks each activity's type, organization, passkey vote, and signature before it builds the approval. The engine accepts a `presence` approval only from this path.
+- **Records (decision log):** the engine persists the resolution, including the full approval object, on the gate. When the authorization contracts land, `ApprovalFact` carries `assurance` and the same `approval` object into the decision record. `ApprovalRequirement` and the `approval_tier` obligation gain an `assurance` member beside `tier`, so a policy can require a proof of presence at any tier.
+
+The contracts are not on `dev-v2` yet. This work ships the gate field, the engine check, the verifier, and the persisted approval on their own.
 
 ### How a gate asks for a passkey
 
 - A tool asks with `DecisionGateRequest.assurance: "presence"`. The engine stores it on the gate.
-- The engine refuses an approving resolution for a `presence` gate unless the resolution carries `assurance: "presence"` and evidence. This check lives in `Session.resolveDecision`, so the web route, Slack buttons, bulk answers, MCP, and the CLI all meet it. Reject and decline stay one click everywhere.
+- The engine refuses an approving resolution for a `presence` gate unless the resolution carries `assurance: "presence"` and an approval whose proof lists at least one activity. This check lives in `Session.resolveDecision`, so the web route, Slack buttons, bulk answers, MCP, and the CLI all meet it. Reject and decline stay one click everywhere.
 - Only the api's passkey endpoint sets `assurance: "presence"` on a resolution, after Turnkey verified the stamp.
 - Every passkey step is the same Turnkey activity: `SIGN_RAW_PAYLOAD_V2` in the approver's own sub-organization, with their signing key, stamped by their passkey user. The approver is a root user, so no policy grant is involved.
 - A plain approval gate signs a challenge: SHA-256 over `valet-approval`, the session id, the gate id, the title, and the body. The api checks the signature with the person's public key. A challenge cannot pass for a git signature, because a git signature covers an `SSHSIG` blob, which starts with different bytes.
@@ -63,7 +84,7 @@ Every decision gate carries an assurance:
 1. Checks that the caller is the gate's approver and that the body is the step it issued: activity type, the approver's sub-organization, their signing key, the expected payload, and a timestamp less than five minutes old.
 2. Forwards the body and stamp to Turnkey unchanged. A changed body breaks the stamp.
 3. Reads the completed activity back and checks that the passkey user approved it and that the signature verifies with the person's public key.
-4. Records the step. After the last step, it resolves the gate with `assurance: "presence"` and the activity ids as evidence.
+4. Records the step: the activity id, the signature, the payload digest, and the vote's authenticator. After the last step, it resolves the gate with `assurance: "presence"` and the approval object.
 
 A person who has not set up commit signing has no sub-organization yet. The card then links to Settings, Commit signing, and offers only Reject.
 
@@ -160,7 +181,7 @@ The last row is the remaining gap. Closing it needs an approval page that Valet 
 
 ## Validation
 
-- Unit: the `SSHSIG` blob and armor against `ssh-keygen -Y verify`, the commit rewrite and its hashes against `git hash-object`, the step checks in the passkey endpoint, the engine refusing an approving resolution on a `presence` gate without evidence, and enrollment in both modes.
+- Unit: the `SSHSIG` blob and armor against `ssh-keygen -Y verify`, the commit rewrite and its hashes against `git hash-object`, the step checks in the passkey endpoint, the engine refusing an approving resolution on a `presence` gate without a proof, and enrollment in both modes.
 - Live, against a Turnkey organization and a test repository:
   1. Enroll, add the key on GitHub from the modal, and see the check pass.
   2. Commit unsigned, call `turnkey.sign_commits`, tap the passkey, force-push, and see Verified on every commit.
