@@ -15,7 +15,7 @@ interface TransportRegistry {
   transportFor(channelType: string): {
     threadKeyFromEvent?(eventKey: string, payload: unknown): string | null;
     messageTsFromEvent?(eventKey: string, payload: unknown): string | null;
-    normalizeForAgent?(msg: { userId?: string; text: string }): Promise<{ senderName?: string; text: string }>;
+    normalizeForAgent?(msg: { userId?: string; text: string; payload?: unknown }): Promise<{ senderName?: string; text: string }>;
   } | null;
 }
 
@@ -34,7 +34,7 @@ export function channelOriginResolver(
 
 export function channelMessageNormalizer(
   registry: TransportRegistry,
-): (service: string, msg: { userId?: string; text: string }) => Promise<{ senderName?: string; text: string }> {
+): (service: string, msg: { userId?: string; text: string; payload?: unknown }) => Promise<{ senderName?: string; text: string }> {
   return async (service, msg) => {
     const normalized = await registry.transportFor(service)?.normalizeForAgent?.(msg);
     return normalized ?? { text: msg.text };

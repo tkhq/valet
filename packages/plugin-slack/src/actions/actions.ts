@@ -31,6 +31,7 @@ import { SlackApi, SlackApiError } from "../transport/api.js";
 import { slackIdentityOverride } from "../sender-identity.js";
 import { markdownToSlackMrkdwn, stripCode } from "../transport/format.js";
 import { readOnlineStatus } from "../online-status.js";
+import { slackMessageExtraText } from "../message-text.js";
 
 /**
  * Curried action builder. The first call binds T from the parameters
@@ -226,9 +227,10 @@ async function resolveAndEnrichMessages(token: string, messages: Record<string, 
   for (const msg of messages) {
     if (typeof msg.user === 'string' && /^[UW]/.test(msg.user)) userIds.add(msg.user);
     if (typeof msg.bot_id === 'string') botIds.add(msg.bot_id as string);
-    if (typeof msg.text === 'string') {
-      for (const m of msg.text.matchAll(SLACK_USER_MENTION_RE)) userIds.add(m[1]);
-      for (const m of msg.text.matchAll(SLACK_CHANNEL_MENTION_RE)) {
+    for (const body of [msg.text, msg.content]) {
+      if (typeof body !== 'string') continue;
+      for (const m of body.matchAll(SLACK_USER_MENTION_RE)) userIds.add(m[1]);
+      for (const m of body.matchAll(SLACK_CHANNEL_MENTION_RE)) {
         // A mention can carry a label (<#C123|general>). Slack keeps that label
         // as the author wrote it at post time, so it can name the channel
         // wrongly, and a sender chooses it. Look up an ID that carries no
@@ -285,18 +287,15 @@ async function resolveAndEnrichMessages(token: string, messages: Record<string, 
       if (name) enriched.bot_display = name;
     }
 
-    if (typeof msg.text === 'string') {
-      let text = msg.text as string;
-      text = text.replace(SLACK_USER_MENTION_RE, (_match, uid: string) => {
-        return userCache.get(uid) || `@${uid}`;
-      });
-      text = text.replace(SLACK_CHANNEL_MENTION_RE, (_match, cid: string, label?: string) => {
+    const resolve = (body: string) => body
+      .replace(SLACK_USER_MENTION_RE, (_match, uid: string) => userCache.get(uid) || `@${uid}`)
+      .replace(SLACK_CHANNEL_MENTION_RE, (_match, cid: string, label?: string) => {
         const name = cachedChannelName(token, cid);
         if (name) return `#${name} (${cid})`;
         return label ? `#${label}` : `#${cid}`;
       });
-      enriched.text = text;
-    }
+    if (typeof msg.text === 'string') enriched.text = resolve(msg.text);
+    if (typeof msg.content === 'string') enriched.content = resolve(msg.content);
 
     return enriched;
   });
@@ -449,11 +448,16 @@ export function slimMessage(msg: Record<string, unknown>): Record<string, unknow
     count: r.count,
   }));
 
+  // A bot or workflow post often keeps its real content in blocks or
+  // attachments, with `text` as a one-line summary.
+  const content = slackMessageExtraText(msg);
+
   return {
     user: msg.user,
     bot_id: msg.bot_id || undefined,
     subtype: msg.subtype || undefined,
     text: msg.text,
+    content: content || undefined,
     ts: msg.ts,
     thread_ts: msg.thread_ts || undefined,
     reply_count,
@@ -738,7 +742,7 @@ const readHistory = action(Type.Object({
   }))({
   id: 'slack.read_history',
   name: 'Read History',
-  description: 'Read recent messages from a Slack channel the bot has joined. Use list_channels to get channel IDs. Each message ts can be used as thread_ts for replies. Use oldest/latest to narrow to a time window. The result names the channel in channel_name. Use that name when you write about the channel. Use the ID in tool arguments.',
+  description: 'Read recent messages from a Slack channel the bot has joined. Use list_channels to get channel IDs. Each message ts can be used as thread_ts for replies. Use oldest/latest to narrow to a time window. A bot or app post can carry more in content (its blocks and attachments as text) than in text. The result names the channel in channel_name. Use that name when you write about the channel. Use the ID in tool arguments.',
   riskLevel: 'low',
   execute: async (args, ctx) => {
     const p = args;
@@ -764,7 +768,7 @@ const readHistory = action(Type.Object({
     const fetched = messages.length;
     if (p.filter) {
       const kw = p.filter.toLowerCase();
-      messages = messages.filter((m) => typeof m.text === 'string' && m.text.toLowerCase().includes(kw));
+      messages = messages.filter((m) => [m.text, m.content].some((t) => typeof t === 'string' && t.toLowerCase().includes(kw)));
     }
     if (p.threads_only) {
       messages = messages.filter((m) => typeof m.reply_count === 'number' && m.reply_count > 0);
@@ -810,7 +814,7 @@ const readThread = action(Type.Object({
   }))({
   id: 'slack.read_thread',
   name: 'Read Thread',
-  description: 'Read replies in a Slack thread. Bot must be a member of the channel. The result names the channel in channel_name. Use that name when you write about the channel. Use the ID in tool arguments.',
+  description: 'Read replies in a Slack thread. Bot must be a member of the channel. A bot or app post can carry more in content (its blocks and attachments as text) than in text. The result names the channel in channel_name. Use that name when you write about the channel. Use the ID in tool arguments.',
   riskLevel: 'low',
   execute: async (args, ctx) => {
     const p = args;

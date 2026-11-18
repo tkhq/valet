@@ -570,8 +570,11 @@ export interface ChannelTransport {
    * dispatcher and follow-router stamp the result so the model never sees
    * `sender="U0AJ…"` or `<@U…>` markup. `senderName` is absent when `userId` is
    * omitted or names nobody. Optional: a transport without a directory omits it.
+   * `payload` is the raw provider message, when the caller has it. A transport
+   * adds the text its rich parts hold (Slack blocks and attachments), because
+   * a bot post often keeps its content there and `text` is only a summary.
    */
-  normalizeForAgent?(msg: { userId?: string; text: string }): Promise<{ senderName?: string; text: string }>;
+  normalizeForAgent?(msg: { userId?: string; text: string; payload?: unknown }): Promise<{ senderName?: string; text: string }>;
   /**
    * The ts of the specific message that triggered a channel event, so a reply
    * turn can `react_to_origin` to it. Distinct from the thread key's `threadTs`,

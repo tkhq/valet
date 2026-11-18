@@ -87,6 +87,14 @@ Example output:
 }
 ```
 
+#### Block and attachment content (2026-11-17)
+
+A bot, app, or workflow post often keeps its real content in Block Kit `blocks` or legacy `attachments`, and `text` holds only a one-line summary. `slimMessage` adds a `content` field with that text: one line per header, section text and field, context, markdown block, and attachment pretext, author, title, text, `title: value` field, and footer. Buttons, images, dividers, and inputs give no lines. An attachment's `fallback` counts only when it has nothing else.
+
+`slackMessageExtraText` (`src/message-text.ts`) builds it. It drops a main-text block (header, section text, markdown, rich text) whose words all appear in `text`, because a bot often sends the same content twice in two formats; Valet's own long replies do. It also drops lines equal to a line of `text` and lines repeated within one block or attachment, and caps the result at 4,000 characters. Link previews (`from_url`, `is_app_unfurl`) are left out, because the linked page wrote them, not a person in the conversation. A forwarded message (`is_msg_unfurl`) is kept. A person's message carries a `rich_text` block that mirrors `text`, so `rich_text` counts only for a bot or app post or a message with no `text`. `content` is absent when it adds nothing. The read actions resolve mentions in `content` as in `text`, and the `read_history` keyword filter matches both. The inbound thread transcript (`thread-context.ts`) appends the same lines to each message.
+
+An event delivery gets the same lines. `ChannelTransport.normalizeForAgent` takes the raw `payload`, and the Slack transport appends the block and attachment text before it resolves mentions. The event dispatcher passes the payload on both paths, and adds readable text only for Slack events. The follow-router delivers only people's messages, so it passes none. For a post with a reply origin, the readable text is the body. A bot post has no reply origin, so its body is the summary, then the readable text, then the JSON excerpt, which a Block Kit payload can fill before its fields.
+
 #### Message subtype filtering
 
 `read_history` gets a new optional `include_subtypes` boolean parameter (default `false`). When false, messages with housekeeping subtypes are filtered out:

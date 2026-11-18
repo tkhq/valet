@@ -193,7 +193,7 @@ export interface EventDispatcherDeps {
    */
   normalizeChannelMessage?: (
     service: string,
-    msg: { userId?: string; text: string },
+    msg: { userId?: string; text: string; payload?: unknown },
   ) => Promise<{ senderName?: string; text: string }>;
   /**
    * The loaded plugins, for the trigger catalog a `{{payload.<field>}}`
@@ -598,6 +598,7 @@ export class EventDispatcher {
           const normalized = (await this.deps.normalizeChannelMessage?.(event.service, {
             userId: actor?.externalId,
             text: rawText,
+            payload: event.payload,
           })) ?? { text: rawText };
           // The clean text is the body; fall back to the summary only when the
           // message carries no text of its own (e.g. a file-only post).
@@ -606,7 +607,18 @@ export class EventDispatcher {
           const sender = normalized.senderName ?? actor?.login ?? actor?.externalId;
           if (sender) attributes.sender = sender;
         } else {
-          body = `${event.summary}\n\n${JSON.stringify(event.payload).slice(0, MAX_BODY_EXCERPT_CHARS)}`;
+          // A bot post has no reply origin, and a Block Kit payload can fill
+          // the JSON excerpt before its fields. The transport's readable text
+          // (Slack: text, blocks, and attachments) goes first.
+          // Only Slack's transport reads a payload's rich parts. Another
+          // service would only repeat its payload's text.
+          const readable = event.service === "slack" && this.deps.normalizeChannelMessage
+            ? (await this.deps.normalizeChannelMessage(event.service, { text: channelText(event.payload) ?? "", payload: event.payload })).text
+            : "";
+          const excerpt = JSON.stringify(event.payload).slice(0, MAX_BODY_EXCERPT_CHARS);
+          body = readable
+            ? `${event.summary}\n\n${readable.slice(0, MAX_BODY_EXCERPT_CHARS)}\n\n${excerpt}`
+            : `${event.summary}\n\n${excerpt}`;
         }
         // A rule that configures no template never reaches the renderer, so
         // the body above is the one every rule written before this feature

@@ -476,6 +476,30 @@ describe("EventDispatcher", () => {
     }
   });
 
+  it("puts a bot post's readable text before its JSON excerpt", async () => {
+    // A Block Kit or attachment payload can fill the excerpt before its
+    // fields, so the transport's readable text goes first.
+    const payload = { type: "message", subtype: "bot_message", bot_id: "B1", channel: "C1", ts: "1.2", text: "promotion failed",
+      attachments: [{ fields: [{ title: "Promotion", value: "prod.4b9e82d" }] }] };
+    await seedDelivery({
+      target: { kind: "assistant" }, ownerType: "org",
+      service: "slack", eventKey: "slack.bot_message", eventKeys: ["slack.bot_message"],
+      refs: { channel: "C1", ts: "1.2" }, summary: "message in C1 by B1", subjects: ["slack:T1/C1"], payload,
+      actor: { externalId: "B1", bot: true },
+    });
+    const normalize = vi.fn(async (_service: string, msg: { text: string; payload?: unknown }) => ({ text: `${msg.text}\nPromotion: prod.4b9e82d` }));
+    const deliver = vi.fn<AssistantDeliverFn>(async () => LANDED);
+    await new EventDispatcher({
+      db: tdb.appDb, workflowRunHost: fakeRunHost(), workflowStore: new PgWorkflowStore(tdb.pgdb), deliverToAssistant: deliver, plugins: [slackPlugin],
+      resolveChannelOrigin: () => null, normalizeChannelMessage: normalize,
+    }).pollOnce();
+    expect(normalize).toHaveBeenCalledWith("slack", expect.objectContaining({ text: "promotion failed", payload: expect.objectContaining({ ts: "1.2" }) }));
+    const [summary, readable, excerpt] = deliver.mock.calls[0]![0].signal.body.split("\n\n");
+    expect(summary).toBe("message in C1 by B1");
+    expect(readable).toBe("promotion failed\nPromotion: prod.4b9e82d");
+    expect(JSON.parse(excerpt!)).toMatchObject({ ts: "1.2" });
+  });
+
   it("delivers an assistant-target delivery: seam gets SignalContent with signalType = event key; row -> delivered", async () => {
     const { eventId, deliveryId } = await seedDelivery({ target: { kind: "assistant" }, ownerType: "org" });
 

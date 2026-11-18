@@ -848,6 +848,37 @@ describe('slack actions', () => {
     });
   });
 
+  it('read_history returns the blocks and attachments of a bot post as content', async () => {
+    mockGuardAllowsPublicChannel(fetchMock);
+    // No user or bot id, so nothing else reads the Slack API.
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, {
+        ok: true,
+        messages: [
+          {
+            subtype: 'bot_message',
+            text: 'New deal ready for review',
+            ts: '1.1',
+            blocks: [
+              { type: 'section', text: { type: 'mrkdwn', text: 'New deal ready for review' }, fields: [{ type: 'mrkdwn', text: '*Promotion:* SPRING25' }] },
+              { type: 'actions', elements: [{ type: 'button', text: { type: 'plain_text', text: 'Approve' }, value: 'yes' }] },
+            ],
+            attachments: [{ fallback: 'Owner: Dana', fields: [{ title: 'Owner', value: 'Dana' }] }],
+          },
+          { text: 'unrelated', ts: '1.2' },
+        ],
+        has_more: false,
+      }),
+    );
+
+    const result = await action('slack.read_history').execute({ channel: 'C1', filter: 'spring25' }, pluginCtx());
+
+    expect(result).toMatchObject({ success: true, data: { total: 1 } });
+    const messages = (result as { data: { messages: Array<Record<string, unknown>> } }).data.messages;
+    expect(messages[0].text).toBe('New deal ready for review');
+    expect(messages[0].content).toBe('*Promotion:* SPRING25\nOwner: Dana');
+  });
+
   it('read_thread reads replies for a thread_ts', async () => {
     mockGuardAllowsPublicChannel(fetchMock);
     fetchMock.mockResolvedValueOnce(
