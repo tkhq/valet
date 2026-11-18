@@ -225,6 +225,7 @@ function SecretRow({ secret, target, canWrite }: { secret: SecretSummary; target
           <div className="truncate font-mono text-xs text-muted">{secret.reference}</div>
           {secret.use && <div className="truncate text-xs text-muted">{useRuleText(secret.use)}</div>}
           {secret.uses && <div className="truncate text-xs text-muted">{usesText(secret.uses, (ms) => formatDateOr(ms, "—"))}</div>}
+          {secret.held && <div className="truncate text-xs text-warning-fg">Waiting for you: choose its host on the card in the thread. No command can read it yet.</div>}
         </div>
         <div className="hidden shrink-0 text-xs text-muted sm:block">Saved {formatDateOr(secret.createdAt, "—")}</div>
         <Button type="button" variant="ghost" size="sm" className="shrink-0" onClick={() => void copy(secret.reference)}>

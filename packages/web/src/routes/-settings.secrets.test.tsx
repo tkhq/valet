@@ -71,6 +71,18 @@ describe("SecretsPage", () => {
     expect(screen.getByText(/encrypted in your browser and stored in Turnkey/)).toBeTruthy();
   });
 
+  it("marks a key that intake holds as waiting for the person", () => {
+    data = {
+      enabled: true,
+      provider: "Turnkey",
+      canWrite: true,
+      useAvailable: true,
+      secrets: [{ name: "HETZNER_API_KEY", reference: "secret://personal/HETZNER_API_KEY", createdAt: 0, held: { provider: "hetzner" } }],
+    };
+    render(<SecretsPage />);
+    expect(screen.getByText(/Waiting for you: choose its host on the card in the thread/)).toBeTruthy();
+  });
+
   it("sends the trimmed name and the exact value on submit", () => {
     data = { enabled: true, provider: "Turnkey", canWrite: true, useAvailable: false, secrets: [] };
     render(<SecretsPage />);
