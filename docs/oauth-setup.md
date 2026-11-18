@@ -103,7 +103,7 @@ Users link their GitHub account through `POST /api/me/github/link`, which redire
    - Callback URL is `http://localhost:8787/auth/github/callback`
    - Webhook URL is `http://localhost:8787/webhooks/github`
    - Webhook deliveries to `/webhooks/github` return `200`
-6. Link a user account from the GitHub integration card and confirm it returns to `/integrations?github=linked`.
+6. Link a user account from the GitHub integration card and confirm it returns to `/integrations` and shows "GitHub connected".
 7. Start a session against a GitHub repo and confirm repo access works through either the linked user token or the App installation fallback.
 
 ## Google OAuth (Optional)

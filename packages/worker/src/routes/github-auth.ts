@@ -4,8 +4,9 @@ import type { Env, Variables } from '../env.js';
 import { signJWT, verifyJWT } from '../lib/jwt.js';
 import { loadGitHubApp } from '../services/github-app.js';
 import { storeCredential } from '../services/credentials.js';
-import * as oauthService from '../services/oauth.js';
 import { reconcileUserInstallations } from '../services/github-installations.js';
+import { GITHUB_LINK_CLAIM_TTL_SECONDS, sealGitHubLinkClaim, type GitHubLinkClaim } from '../services/github-link-claim.js';
+import * as oauthService from '../services/oauth.js';
 import * as db from '../lib/db.js';
 import { getDb } from '../lib/drizzle.js';
 import { getAuthRedirectOrigin, resolveAuthRedirectOrigin } from '../lib/auth-redirect-origin.js';
@@ -118,62 +119,24 @@ githubAuthRouter.get('/callback', async (c) => {
   // ─── Branch: link flow ──────────────────────────────────────────────────
 
   if ((payload as any).purpose === 'github-link') {
-    const userId = payload.sub as string;
-
-    // Upsert identity link — remove any existing link for this GitHub account
-    await db.deleteIdentityLinkByExternalId(appDb, 'github', githubId);
-
-    // Also delete any other GitHub link for this user (re-link scenario)
-    const existingLinks = await db.getUserIdentityLinks(appDb, userId);
-    const existingGithubLink = existingLinks.find((l) => l.provider === 'github');
-    if (existingGithubLink) {
-      await db.deleteIdentityLink(appDb, existingGithubLink.id, userId);
-    }
-
-    await db.createIdentityLink(appDb, {
-      id: crypto.randomUUID(),
-      userId,
-      provider: 'github',
-      externalId: githubId,
-      externalName: profile.login,
-    });
-
-    // Store credential
-    const credentialData: Record<string, string> = { access_token: authentication.token };
-    if (authentication.refreshToken) {
-      credentialData.refresh_token = authentication.refreshToken;
-    }
-    await storeCredential(c.env, 'user', userId, 'github', credentialData, {
-      credentialType: 'oauth2',
-      expiresAt: authentication.expiresAt,
-    });
-
-    // Ensure GitHub integration is provisioned for tool discovery
-    await db.ensureIntegration(appDb, userId, 'github');
-
-    // Update user record with GitHub info — catch unique constraint on github_id
-    try {
-      await db.updateUserGitHub(appDb, userId, {
-        githubId,
-        githubUsername: profile.login,
-        name: profile.name ?? undefined,
-        avatarUrl: profile.avatar_url,
-      });
-    } catch (err: any) {
-      if (err?.message?.includes('UNIQUE constraint failed') || err?.message?.includes('idx_users_github_id')) {
-        return c.redirect(`${frontendUrl}/integrations?github=error&reason=account_already_linked`);
-      }
-      throw err;
-    }
-
-    // Reconcile personal installations
-    try {
-      await reconcileUserInstallations(userOctokit, appDb, userId, githubId);
-    } catch (err) {
-      console.warn('[github-auth] Installation reconciliation failed:', err);
-    }
-
-    return c.redirect(`${frontendUrl}/integrations?github=linked`);
+    // Persist nothing here. The state only proves which user started the
+    // flow, not who is completing it, so the result is sealed into a claim
+    // that only that user can redeem via POST /api/me/github/link/claim.
+    const claim: GitHubLinkClaim = {
+      v: 1,
+      userId: payload.sub as string,
+      githubId,
+      login: profile.login,
+      name: profile.name ?? null,
+      avatarUrl: profile.avatar_url ?? null,
+      accessToken: authentication.token,
+      refreshToken: authentication.refreshToken ?? null,
+      expiresAt: authentication.expiresAt ?? null,
+      exp: Math.floor(Date.now() / 1000) + GITHUB_LINK_CLAIM_TTL_SECONDS,
+    };
+    const blob = await sealGitHubLinkClaim(claim, c.env.ENCRYPTION_KEY);
+    const params = new URLSearchParams({ github: 'claim', claim: blob });
+    return c.redirect(`${frontendUrl}/integrations?${params.toString()}`);
   }
 
   // ─── Branch: login flow ─────────────────────────────────────────────────

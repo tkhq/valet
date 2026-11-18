@@ -15,6 +15,7 @@ const {
   deleteIdentityLinkMock,
   ensureIntegrationMock,
   updateUserGitHubMock,
+  getAuthenticatedMock,
 } = vi.hoisted(() => ({
   loadGitHubAppMock: vi.fn(),
   signJWTMock: vi.fn(),
@@ -29,6 +30,13 @@ const {
   deleteIdentityLinkMock: vi.fn(),
   ensureIntegrationMock: vi.fn(),
   updateUserGitHubMock: vi.fn(),
+  getAuthenticatedMock: vi.fn(),
+}));
+
+vi.mock('octokit', () => ({
+  Octokit: class {
+    rest = { users: { getAuthenticated: getAuthenticatedMock, listEmailsForAuthenticatedUser: vi.fn() } };
+  },
 }));
 
 vi.mock('../services/github-app.js', () => ({
@@ -68,6 +76,7 @@ vi.mock('../lib/drizzle.js', () => ({
 
 // Must import after mocks
 import { githubAuthRouter } from './github-auth.js';
+import { openGitHubLinkClaim } from '../services/github-link-claim.js';
 
 const FRONTEND_URL = 'http://localhost:5173';
 const PAGES_FRONTEND_URL = 'https://dev-valet-client.pages.dev';
@@ -208,6 +217,37 @@ describe('githubAuthRouter', () => {
       expect(res.headers.get('location')).toBe(
         `${FRONTEND_URL}/login?error=invalid_state`,
       );
+    });
+
+    it('link flow persists nothing and hands the frontend a claim for the initiating user', async () => {
+      verifyJWTMock.mockResolvedValue({ sub: 'user-a', purpose: 'github-link', exp: 9_999_999_999 });
+      loadGitHubAppMock.mockResolvedValue({
+        oauth: {
+          createToken: vi.fn().mockResolvedValue({ authentication: { token: 'ghu_token' } }),
+        },
+      });
+      getAuthenticatedMock.mockResolvedValue({
+        data: { id: 42, login: 'octocat', email: 'o@example.com', name: null, avatar_url: '' },
+      });
+
+      const app = buildApp();
+      const res = await app.request(
+        'http://localhost/auth/github/callback?code=test-code&state=link-jwt',
+        { method: 'GET' },
+        buildEnv(),
+      );
+
+      expect(res.status).toBe(302);
+      const location = new URL(res.headers.get('location') ?? '');
+      expect(`${location.origin}${location.pathname}`).toBe(`${FRONTEND_URL}/integrations`);
+      expect(location.searchParams.get('github')).toBe('claim');
+      const opened = await openGitHubLinkClaim(location.searchParams.get('claim') ?? '', 'test-key', 'user-a');
+      expect(opened).toMatchObject({ ok: true, claim: { userId: 'user-a', githubId: '42', accessToken: 'ghu_token' } });
+
+      expect(createIdentityLinkMock).not.toHaveBeenCalled();
+      expect(deleteIdentityLinkByExternalIdMock).not.toHaveBeenCalled();
+      expect(storeCredentialMock).not.toHaveBeenCalled();
+      expect(updateUserGitHubMock).not.toHaveBeenCalled();
     });
   });
 });

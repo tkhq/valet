@@ -5,7 +5,7 @@ import { PageContainer, PageHeader } from '@/components/layout/page-container';
 import { IntegrationList } from '@/components/integrations/integration-list';
 import { ConnectIntegrationDialog } from '@/components/integrations/connect-integration-dialog';
 import { toastSuccess, toastError } from '@/hooks/use-toast';
-import { githubKeys } from '@/api/github';
+import { useClaimGitHubLink } from '@/api/github';
 import { slackKeys, useClaimSlackUser } from '@/api/slack';
 import { ApiError } from '@/api/client';
 
@@ -37,6 +37,12 @@ const REASON_LABELS: Record<string, string> = {
   oauth_failed: 'Slack rejected the OAuth exchange',
   missing_scopes: 'Workspace blocked one or more required Slack scopes',
   already_linked: 'That Slack user is already linked to a different Valet account',
+  account_already_linked: 'That GitHub account is already linked to a different Valet account',
+};
+
+/** GitHub claim errors whose wording differs from the shared labels. */
+const GITHUB_REASON_LABELS: Record<string, string> = {
+  user_mismatch: 'This GitHub connection was started by a different Valet user',
 };
 
 function IntegrationsPage() {
@@ -45,17 +51,31 @@ function IntegrationsPage() {
   const navigate = useNavigate();
   const qc = useQueryClient();
   const claimSlackUser = useClaimSlackUser();
+  const claimGitHubLink = useClaimGitHubLink();
   // Guard against double-redemption (React StrictMode double-fires effects).
   const claimStarted = React.useRef(false);
 
   React.useEffect(() => {
     if (!github && !slack_user) return;
 
-    if (github === 'linked') {
-      toastSuccess('GitHub connected', 'Your GitHub account has been linked.');
-      qc.invalidateQueries({ queryKey: githubKeys.status });
-    } else if (github === 'error') {
-      toastError('GitHub linking failed', REASON_LABELS[reason ?? ''] ?? 'An unexpected error occurred.');
+    if (github === 'claim' && claim) {
+      // Final, authenticated step of the GitHub link flow: the worker binds
+      // the account only if this session belongs to the user who started it.
+      if (!claimStarted.current) {
+        claimStarted.current = true;
+        claimGitHubLink.mutate(claim, {
+          onSuccess: () => {
+            toastSuccess('GitHub connected', 'Your GitHub account has been linked.');
+          },
+          onError: (err) => {
+            const code = err instanceof ApiError ? err.code ?? '' : '';
+            toastError(
+              'GitHub linking failed',
+              GITHUB_REASON_LABELS[code] ?? REASON_LABELS[code] ?? 'An unexpected error occurred.',
+            );
+          },
+        });
+      }
     }
 
     if (slack_user === 'claim' && claim) {
@@ -92,7 +112,7 @@ function IntegrationsPage() {
     // Clear query params from URL (the claim blob especially should not
     // linger in the address bar).
     void navigate({ to: '/integrations', search: {}, replace: true });
-  }, [github, slack_user, reason, claim, navigate, qc, claimSlackUser]);
+  }, [github, slack_user, reason, claim, navigate, qc, claimSlackUser, claimGitHubLink]);
 
   return (
     <PageContainer>
