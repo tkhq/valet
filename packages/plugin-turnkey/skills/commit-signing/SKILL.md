@@ -23,6 +23,8 @@ call_tool turnkey.sign_commits params={"repo":"owner/name","branch":"my-branch",
 
 Run `turnkey.sign_commits` again after any new commit you want signed.
 
+If the push fails because the branch is gone (`src refspec ... does not match any`), the sandbox was replaced after signing. Check out the pushed unsigned branch with `git fetch origin my-branch && git checkout -B my-branch origin/my-branch`, then call `turnkey.sign_commits` again. It reuses the user's approval for the same commits and asks for no new tap.
+
 ## Window mode: `turnkey.request_signing_key`
 
 Ask once per pull request, before you commit. On approval git in this sandbox signs every commit until the window ends (2 hours by default).

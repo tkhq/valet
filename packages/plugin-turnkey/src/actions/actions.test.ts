@@ -257,6 +257,47 @@ describe("turnkey.sign_commits", () => {
     expect(s.refs.get("feature")).toBe(UNSIGNED_2_SHA);
   });
 
+  it("reuses an approval for the same commits after the sandbox loses the signed branch", async () => {
+    const s = setup();
+    await s.enroll();
+    const first = await s.sign.execute(signArgs, s.ctx);
+    expect(first.success).toBe(true);
+    // A new sandbox: the branch is back at the pushed, unsigned head.
+    s.refs.set("feature", UNSIGNED_2_SHA);
+    const ctx = fakeContext({ pluginStore: s.store, exec: repoExec(s.refs) });
+    const again = await s.sign.execute(signArgs, ctx);
+    expect(again).toMatchObject({ success: true, data: { head: (first.data as { head: string }).head, reused: true } });
+    expect(ctx.gates).toHaveLength(0);
+    expect(s.refs.get("feature")).toBe((first.data as { head: string }).head);
+  });
+
+  it("opens a new gate when a stored approval no longer verifies against the key", async () => {
+    const s = setup();
+    await s.enroll();
+    await s.sign.execute(signArgs, s.ctx);
+    s.refs.set("feature", UNSIGNED_2_SHA);
+    // The person set up again with a different key.
+    await s.store.user("user-1").put(COLLECTIONS.enrollment, DEFAULT_KEY, {
+      ...PRESENCE,
+      signingKey: { ...PRESENCE.signingKey!, publicKeyHex: "11".repeat(32) },
+    });
+    const ctx = fakeContext({ pluginStore: s.store, exec: repoExec(s.refs), decision: async () => ({ actionId: "reject", resolvedBy: "user-1", resolvedAt: NOW }) });
+    const res = await s.sign.execute(signArgs, ctx);
+    expect(ctx.gates).toHaveLength(1);
+    expect(res).toEqual({ success: false, error: REJECTED_MESSAGE });
+    expect(s.refs.get("feature")).toBe(UNSIGNED_2_SHA);
+  });
+
+  it("does not reuse an approval from another session", async () => {
+    const s = setup();
+    await s.enroll();
+    await s.sign.execute(signArgs, s.ctx);
+    s.refs.set("feature", UNSIGNED_2_SHA);
+    const ctx = fakeContext({ sessionId: "session-2", pluginStore: s.store, exec: repoExec(s.refs), decision: async () => ({ actionId: "reject", resolvedBy: "user-1", resolvedAt: NOW }) });
+    await s.sign.execute(signArgs, ctx);
+    expect(ctx.gates).toHaveLength(1);
+  });
+
   it("refuses an approval without presence evidence", async () => {
     const s = setup();
     await s.enroll();

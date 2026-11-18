@@ -172,6 +172,7 @@ export interface FakeContextOptions {
   githubToken?: string | null;
   decision?: (req: DecisionGateRequest) => Promise<DecisionResolution>;
   pluginStore?: PluginStore;
+  sessionId?: string;
   /** Answers a sandbox command; return undefined for the default (exit 0, empty output). */
   exec?: (command: string) => { exitCode: number; stdout: string; stderr: string } | undefined;
 }
@@ -191,7 +192,7 @@ export function fakeContext(opts: FakeContextOptions = {}): PluginActionContext 
     service: "turnkey",
     userId: "user-1",
     orgId: "org-1",
-    sessionId: "session-1",
+    sessionId: opts.sessionId ?? "session-1",
     threadId: "thread-1",
     decisionGateId: "gate-1",
     credentials: {

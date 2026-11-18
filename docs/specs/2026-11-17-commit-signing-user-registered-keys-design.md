@@ -139,6 +139,8 @@ Add your Valet signing key to GitHub
 
 A rejection answers every later signing request for the same branch in that turn, so a looping agent cannot keep asking for taps.
 
+The signed commits exist only in the sandbox until the agent pushes them. If the sandbox is replaced first, for example by an api restart, the agent checks out the pushed unsigned branch again and calls the action again. The action keeps the verified signatures of each signed chain in the plugin store (`signed_chains`, scope session, keyed by repository, branch, and head commit). On a call with the same commits it verifies them against the person's current key and writes them again without a gate. A signature covers the exact commit bytes, so reuse cannot sign anything the person did not approve. The rebuilt commits are byte-identical to the first ones. A signature from an older key fails the check, and the action opens a new gate. Reuse stays within one session.
+
 The rewrite sets the committer email to the person's GitHub noreply address, read with their token (`GET /user`), as the shipped design does. It keeps the committer name and time, the author, the tree, and the message.
 
 ### Session mode: the shipped window

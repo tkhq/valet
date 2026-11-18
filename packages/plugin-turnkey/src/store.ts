@@ -29,6 +29,13 @@ export const COLLECTIONS = {
    * collected so far (`PresenceStepsDoc`). The api writes it between steps.
    */
   presenceSteps: "presence_steps",
+  /**
+   * Scope `session`, key = the sign_commits resume key (repo, branch, head
+   * commit): the verified signatures of a chain that was signed. A re-run on
+   * the same commits, for example after the sandbox was replaced before the
+   * push, reuses them instead of asking for the passkey again.
+   */
+  signedChains: "signed_chains",
 } as const;
 
 export interface PresenceStepsDoc {
