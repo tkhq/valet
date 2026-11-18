@@ -20,6 +20,7 @@ import { stripArtifactConversationContext } from "~/lib/artifact-conversation-co
 import { shortModelLabel } from "~/lib/models";
 import { useRateMessage, useSessionRatings } from "~/api/queries";
 import { RatingButtons } from "./rating-buttons";
+import { HeldSecretCards } from "./held-secret-card";
 import { Button, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, Tooltip } from "~/components/primitives";
 
 /** Message actions show on hover, and always at phone width, where there is no hover. */
@@ -245,6 +246,7 @@ export const MessageItem = memo(function MessageItem({
               </div>
               : <p className="text-xs italic text-muted [overflow-wrap:anywhere]">{emptyReplyNotice(message)}</p>)}
             {workedForMs !== undefined && <p className="text-xs text-muted">Worked for {formatDuration(workedForMs)}</p>}
+            {isUser && !readOnly && copyText && <HeldSecretCards text={copyText} sessionId={message.sessionId} threadId={message.threadId} />}
           </div>
           {/* A continuation has no header line, so a reply's actions sit
               under its text instead. A tool-only continuation has none. */}

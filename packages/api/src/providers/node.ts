@@ -531,14 +531,20 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // An unknown provider or missing provider settings throw here, at boot,
   // instead of on a user's first save.
   const secretStoreProvider = secretStoreProviderFromEnv(process.env);
-  const secretStore = secretStoreProvider
-    ? createSecretStoreService({ db, provider: secretStoreProvider, confirmIntake: intakeConfirmer(db, engineCredentials) })
-    : disabledSecretStore();
   // Half-set use service variables throw here, at boot.
   const secretUse = secretUseServiceFromEnv(process.env);
   if (secretUse && !secretStoreProvider) {
     throw new Error("VALET_SECRET_USE_URL needs a secret store. Set VALET_SECRET_STORE, or unset the use service variables.");
   }
+  const secretStore = secretStoreProvider
+    ? createSecretStoreService({
+        db,
+        provider: secretStoreProvider,
+        confirmIntake: intakeConfirmer(db, engineCredentials),
+        // With a use service, a caught key waits for the person to choose its host.
+        holdPastedKeys: secretUse !== null,
+      })
+    : disabledSecretStore();
   // Owner keys for the credentials table (`services/secret-store/credential-keys.ts`).
   // With a secret store, reads accept owner-key ciphertext; writes use owner
   // keys only when VALET_CREDENTIAL_KEYS=secret-store.

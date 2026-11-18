@@ -521,6 +521,79 @@ describe("secret store service", () => {
   });
 });
 
+describe("held keys (secret intake)", () => {
+  const rule = { hosts: ["api.hetzner.cloud"], methods: [], pathPrefixes: [], header: "authorization", format: "Bearer {secret}" };
+
+  it("refuses to give a held key to any command and lists it as held", async () => {
+    await bootWithStore();
+    const svc = api!.providers.secretStore;
+    await svc.saveValue(as("user-a"), personal, "HETZNER_API_KEY", "v-held", { held: { provider: "hetzner" } });
+    expect(await svc.list(as("user-a"), personal)).toEqual([expect.objectContaining({ name: "HETZNER_API_KEY", held: { provider: "hetzner" } })]);
+    const token = await userSession("sess-held", "user-a");
+    const res = await resolve(["secret://personal/HETZNER_API_KEY"], token);
+    expect(await res.text()).toContain("waits for the person to confirm it");
+  });
+
+  it("confirms a held key as use-only: the rule travels in the value and the labels mark it use-only", async () => {
+    const fake = await bootWithStore();
+    const svc = api!.providers.secretStore;
+    await svc.saveValue(as("user-a"), personal, "HETZNER_API_KEY", "v-held", { held: {} });
+    const saved = await svc.confirmHeld(as("user-a"), personal, "HETZNER_API_KEY", { rule, client: "02ab", owner: "valet:local-org:user:user-a" });
+    expect(saved.use).toEqual({ hosts: ["api.hetzner.cloud"], header: "authorization", format: "Bearer {secret}" });
+    expect(saved.held).toBeUndefined();
+    const stored = [...fake.spaces.values()].flat();
+    expect(stored).toHaveLength(1);
+    expect(JSON.parse(stored[0]!.value)).toEqual({ v: 1, value: "v-held", client: "02ab", owner: "valet:local-org:user:user-a", rules: rule });
+    expect(stored[0]!.labels).toMatchObject({ scope: "use-personal", use_via: "use-service" });
+    expect(stored[0]!.labels.valet_held).toBeUndefined();
+    // The read used the owner's own context, so the broker's owner checks pass.
+    expect(fake.reads.at(-1)!.context).toMatchObject({ valet_user_id: "user-a", valet_session_owner_type: "user", valet_session_owner_id: "user-a" });
+  });
+
+  it("confirms a held key as a plain secret that commands can then read", async () => {
+    await bootWithStore();
+    const svc = api!.providers.secretStore;
+    await svc.saveValue(as("user-a"), personal, "K", "v-plain", { held: {} });
+    await svc.confirmHeld(as("user-a"), personal, "K");
+    const token = await userSession("sess-plain", "user-a");
+    expect(decode(((await (await resolve(["secret://personal/K"], token)).json()) as Resp).values[0]!)).toBe("v-plain");
+  });
+
+  it("releases a held key: returns its text once and deletes it; a second release finds nothing", async () => {
+    const fake = await bootWithStore();
+    const svc = api!.providers.secretStore;
+    await svc.saveValue(as("user-a"), personal, "PASTED_KEY", "valet/passkey-pilot-2", { held: {} });
+    expect(await svc.releaseHeld(as("user-a"), personal, "PASTED_KEY")).toBe("valet/passkey-pilot-2");
+    expect([...fake.spaces.values()].flat()).toHaveLength(0);
+    await expect(svc.releaseHeld(as("user-a"), personal, "PASTED_KEY")).rejects.toMatchObject({ kind: "not_found" });
+  });
+
+  it("will not confirm or release a key that is not held", async () => {
+    await bootWithStore();
+    const svc = api!.providers.secretStore;
+    await svc.saveValue(as("user-a"), personal, "K", "v");
+    await expect(svc.confirmHeld(as("user-a"), personal, "K")).rejects.toMatchObject({ kind: "not_found" });
+    await expect(svc.releaseHeld(as("user-a"), personal, "K")).rejects.toMatchObject({ kind: "not_found" });
+  });
+
+  it("confirms and releases through /api/secrets/held, and refuses a host without a use service", async () => {
+    await bootWithStore();
+    const svc = api!.providers.secretStore;
+    const post = (path: string, body: unknown) =>
+      fetch(`${api!.baseUrl}/api/secrets${path}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    await svc.saveValue(as("local-user"), personal, "A", "v-a", { held: {} });
+    await svc.saveValue(as("local-user"), personal, "B", "v-b", { held: {} });
+    expect((await post("/held/confirm", { scope: "personal", name: "A", use: { hosts: ["x.example"], header: "authorization" } })).status).toBe(400);
+    expect((await post("/held/confirm", { scope: "personal", name: "A" })).status).toBe(200);
+    const released = await post("/held/release", { scope: "personal", name: "B" });
+    expect(released.status).toBe(200);
+    expect(await released.json()).toEqual({ value: "v-b" });
+    const list = (await (await fetch(`${api!.baseUrl}/api/secrets?scope=personal`)).json()) as { secrets: { name: string; held?: unknown }[] };
+    expect(list.secrets).toEqual([expect.objectContaining({ name: "A" })]);
+    expect(list.secrets[0]!.held).toBeUndefined();
+  });
+});
+
 describe("/api/secrets", () => {
   const post = (path: string, body: unknown) =>
     fetch(`${api!.baseUrl}/api/secrets${path}`, {

@@ -788,8 +788,10 @@ export function Composer({
       }
       if (editTarget) onEditSubmit?.(editTarget.messageId);
       const localId = addUserMessage(sessionId, t, target.threadId, attachments, editTarget ? undefined : replyTarget);
+      const notSecrets = secretGuard.kept.filter((v) => target.text.includes(v));
       const res = await send.mutateAsync({
         text: target.text,
+        ...(notSecrets.length > 0 ? { notSecrets } : {}),
         ...(appPageHint ? { appPageHint } : {}),
         threadId: target.threadId,
         attachments,

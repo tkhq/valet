@@ -64,6 +64,9 @@ import type {
   CreateTeamResponse,
   ListTeamApiKeysResponse,
   BeginSecretSaveRequest,
+  ConfirmHeldSecretRequest,
+  ReleaseHeldSecretRequest,
+  ReleaseHeldSecretResponse,
   BeginSecretSaveResponse,
   FinishSecretSaveRequest,
   SecretScopeKind,
@@ -1510,6 +1513,8 @@ export const api = {
     request<SecretsListResponse>("GET", `/secrets?${secretScopeQuery(scope, teamId)}`),
   beginSecretSave: (body: BeginSecretSaveRequest) => request<BeginSecretSaveResponse>("POST", "/secrets/import/begin", body),
   finishSecretSave: (body: FinishSecretSaveRequest) => request<SecretSummary>("POST", "/secrets/import/finish", body),
+  confirmHeldSecret: (body: ConfirmHeldSecretRequest) => request<SecretSummary>("POST", "/secrets/held/confirm", body),
+  releaseHeldSecret: (body: ReleaseHeldSecretRequest) => request<ReleaseHeldSecretResponse>("POST", "/secrets/held/release", body),
   deleteSecret: (scope: SecretScopeKind, teamId: string | undefined, name: string) =>
     request<{ ok: true }>("DELETE", `/secrets?${secretScopeQuery(scope, teamId)}&name=${encodeURIComponent(name)}`),
 

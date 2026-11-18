@@ -15,6 +15,8 @@ function fakeStore(saved: Set<string> = new Set()): SecretStoreService {
     beginSave: refuse,
     finishSave: refuse,
     saveValue: refuse,
+    confirmHeld: refuse,
+    releaseHeld: refuse,
     remove: refuse,
     mayRead: refuse,
     read: refuse,

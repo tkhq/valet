@@ -7,7 +7,7 @@ import { secretReference, type SecretStoreService } from "./service.js";
 const OPENAI = "sk-proj-" + "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8s9T0";
 
 function fakeStore(opts: { failSave?: boolean; existing?: string[] } = {}) {
-  const saved: { name: string; value: string }[] = opts.existing?.map((name) => ({ name, value: "old" })) ?? [];
+  const saved: { name: string; value: string; held?: { provider?: string } }[] = opts.existing?.map((name) => ({ name, value: "old" })) ?? [];
   const refuse = async (): Promise<never> => {
     throw new Error("not used");
   };
@@ -15,13 +15,15 @@ function fakeStore(opts: { failSave?: boolean; existing?: string[] } = {}) {
     enabled: true,
     providerLabel: "Memory",
     list: async (_a, scope) => saved.map((s) => ({ name: s.name, createdAt: 0, reference: secretReference(scope, s.name) })),
-    saveValue: async (_a, scope, name, value) => {
+    saveValue: async (_a, scope, name, value, saveOpts) => {
       if (opts.failSave) throw new SecretStoreError("no", "forbidden");
-      saved.push({ name, value });
+      saved.push({ name, value, ...(saveOpts?.held ? { held: saveOpts.held } : {}) });
       return { name, createdAt: 0, reference: secretReference(scope, name) };
     },
     beginSave: refuse,
     finishSave: refuse,
+    confirmHeld: refuse,
+    releaseHeld: refuse,
     remove: refuse,
     exists: refuse,
     mayRead: refuse,
@@ -151,5 +153,34 @@ describe("scrubInboundSecrets stage 2", () => {
     const fake = fakeStore();
     await scrubInboundSecrets({ ...base, store: fake.store, text: "deploy the staging branch please", confirm: async () => { calls++; return []; } });
     expect(calls).toBe(0);
+  });
+});
+
+describe("scrubInboundSecrets hold", () => {
+  // A random value made for this test, not a real key.
+  const HETZNER = "q7Rk2PzW9vLmX4cT8bNe1JyH6uFa3GdS0oViKtYw5ZlQrBnMxCe7Ts2PjUh9Wd4A";
+
+  it("saves a caught key held, with its provider, and says no command can read it yet", async () => {
+    const fake = fakeStore();
+    const result = await scrubInboundSecrets({ ...base, store: fake.store, text: `here's my hetzner api key ${HETZNER} can you deploy`, hold: true });
+    expect(fake.saved).toEqual([{ name: "HETZNER_API_KEY", value: HETZNER, held: { provider: "hetzner" } }]);
+    expect(result.text).toContain("secret://personal/HETZNER_API_KEY");
+    expect(result.text).toContain("No command can read it until the person chooses where it can be used");
+  });
+
+  it("holds through scrubSessionInput only when the store holds pasted keys", async () => {
+    const fake = fakeStore();
+    const session = { orgId: "o", userId: "u", ownerType: "user", ownerId: "u" };
+    await scrubSessionInput({ ...fake.store, holdsPastedKeys: true }, session, `hetzner api key ${HETZNER}`, "web");
+    await scrubSessionInput(fake.store, session, `hetzner api key ${HETZNER}`, "web");
+    expect(fake.saved.map((s) => s.held)).toEqual([{ provider: "hetzner" }, undefined]);
+  });
+
+  it("leaves a value the person marked as not a key", async () => {
+    const fake = fakeStore();
+    const text = `secret://personal/PASTED_KEY was not a key. The text was: ${HETZNER} (hetzner api key)`;
+    const result = await scrubInboundSecrets({ ...base, store: fake.store, text, notSecrets: [HETZNER] });
+    expect(fake.saved).toEqual([]);
+    expect(result.text).toBe(text);
   });
 });

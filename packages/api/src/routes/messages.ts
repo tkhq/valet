@@ -1683,7 +1683,12 @@ export async function sendPrompt(c: Context<AppEnv>, sessionId: string, threadId
   // A key in the message text is saved as a secret and replaced with its
   // reference before the message is stored or reaches the model.
   if (!promoteItemId && typeof body.text === "string") {
-    body.text = await scrubSessionInput(c.var.providers.secretStore, { ...row, userId: c.var.user.id }, body.text, "web");
+    // Only values that appear in this message count; anything else is ignored.
+    const text = body.text;
+    const notSecrets = Array.isArray(body.notSecrets)
+      ? body.notSecrets.filter((v): v is string => typeof v === "string" && v.length > 0 && text.includes(v)).slice(0, 20)
+      : [];
+    body.text = await scrubSessionInput(c.var.providers.secretStore, { ...row, userId: c.var.user.id }, text, "web", { notSecrets });
   }
 
   try {

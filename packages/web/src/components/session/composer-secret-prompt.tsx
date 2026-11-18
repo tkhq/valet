@@ -79,6 +79,9 @@ export function useSecretGuard(text: string, mode: SecretGuardMode, opts: { cred
     /** True when the composer must not send yet. */
     holdsSend: mode === "save" && pending.length > 0,
     keep: (value: string) => setKept((prev) => new Set(prev).add(value)),
+    /** Values the person said are not keys. The send passes them as
+     * `notSecrets`, so the api's backstop leaves them too. */
+    kept: [...kept],
   };
 }
 

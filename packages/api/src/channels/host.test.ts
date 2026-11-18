@@ -406,6 +406,7 @@ describe("ChannelHost.handleUpdate", () => {
         return { name, createdAt: 0, reference: secretReference(scope, name) };
       },
       beginSave: refuse, finishSave: refuse, remove: refuse, exists: refuse, mayRead: refuse, read: refuse,
+      confirmHeld: refuse, releaseHeld: refuse,
     };
     await host.stop();
     host = new ChannelHost({

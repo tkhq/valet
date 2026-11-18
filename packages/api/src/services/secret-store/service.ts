@@ -138,6 +138,21 @@ export interface UseRule {
 export const USE_VIA_LABEL = "use_via";
 export const USE_VIA_VALUE = "use-service";
 
+/** Labels on a key that intake caught and is holding until the person
+ * chooses where it may be used (`docs/specs/2026-11-17-secret-intake-design.md`).
+ * No command can read a held key. */
+export const HELD_LABEL = "valet_held";
+export const HELD_PROVIDER_LABEL = "valet_held_provider";
+
+/** A held key that becomes use-only: the rule, plus the client and owner the
+ * use service checks. The value is stored as JSON with these, the same shape
+ * the browser seals for a use-only save. */
+export interface HeldUse {
+  rule: UseRule;
+  client: string;
+  owner: string;
+}
+
 const HOST_RE = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$/;
 const HEADER_RE = /^[a-z0-9!#$%&'*+.^_`|~-]+$/;
 const RESERVED_USE_HEADERS = new Set(["host", "content-length", "transfer-encoding", "connection", "proxy-authorization", "upgrade", "te"]);
@@ -190,6 +205,9 @@ export interface SecretSummaryRow extends SecretMeta {
   reference: string;
   /** Set for a use-only secret: where it may be used (display copy). */
   use?: { hosts: string[]; header: string; format: string };
+  /** Set for a key intake holds until the person confirms it. `provider`
+   * pre-fills the host and header. */
+  held?: { provider?: string };
 }
 
 /** What the use route needs to forward a request for one secret. */
@@ -214,8 +232,17 @@ export interface SecretStoreService {
   /** Finish a save with the sealed value. With `replace`, the old value is
    * deleted first: providers keep names unique and cannot edit in place. */
   finishSave(actor: SecretActor, scope: SecretScope, name: string, sealed: SealedValue, opts?: SaveOptions): Promise<SecretSummaryRow>;
-  /** Save a value the api already holds (a key caught in an inbound message). */
-  saveValue(actor: SecretActor, scope: SecretScope, name: string, value: string): Promise<SecretSummaryRow>;
+  /** Save a value the api already holds (a key caught in an inbound message).
+   * With `held`, no command can read it until the person confirms it. */
+  saveValue(actor: SecretActor, scope: SecretScope, name: string, value: string, opts?: { held?: { provider?: string } }): Promise<SecretSummaryRow>;
+  /** True when intake holds caught keys for the person to confirm: the
+   * deployment has a use service, so a held key can become use-only. */
+  readonly holdsPastedKeys?: boolean;
+  /** Save a held key as use-only (with `use`) or as a plain secret. */
+  confirmHeld(actor: SecretActor, scope: SecretScope, name: string, use?: HeldUse): Promise<SecretSummaryRow>;
+  /** Delete a held key the person says is not a key, and return its text so
+   * it can go back to the conversation. */
+  releaseHeld(actor: SecretActor, scope: SecretScope, name: string): Promise<string>;
   remove(actor: SecretActor, scope: SecretScope, name: string): Promise<void>;
   /** True when the reference names a saved secret this actor may list. */
   exists(actor: SecretActor, scope: SecretScope, name: string): Promise<boolean>;
@@ -244,6 +271,8 @@ export function disabledSecretStore(): SecretStoreService {
     beginSave: refuse,
     finishSave: refuse,
     saveValue: refuse,
+    confirmHeld: refuse,
+    releaseHeld: refuse,
     remove: refuse,
     exists: refuse,
     mayRead: refuse,
@@ -267,6 +296,8 @@ export function createSecretStoreService(deps: {
   db: AppDb;
   provider: SecretStoreProvider;
   confirmIntake?: ConfirmIntake;
+  /** Hold caught keys for the person to confirm. Set when a use service exists. */
+  holdPastedKeys?: boolean;
   now?: () => number;
   log?: (msg: string, err: unknown) => void;
 }): SecretStoreService {
@@ -399,9 +430,54 @@ export function createSecretStoreService(deps: {
     };
   }
 
+  function heldOf(labels: SecretLabels | undefined): { provider?: string } | undefined {
+    if (labels?.[HELD_LABEL] !== "1") return undefined;
+    const provider = labels[HELD_PROVIDER_LABEL];
+    return provider ? { provider } : {};
+  }
+
   function row(scope: SecretScope, name: string, createdAt: number, labels?: SecretLabels): SecretSummaryRow {
     const use = useOf(labels);
-    return { name, createdAt, reference: secretReference(scope, name), ...(use ? { use } : {}) };
+    const held = heldOf(labels);
+    return { name, createdAt, reference: secretReference(scope, name), ...(use ? { use } : {}), ...(held ? { held } : {}) };
+  }
+
+  /** The read context for the person who owns a held key, as their own
+   * session would send it, so the broker's owner checks pass. */
+  function ownerContext(actor: SecretActor, scope: SecretScope): Record<string, string> {
+    const owner = scope.kind === "team" ? { type: "team", id: scope.teamId } : { type: "user", id: actor.userId };
+    return {
+      valet_company_org_id: actor.orgId,
+      valet_user_id: actor.userId,
+      valet_session_id: "intake-confirm",
+      valet_session_owner_type: owner.type,
+      valet_session_owner_id: owner.id,
+      ...(scope.kind === "team" ? { valet_owner_team_id: scope.teamId } : {}),
+    };
+  }
+
+  /** A held key's stored versions and value. Only the scope's writer gets it. */
+  async function heldValue(
+    actor: SecretActor,
+    scope: SecretScope,
+    name: string,
+  ): Promise<{ spaceId: string; fullName: string; versions: SecretMeta[]; value: string }> {
+    assertName(name);
+    await assertMayWrite(actor, scope);
+    const notHeld = new SecretStoreError(`No key named ${name} waits for you. It may be confirmed already.`, "not_found");
+    const spaceId = await spaceFor(actor, scope, false);
+    if (!spaceId) throw notHeld;
+    const fullName = `${scopePrefix(scope, actor.orgId)}${name}`;
+    const versions = versionsOf(await guarded("find the key", () => provider.list(spaceId, fullName)), fullName);
+    const newest = versions[0];
+    if (!newest || !heldOf(newest.labels)) throw notHeld;
+    const context = ownerContext(actor, scope);
+    const { readById } = provider;
+    const value = await guarded("read the key", () =>
+      newest.id && readById ? readById.call(provider, spaceId, newest.id, context) : provider.read(spaceId, newest.name, context),
+    );
+    if (value === null) throw notHeld;
+    return { spaceId, fullName, versions, value };
   }
 
   function exportContext(ctx: SecretReadContext, scope: SecretScope): Record<string, string> {
@@ -474,6 +550,7 @@ export function createSecretStoreService(deps: {
   return {
     enabled: true,
     ...(deps.confirmIntake ? { confirmIntake: deps.confirmIntake } : {}),
+    holdsPastedKeys: deps.holdPastedKeys === true,
     providerLabel: provider.label,
 
     async list(actor, scope) {
@@ -508,11 +585,34 @@ export function createSecretStoreService(deps: {
       return row(scope, name, now(), labels);
     },
 
-    async saveValue(actor, scope, name, value) {
+    async saveValue(actor, scope, name, value, opts) {
       assertValue(value);
       const { spaceId, fullName } = await prepareSave(actor, scope, name);
-      await guarded("save the secret", () => provider.put(spaceId, { name: fullName, value, labels: labelsFor(actor, scope) }));
-      return row(scope, name, now());
+      const held = opts?.held;
+      const labels = held
+        ? { ...labelsFor(actor, scope), [HELD_LABEL]: "1", ...(held.provider ? { [HELD_PROVIDER_LABEL]: held.provider } : {}) }
+        : labelsFor(actor, scope);
+      await guarded("save the secret", () => provider.put(spaceId, { name: fullName, value, labels }));
+      return row(scope, name, now(), labels);
+    },
+
+    async confirmHeld(actor, scope, name, use) {
+      const { spaceId, fullName, versions, value } = await heldValue(actor, scope, name);
+      const stored = use ? JSON.stringify({ v: 1, value, client: use.client, owner: use.owner, rules: use.rule }) : value;
+      const labels = use ? { ...labelsFor(actor, scope), ...useLabels(scope, use.rule) } : labelsFor(actor, scope);
+      // Store the confirmed version first, then delete the held one: a failed
+      // save leaves the key held, never lost.
+      await guarded("save the secret", () =>
+        provider.put(spaceId, { name: `${fullName}${VERSION_SEPARATOR}${now()}`, value: stored, labels }),
+      );
+      await removeOldVersions(spaceId, versions);
+      return row(scope, name, now(), labels);
+    },
+
+    async releaseHeld(actor, scope, name) {
+      const { spaceId, versions, value } = await heldValue(actor, scope, name);
+      await removeVersions(spaceId, versions);
+      return value;
     },
 
     async remove(actor, scope, name) {
@@ -539,6 +639,12 @@ export function createSecretStoreService(deps: {
       const found = await newestReadable(ctx, scope, name);
       if (!found) return null;
       const { spaceId, meta: newest } = found;
+      if (heldOf(newest.labels)) {
+        throw new SecretStoreError(
+          `${name} waits for the person to confirm it. Ask them to choose where it can be used on the card under their message, then try again.`,
+          "forbidden",
+        );
+      }
       const use = useOf(newest.labels);
       if (use) {
         throw new SecretStoreError(

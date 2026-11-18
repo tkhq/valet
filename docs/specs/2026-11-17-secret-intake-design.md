@@ -70,7 +70,12 @@ The name and host come from words in the message and a provider table, never fro
 
 Built (2026-11-17): the backstop (`services/secret-store/inbound-scrub.ts`) saves each caught key as a secret, replaces it with its reference before the text is stored or reaches the model, and adds a note, as it already did for known formats.
 
-Planned, with use rules: hold the value in memory for at most 15 minutes, replace the span with `[pending secret NAME]`, and show a card ("Save as a secret? NAME, used with HOST, header HEADER", with Save, Edit, and "It's not a key"). Save imports the value with those rules. "It's not a key" puts the original text back. This waits for the secret store to support a host and header per secret; until then there is no rule for the card to set.
+Built (2026-11-18), with a use service (`holdPastedKeys`): the backstop saves each caught key *held*. The secret store keeps it with the label `valet_held` (and `valet_held_provider` for the host and header defaults), and no command can read it: `read` refuses it and names the fix. The note tells the agent that the key waits for the person. Under the message, the thread shows a card (`held-secret-card.tsx`) with "Only for host", the header picker, Save, and "It's not a key".
+
+- Save (`POST /api/secrets/held/confirm`) reads the held value as its owner, stores it again as use-only (the same JSON value and labels as a browser use-only save) or as a plain secret when the host is cleared, then deletes the held version. A failed save leaves the key held. The card sends a short message so the agent learns the outcome.
+- "It's not a key" (`POST /api/secrets/held/release`) deletes the held key and returns its text once. The card sends it back to the thread with `notSecrets`, and the backstop leaves those values as text. The composer's "It's not a key" sends `notSecrets` too.
+
+Changed from the plan: the plan held the value in api memory for 15 minutes. A restart would lose it, so the store holds it instead, until the person decides. There is no expiry: a held key cannot be read, so waiting costs nothing. The api still sees the value: it arrived in the message. Without a use service, the backstop saves a plain secret, as before.
 
 ### Agent backstop
 
@@ -126,5 +131,5 @@ Run with `pnpm --filter @valet/eval secret-intake [--held-out] [--model]`. Stage
 1. The eval and stage 1. Done.
 2. The composer prompt on stage 1. Done.
 3. Stage 2 in the backstop. Done.
-4. Use rules (host and header per secret) and the host fields in the composer. Done. Next: the hold and card flow on the server.
+4. Use rules (host and header per secret), the host fields in the composer, and the hold and card flow on the server. Done.
 5. The agent backstop tool.

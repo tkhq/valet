@@ -1775,6 +1775,9 @@ export interface SendPromptRequest {
   threadId?: string;
   /** Stable assistant entry id to reply to. The server creates the excerpt. */
   replyToMessageId?: string;
+  /** Values in `text` the person marked as not a key, in the composer prompt
+   * or on a held-key card. The secret backstop leaves them as text. */
+  notSecrets?: string[];
   /** Image attachments for the message. */
   attachments?: PromptImageAttachment[];
   /** File attachment refs (from POST /sessions/:id/files). Single-use. */
@@ -4302,6 +4305,9 @@ export interface SecretSummary {
   /** Set with `use`: how often the secret was used, from its receipts.
    * `lastUsedAt` is null before the first use. */
   uses?: { count: number; lastUsedAt: number | null };
+  /** Set for a key that intake caught and holds until the person confirms
+   * it. No command can read it. `provider` pre-fills the host and header. */
+  held?: { provider?: string };
 }
 
 export interface SecretsListResponse {
@@ -4358,6 +4364,28 @@ export interface BeginSecretSaveResponse {
  * never sees the plaintext on this path. */
 export interface FinishSecretSaveRequest extends BeginSecretSaveRequest {
   sealed: { kind: string; [field: string]: unknown };
+}
+
+/** `POST /api/secrets/held/confirm`: save a held key as use-only (with
+ * `use`) or as a plain secret. */
+export interface ConfirmHeldSecretRequest {
+  scope: SecretScopeKind;
+  teamId?: string;
+  name: string;
+  use?: SecretUseRuleInput;
+}
+
+/** `POST /api/secrets/held/release`: the person says a held key is not a key. */
+export interface ReleaseHeldSecretRequest {
+  scope: SecretScopeKind;
+  teamId?: string;
+  name: string;
+}
+
+/** The held text, returned once to the person who released it, so the
+ * thread can get it back. The secret is deleted. */
+export interface ReleaseHeldSecretResponse {
+  value: string;
 }
 
 // ── REST: me + models (split-settings design) ─────────────────────────────

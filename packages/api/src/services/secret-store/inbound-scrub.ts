@@ -14,6 +14,12 @@
  * prevented no false alarm. Without a model verdict, a weak candidate is
  * left as text.
  *
+ * With a use service (`store.holdsPastedKeys`), a caught key is saved held:
+ * no command can read it until the person confirms it on the card under
+ * their message, as use-only for one host or as a plain secret, or says it
+ * is not a key. Values the person already marked as not a key
+ * (`notSecrets`) are left as text.
+ *
  * The api holds the value in memory for this request: it arrived in the
  * message. The note says so and asks the user to rotate a key that was
  * also shared elsewhere, for example in a Slack channel, where the
@@ -48,6 +54,8 @@ interface Caught {
   candidate: SecretTokenCandidate;
   name: string;
   label: string;
+  /** Provider word or known-format label, to pre-fill a held key's host. */
+  provider?: string;
 }
 
 /** The candidates to replace: known formats, plus confirmed or strong others. */
@@ -58,16 +66,19 @@ export async function catchSecrets(
   const all = findSecretCandidates(text, opts.credentialRequested ? { credentialRequested: true } : {});
   const caught: Caught[] = all
     .filter((c) => c.reason === "known")
-    .map((c) => ({ candidate: c, name: suggestSecretName(c), label: (c.provider ?? "key").toLowerCase() }));
+    .map((c) => ({ candidate: c, name: suggestSecretName(c), label: (c.provider ?? "key").toLowerCase(), ...(c.provider ? { provider: c.provider } : {}) }));
   for (const c of all) {
-    if (c.reason !== "known" && c.score >= STRONG_CANDIDATE_SCORE) caught.push({ candidate: c, name: suggestSecretName(c), label: "key" });
+    if (c.reason !== "known" && c.score >= STRONG_CANDIDATE_SCORE) {
+      caught.push({ candidate: c, name: suggestSecretName(c), label: "key", ...(c.provider ? { provider: c.provider } : {}) });
+    }
   }
   const weak = all.filter((c) => c.reason !== "known" && c.score >= MODEL_CANDIDATE_SCORE && c.score < STRONG_CANDIDATE_SCORE);
   if (weak.length > 0 && opts.confirm) {
     const verdicts = await opts.confirm({ orgId: opts.orgId, text, candidates: weak, credentialRequested: opts.credentialRequested === true });
     weak.forEach((c, i) => {
       const verdict = verdicts[i];
-      if (verdict?.secret === true) caught.push({ candidate: c, name: suggestSecretName(c, verdict.provider), label: "key" });
+      const provider = verdict?.provider ?? c.provider;
+      if (verdict?.secret === true) caught.push({ candidate: c, name: suggestSecretName(c, verdict.provider), label: "key", ...(provider ? { provider } : {}) });
     });
   }
   return caught.sort((a, b) => a.candidate.start - b.candidate.start);
@@ -82,19 +93,26 @@ export async function scrubInboundSecrets(deps: {
   channel?: "web" | "channel";
   /** Stage 2. Without it, only known formats and strong candidates are caught. */
   confirm?: ConfirmIntake;
+  /** Save caught keys held for the person to confirm. */
+  hold?: boolean;
+  /** Values the person marked as not a key. They stay as text. */
+  notSecrets?: readonly string[];
 }): Promise<ScrubResult> {
   const { store, actor, scope, text } = deps;
   if (!store.enabled) return { text, saved: [], removed: 0 };
-  const caught = await catchSecrets(text, { orgId: actor.orgId, ...(deps.confirm ? { confirm: deps.confirm } : {}) });
+  const kept = new Set(deps.notSecrets ?? []);
+  const caught = (await catchSecrets(text, { orgId: actor.orgId, ...(deps.confirm ? { confirm: deps.confirm } : {}) })).filter(
+    (c) => !kept.has(c.candidate.value),
+  );
   if (caught.length === 0) return { text, saved: [], removed: 0 };
 
   const replacements: { candidate: { start: number; end: number }; with: string }[] = [];
   const saved: string[] = [];
   let removed = 0;
-  for (const { candidate, name: suggested, label } of caught) {
+  for (const { candidate, name: suggested, label, provider } of caught) {
     try {
       const name = await freeName(store, actor, scope, suggested);
-      await store.saveValue(actor, scope, name, candidate.value);
+      await store.saveValue(actor, scope, name, candidate.value, deps.hold ? { held: provider ? { provider } : {} } : undefined);
       const reference = secretReference(scope, name);
       saved.push(reference);
       replacements.push({ candidate, with: reference });
@@ -106,7 +124,12 @@ export async function scrubInboundSecrets(deps: {
   }
 
   const notes: string[] = [];
-  if (saved.length > 0) {
+  if (saved.length > 0 && deps.hold) {
+    notes.push(
+      `Valet kept ${saved.length === 1 ? "a key" : `${saved.length} keys`} from this message as ${saved.join(", ")} and removed ${saved.length === 1 ? "it" : "them"} from the text.`,
+      `No command can read ${saved.length === 1 ? "it" : "them"} until the person chooses where ${saved.length === 1 ? "it" : "each"} can be used, on the card under this message in Valet.`,
+    );
+  } else if (saved.length > 0) {
     notes.push(
       `Valet saved ${saved.length === 1 ? "a key" : `${saved.length} keys`} from this message as ${saved.join(", ")} and removed ${saved.length === 1 ? "it" : "them"} from the text.`,
     );
@@ -141,6 +164,7 @@ export async function scrubSessionInput(
   session: InboundSession,
   text: string,
   channel: "web" | "channel",
+  opts: { notSecrets?: readonly string[] } = {},
 ): Promise<string> {
   if (!store?.enabled) return text;
   const scope: SecretScope = session.ownerType === "team" && session.ownerId ? { kind: "team", teamId: session.ownerId } : { kind: "personal" };
@@ -152,6 +176,8 @@ export async function scrubSessionInput(
       text,
       channel,
       ...(store.confirmIntake ? { confirm: store.confirmIntake } : {}),
+      ...(store.holdsPastedKeys ? { hold: true } : {}),
+      ...(opts.notSecrets?.length ? { notSecrets: opts.notSecrets } : {}),
     })
   ).text;
 }

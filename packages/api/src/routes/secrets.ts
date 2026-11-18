@@ -22,6 +22,7 @@ import { isTeamMember } from "../services/teams.js";
 import type {
   BeginSecretSaveResponse,
   FinishSecretSaveRequest,
+  ReleaseHeldSecretResponse,
   SecretSealEnvelope,
   SecretSummary,
   SecretsListResponse,
@@ -85,6 +86,7 @@ secretsRouter.get("/", async (c) => {
       reference: r.reference,
       createdAt: r.createdAt,
       ...(r.use ? { use: r.use, uses: stats.get(r.name) ?? { count: 0, lastUsedAt: null } } : {}),
+      ...(r.held ? { held: r.held } : {}),
     }));
     const resp: SecretsListResponse = {
       enabled: true,
@@ -164,6 +166,50 @@ secretsRouter.post("/import/finish", async (c) => {
       ...(saved.use ? { use: saved.use } : {}),
     };
     return c.json(resp, 201);
+  } catch (err) {
+    return mapError(c, err);
+  }
+});
+
+/** A held key: the name and scope from the body. */
+async function heldTarget(c: Context<AppEnv>): Promise<{ scope: SecretScope; name: string; body: Partial<FinishSecretSaveRequest> } | Response> {
+  const body = await readBody(c);
+  if (!body || typeof body.name !== "string") return c.json({ error: "Send a JSON body with scope and name." }, 400);
+  const scope = parseScope(body.scope, body.teamId);
+  if (typeof scope === "string") return c.json({ error: scope }, 400);
+  return { scope, name: body.name.trim(), body };
+}
+
+// The person confirms a key that intake holds: use-only for one host, or a
+// plain secret (`docs/specs/2026-11-17-secret-intake-design.md`).
+secretsRouter.post("/held/confirm", async (c) => {
+  const target = await heldTarget(c);
+  if (target instanceof Response) return target;
+  try {
+    const use = useRuleOf(c, target.body);
+    const actor = actorOf(c);
+    const secretUse = c.var.providers.secretUse;
+    const saved = await c.var.providers.secretStore.confirmHeld(
+      actor,
+      target.scope,
+      target.name,
+      use && secretUse ? { rule: use, client: secretUse.clientPublicKey, owner: useOwner(actor.orgId, actor.userId, target.scope) } : undefined,
+    );
+    const resp: SecretSummary = { name: saved.name, reference: saved.reference, createdAt: saved.createdAt, ...(saved.use ? { use: saved.use } : {}) };
+    return c.json(resp);
+  } catch (err) {
+    return mapError(c, err);
+  }
+});
+
+// The person says a held key is not a key: delete it and return its text once.
+secretsRouter.post("/held/release", async (c) => {
+  const target = await heldTarget(c);
+  if (target instanceof Response) return target;
+  try {
+    const value = await c.var.providers.secretStore.releaseHeld(actorOf(c), target.scope, target.name);
+    const resp: ReleaseHeldSecretResponse = { value };
+    return c.json(resp);
   } catch (err) {
     return mapError(c, err);
   }
