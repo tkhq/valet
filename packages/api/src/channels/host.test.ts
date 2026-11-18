@@ -274,6 +274,34 @@ describe("ChannelHost.handleUpdate", () => {
     expect(fakeTransport.sent[0]?.message.markdown).toContain("Linked");
   });
 
+  it("/start names the Valet account it linked to", async () => {
+    await testDb.appDb.insert(users).values({ id: "u-named", email: "named@example.com", name: "Named" }).onConflictDoNothing();
+    const code = await mintLinkCode(testDb.appDb, "u-named", "fake");
+    await host.handleUpdate("fake", inbound({ kind: "command", command: { name: "start", args: code } }));
+    expect(fakeTransport.sent[0]?.message.markdown).toContain("named@example.com");
+  });
+
+  // The code names only its requester. A code passed to someone whose chat
+  // account is already linked must not move that account to the requester.
+  it("/start does not move an account linked to another user", async () => {
+    await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: "victim" });
+    const code = await mintLinkCode(testDb.appDb, USER_ID, "fake");
+    await host.handleUpdate("fake", inbound({ kind: "command", command: { name: "start", args: code } }));
+    const links = await testDb.appDb.select().from(userIdentityLinks).where(eq(userIdentityLinks.provider, "fake"));
+    expect(links).toHaveLength(1);
+    expect(links[0]).toMatchObject({ externalId: "77", userId: "victim" });
+    expect(fakeTransport.sent[0]?.message.markdown).toMatch(/already linked to another Valet user/);
+  });
+
+  it("/start relinks an account already linked to the same user", async () => {
+    await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: USER_ID });
+    const code = await mintLinkCode(testDb.appDb, USER_ID, "fake");
+    await host.handleUpdate("fake", inbound({ kind: "command", command: { name: "start", args: code } }));
+    const links = await testDb.appDb.select().from(userIdentityLinks).where(eq(userIdentityLinks.provider, "fake"));
+    expect(links[0]).toMatchObject({ externalId: "77", userId: USER_ID });
+    expect(fakeTransport.sent[0]?.message.markdown).toContain("Linked");
+  });
+
   // A code the bot DMed is entered in Valet. The person it went to holds it,
   // so sending it from chat must not link their account to the requester.
   it("/start with a DMed code does not link", async () => {

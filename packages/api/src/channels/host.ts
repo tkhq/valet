@@ -1805,13 +1805,32 @@ export class ChannelHost {
       });
       return;
     }
+    // The code names only the Valet user who asked for it, so whoever sends
+    // it is linked to that user. Never move a chat account that already
+    // belongs to someone else: a code passed to another person would take
+    // over their account. The OAuth connect path has the same rule.
+    const existing = await identityForExternal(this.deps.db, channelType, event.sender.externalId);
+    if (existing && existing.userId !== consumed.userId) {
+      await transport?.send(event.conversationKey, {
+        markdown: "This account is already linked to another Valet user, so I did not link it. To move it, disconnect it in Integrations in the Valet web app first.",
+      });
+      return;
+    }
     await linkIdentity(this.deps.db, {
       provider: channelType,
       externalId: event.sender.externalId,
       userId: consumed.userId,
     });
+    // Name the account, so a person who sent someone else's code can see
+    // that this is not their assistant.
+    const [owner] = await this.deps.db
+      .select({ email: users.email })
+      .from(users)
+      .where(eq(users.id, consumed.userId))
+      .limit(1);
+    const account = owner?.email ? ` to the Valet account ${owner.email}` : "";
     await transport?.send(event.conversationKey, {
-      markdown: "✅ Linked! You're chatting with your Valet assistant.",
+      markdown: `✅ Linked${account}. You're chatting with that account's Valet assistant. If this is not your account, stop here and tell your Valet admin.`,
     });
   }
 
