@@ -3660,6 +3660,13 @@ export interface ProviderBundle {
   sanitizeToolOutput?: (sessionId: string, value: unknown) => unknown;
   /** Host seam that disables raw argument deltas for sensitive sessions. */
   canStreamToolCallArguments?: (sessionId: string) => boolean;
+  /**
+   * Host seam that re-checks a passkey approval before a `presence` gate
+   * accepts it, independent of whoever wrote the approval record. Returns a
+   * refusal message, or null when the proof holds. Without it the engine
+   * checks only the approval's shape.
+   */
+  verifyPresenceApproval?: (gate: DecisionGate, resolution: DecisionResolution) => Promise<string | null>;
 }
 
 export interface EngineOptions {

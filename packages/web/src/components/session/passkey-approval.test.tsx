@@ -33,8 +33,8 @@ const gate: DecisionGate = {
     repo: "tkhq/valet",
     branch: "feature",
     commits: [
-      { sha: "a".repeat(40), subject: "first commit", author: "A <a@x>" },
-      { sha: "b".repeat(40), subject: "second commit", author: "A <a@x>" },
+      { sha: "a".repeat(40), subject: "first commit", author: "A <a@x>", source: "github", url: "https://github.com/tkhq/valet/commit/aaa", additions: 3, deletions: 1, files: [{ path: "src/a.ts", additions: 3, deletions: 1 }], filesTotal: 1 },
+      { sha: "b".repeat(40), subject: "second commit", author: "A <a@x>", source: "sandbox", additions: 2, deletions: 0, files: [], filesTotal: 1 },
     ],
   },
 };
@@ -66,6 +66,8 @@ describe("PasskeyApproval", () => {
     const { stamp, onDone } = renderCard();
     expect(screen.getByText("first commit")).toBeTruthy();
     expect(screen.getByText("aaaaaaa")).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Review on GitHub" }).getAttribute("href")).toBe("https://github.com/tkhq/valet/commit/aaa");
+    expect(screen.getByText(/come from the agent's sandbox/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Sign with passkey" }));
     await waitFor(() => expect(onDone).toHaveBeenCalledTimes(1));
     expect(stamp.mock.calls.map((c) => c[0])).toEqual(["body-1", "body-2"]);

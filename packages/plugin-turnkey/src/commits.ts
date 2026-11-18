@@ -12,7 +12,7 @@
  * Only SHA-1 repositories: `gitObjectId` hashes with SHA-1.
  */
 import { createHash } from "node:crypto";
-import { armorSshSignature, sshsigSignedData } from "./ssh.js";
+import { armorSshSignature, sshsigSignedData, verifyEd25519 } from "./ssh.js";
 
 export interface SourceCommit {
   sha: string;
@@ -122,4 +122,55 @@ export function planCommitChain(input: {
     rewritten.push({ oldSha: commit.sha, newSha, object: signed });
   }
   return { rewritten };
+}
+
+const OBJECT_ID = /^[0-9a-f]{40}$/;
+const IDENT = /^(author|committer) [^<>\n]*<[^<>\n]*> \d+ [+-]\d{4}$/;
+/** Headers git writes after `committer`. Anything else is refused rather than signed. */
+const TRAILING_HEADERS = ["encoding ", "gpgsig ", "gpgsig-sha256 ", "mergetag "];
+
+/**
+ * Why `object` is not a well-formed git commit object, or null when it is.
+ * The sandbox supplies the bytes, so a compromised sandbox could hand over a
+ * tag object or other git data and get a signature that git accepts for it.
+ * Only a commit in git's own header order is signed: `tree`, any `parent`
+ * lines, `author`, `committer`, then optional `encoding`, `gpgsig`, and
+ * `mergetag`, then a blank line and the message.
+ */
+export function commitObjectRefusal(object: string): string | null {
+  if (!object.includes("\n\n")) return "it has no blank line before the message";
+  const { headers } = parseCommit(object);
+  let i = 0;
+  const tree = headers[i++] ?? "";
+  if (!tree.startsWith("tree ") || !OBJECT_ID.test(tree.slice(5))) return "it does not start with a tree line";
+  while (headers[i]?.startsWith("parent ")) {
+    if (!OBJECT_ID.test(headers[i]!.slice(7))) return "a parent line is not an object id";
+    i += 1;
+  }
+  if (!headers[i]?.startsWith("author ") || !IDENT.test(headers[i]!)) return "the author line is missing or malformed";
+  i += 1;
+  if (!headers[i]?.startsWith("committer ") || !IDENT.test(headers[i]!)) return "the committer line is missing or malformed";
+  i += 1;
+  for (; i < headers.length; i += 1) {
+    if (!TRAILING_HEADERS.some((h) => headers[i]!.startsWith(h))) return `it has an unexpected header: ${headers[i]!.split(" ", 1)[0]}`;
+  }
+  return null;
+}
+
+/**
+ * How many of `signatures`, from the first, are valid signatures by the key
+ * over the chain's payloads. The action writes commits only when every one
+ * verifies: the stored signatures are not trusted because the api wrote them.
+ */
+export function verifiedSignatureCount(input: {
+  commits: SourceCommit[];
+  committerEmail: string;
+  signatures: Uint8Array[];
+  publicKeyHex: string;
+}): number {
+  for (let i = 0; i < input.signatures.length; i += 1) {
+    const plan = planCommitChain({ ...input, signatures: input.signatures.slice(0, i) });
+    if (!plan.nextPayload || !verifyEd25519(input.publicKeyHex, plan.nextPayload, input.signatures[i]!)) return i;
+  }
+  return input.signatures.length;
 }

@@ -13,9 +13,17 @@
  * key. The person adds that key to GitHub themselves; Valet only reads the
  * public key list (`docs/specs/2026-11-17-commit-signing-user-registered-keys-design.md`).
  */
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
+import { forwardStamped, isWebauthnStamp, settleActivity, type ForwardStamped } from "../services/passkey-approval/turnkey-forward.js";
 import { loadTurnkeyConfig, type TurnkeyDeploymentConfig } from "@valet/plugin-turnkey/config";
-import { enrollUser, type PasskeyAuthenticator } from "@valet/plugin-turnkey/enrollment";
+import {
+  enrollUser,
+  finishPresenceEnrollment,
+  keyCreationBody,
+  keyCreationRefusal,
+  startPresenceEnrollment,
+  type PasskeyAuthenticator,
+} from "@valet/plugin-turnkey/enrollment";
 import { discardedP256PublicKeyHex } from "@valet/plugin-turnkey/p256";
 import {
   COLLECTIONS,
@@ -46,6 +54,8 @@ export interface CommitSigningRouteDeps {
   /** Test seams: the user's GitHub login, and the public key list check. */
   githubLogin?: (orgId: string, userId: string) => Promise<string | null>;
   keyListed?: (login: string, publicKeyLine: string) => Promise<boolean>;
+  /** Test seam: forwards the passkey-stamped key creation to Turnkey. */
+  forward?: ForwardStamped;
 }
 
 function loadConfig(deps: CommitSigningRouteDeps): TurnkeyDeploymentConfig | null {
@@ -111,6 +121,37 @@ function summarize(doc: SigningKeyDoc): CommitSigningKeySummary {
   };
 }
 
+/**
+ * The person's key has no window: it goes in the allowed-signers file from
+ * enrollment on, so `git verify-commit` accepts passkey-signed commits.
+ */
+async function recordEnrollmentKey(c: Context<AppEnv>, doc: EnrollmentDoc): Promise<void> {
+  if (!doc.signingKey) return;
+  const user = c.var.user;
+  const index: SigningKeyIndexDoc = {
+    userId: user.id,
+    ...(user.email ? { userEmail: user.email } : {}),
+    orgId: user.orgId,
+    sessionId: "",
+    userKey: `enrollment-${doc.subOrgId}`,
+    fingerprint: doc.signingKey.fingerprint,
+    publicKey: doc.signingKey.publicKey,
+    notBefore: doc.createdAt,
+    status: "active",
+  };
+  await pluginStore(c.var.providers.db, PLUGIN_NAME).global().put(COLLECTIONS.signingKeyIndex, index.userKey, index);
+}
+
+/** Setup needs a sign-in this recent, so a stolen session cannot enroll its own passkey. */
+export const ENROLL_FRESH_SIGN_IN_MS = 15 * 60_000;
+
+export function freshSignInRefusal(user: { sessionCreatedAt?: number }, now: number): string | null {
+  if (user.sessionCreatedAt === undefined) return null;
+  return now - user.sessionCreatedAt > ENROLL_FRESH_SIGN_IN_MS
+    ? "Sign out of Valet and sign in again, then set up commit signing within 15 minutes. A recent sign-in protects your signing setup."
+    : null;
+}
+
 export function buildCommitSigningRouter(deps: CommitSigningRouteDeps = {}): Hono<AppEnv> {
   const router = new Hono<AppEnv>();
 
@@ -128,7 +169,8 @@ export function buildCommitSigningRouter(deps: CommitSigningRouteDeps = {}): Hon
             subOrgId: enrollment.doc.subOrgId,
             enrolledAt: enrollment.doc.createdAt,
             mode: enrollment.doc.mode ?? "session",
-            needsReenroll: needsReenroll(enrollment.doc),
+            needsReenroll: needsReenroll(enrollment.doc) && !enrollment.doc.pendingKey,
+            ...(enrollment.doc.pendingKey ? { pendingKey: true } : {}),
             ...(enrollment.doc.signingKey
               ? { signingKey: { publicKey: enrollment.doc.signingKey.publicKey, fingerprint: enrollment.doc.signingKey.fingerprint } }
               : {}),
@@ -161,6 +203,8 @@ export function buildCommitSigningRouter(deps: CommitSigningRouteDeps = {}): Hon
     if (existing && !needsReenroll(existing.doc)) {
       return c.json({ error: "Commit signing is already set up for this account." }, 409);
     }
+    const stale = freshSignInRefusal(user, Date.now());
+    if (stale) return c.json({ error: stale }, 403);
 
     let body: unknown;
     try {
@@ -184,6 +228,18 @@ export function buildCommitSigningRouter(deps: CommitSigningRouteDeps = {}): Hon
     };
 
     const ops = (deps.turnkey ?? turnkeyOps)(config);
+    if (config.assurance === "presence") {
+      // Step one: the organization with the passkey as its only root. The
+      // browser then stamps the key creation with the same passkey.
+      const pending = await startPresenceEnrollment(ops, { userId: user.id, userEmail: user.email, passkey });
+      await store.put(COLLECTIONS.enrollment, DEFAULT_KEY, pending);
+      const resp: PostCommitSigningEnrollResponse = {
+        subOrgId: pending.subOrgId,
+        enrolledAt: pending.createdAt,
+        keyStep: { body: keyCreationBody(pending.subOrgId, Date.now()) },
+      };
+      return c.json(resp, 201);
+    }
     const doc = await enrollUser(ops, config, {
       userId: user.id,
       userEmail: user.email,
@@ -191,22 +247,54 @@ export function buildCommitSigningRouter(deps: CommitSigningRouteDeps = {}): Hon
       discardedAgentPublicKey: discardedP256PublicKeyHex(),
     });
     await store.put(COLLECTIONS.enrollment, DEFAULT_KEY, doc);
-    // The person's key has no window: it goes in the allowed-signers file
-    // from enrollment on, so `git verify-commit` accepts passkey-signed commits.
-    if (doc.signingKey) {
-      const index: SigningKeyIndexDoc = {
-        userId: user.id,
-        ...(user.email ? { userEmail: user.email } : {}),
-        orgId: user.orgId,
-        sessionId: "",
-        userKey: `enrollment-${doc.subOrgId}`,
-        fingerprint: doc.signingKey.fingerprint,
-        publicKey: doc.signingKey.publicKey,
-        notBefore: doc.createdAt,
-        status: "active",
-      };
-      await pluginStore(c.var.providers.db, PLUGIN_NAME).global().put(COLLECTIONS.signingKeyIndex, index.userKey, index);
+    await recordEnrollmentKey(c, doc);
+    const resp: PostCommitSigningEnrollResponse = { subOrgId: doc.subOrgId, enrolledAt: doc.createdAt };
+    return c.json(resp, 201);
+  });
+
+  /** A fresh key-creation body for an enrollment whose key step did not finish. */
+  router.get("/enroll/key-step", async (c) => {
+    const pending = (await pluginStore(c.var.providers.db, PLUGIN_NAME).user(c.var.user.id).get<EnrollmentDoc>(COLLECTIONS.enrollment, DEFAULT_KEY))?.doc;
+    if (!pending?.pendingKey) return c.json({ error: "There is no setup waiting for its key. Set up commit signing from Settings." }, 409);
+    return c.json({ body: keyCreationBody(pending.subOrgId, Date.now()) });
+  });
+
+  /** Step two: forwards the passkey-stamped key creation to Turnkey and records the key. */
+  router.post("/enroll/key", async (c) => {
+    const user = c.var.user;
+    const config = loadConfig(deps);
+    if (!config) return c.json({ error: "Commit signing is not configured for this deployment. Ask an admin to set the VALET_TURNKEY_* variables." }, 409);
+    const store = pluginStore(c.var.providers.db, PLUGIN_NAME).user(user.id);
+    const row = await store.get<EnrollmentDoc>(COLLECTIONS.enrollment, DEFAULT_KEY);
+    const pending = row?.doc;
+    if (!row || !pending?.pendingKey) return c.json({ error: "There is no setup waiting for its key. Set up commit signing from Settings." }, 409);
+    let raw: unknown;
+    try {
+      raw = await c.req.json();
+    } catch {
+      return c.json({ error: "invalid JSON body" }, 400);
     }
+    const field = (name: string): string | undefined => {
+      const value = isRecord(raw) ? raw[name] : undefined;
+      return typeof value === "string" ? value : undefined;
+    };
+    const body = field("body");
+    const stampHeaderName = field("stampHeaderName");
+    const stampHeaderValue = field("stampHeaderValue");
+    if (!body || !stampHeaderName || !stampHeaderValue) return c.json({ error: "Send body, stampHeaderName, and stampHeaderValue from the passkey stamp." }, 400);
+    if (!isWebauthnStamp(stampHeaderName)) return c.json({ error: "Create the key with your passkey. Other credentials cannot finish setup." }, 400);
+    const refusal = keyCreationRefusal(body, pending.subOrgId, Date.now());
+    if (refusal) return c.json({ error: refusal }, 400);
+    const ops = (deps.turnkey ?? turnkeyOps)(config);
+    let doc: EnrollmentDoc;
+    try {
+      const submitted = await (deps.forward ?? forwardStamped)(config.apiBaseUrl, { body, stampHeaderName, stampHeaderValue }, "create_private_keys");
+      doc = await finishPresenceEnrollment(ops, pending, await settleActivity(ops, submitted));
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 502);
+    }
+    await store.put(COLLECTIONS.enrollment, DEFAULT_KEY, doc, { ifRevision: row.revision });
+    await recordEnrollmentKey(c, doc);
     const resp: PostCommitSigningEnrollResponse = { subOrgId: doc.subOrgId, enrolledAt: doc.createdAt };
     return c.json(resp, 201);
   });

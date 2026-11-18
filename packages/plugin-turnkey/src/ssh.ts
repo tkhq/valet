@@ -8,7 +8,7 @@
  * that blob, base64 without padding, prefixed `SHA256:` (the form
  * `ssh-keygen -lf` prints and GitHub shows in Settings).
  */
-import { createHash } from "node:crypto";
+import { createHash, createPublicKey, verify } from "node:crypto";
 
 const KEY_TYPE = "ssh-ed25519";
 const ED25519_KEY_BYTES = 32;
@@ -103,4 +103,17 @@ export function armorSshSignature(publicKeyHex: string, signature: Uint8Array): 
   const b64 = Buffer.from(blob).toString("base64");
   const lines = b64.match(/.{1,70}/g) ?? [];
   return ["-----BEGIN SSH SIGNATURE-----", ...lines, "-----END SSH SIGNATURE-----"].join("\n") + "\n";
+}
+
+const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
+
+/** True when `signature` is a valid Ed25519 signature by the raw public key over `data`. */
+export function verifyEd25519(publicKeyHex: string, data: Uint8Array, signature: Uint8Array): boolean {
+  if (signature.length !== 64) return false;
+  const key = createPublicKey({
+    key: Buffer.concat([ED25519_SPKI_PREFIX, Buffer.from(ed25519PublicKeyFromHex(publicKeyHex))]),
+    format: "der",
+    type: "spki",
+  });
+  return verify(null, data, key, signature);
 }

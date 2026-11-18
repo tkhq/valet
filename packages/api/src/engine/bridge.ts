@@ -19,6 +19,7 @@ import type {
   Message,
   MessagePart as WireMessagePart,
   MessageSignal as WireMessageSignal,
+  PresenceCommitView,
   PresenceGateView,
   WireEvent,
   WireQueuedItem,
@@ -78,20 +79,32 @@ export function engineGateToWire(g: EngineDecisionGate): WireDecisionGate {
  */
 export function presenceViewOf(context: Record<string, unknown> | undefined): PresenceGateView {
   const raw = context?.presence;
-  if (typeof raw !== "object" || raw === null || !("kind" in raw) || raw.kind !== "git_commits") return { kind: "challenge" };
-  const repo = "repo" in raw && typeof raw.repo === "string" ? raw.repo : "";
-  const branch = "branch" in raw && typeof raw.branch === "string" ? raw.branch : "";
-  const list = "commits" in raw && Array.isArray(raw.commits) ? raw.commits : [];
-  const commits = list.flatMap((c: unknown) =>
-    typeof c === "object" && c !== null && "sha" in c && typeof c.sha === "string"
-      ? [{
-          sha: c.sha,
-          subject: "subject" in c && typeof c.subject === "string" ? c.subject : "",
-          author: "author" in c && typeof c.author === "string" ? c.author : "",
-        }]
-      : [],
-  );
-  return { kind: "git_commits", repo, branch, commits };
+  if (!isObject(raw) || raw.kind !== "git_commits") return { kind: "challenge" };
+  const text = (v: unknown) => (typeof v === "string" ? v : "");
+  const count = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+  const list = Array.isArray(raw.commits) ? raw.commits : [];
+  const commits: PresenceCommitView[] = list.flatMap((c: unknown) => {
+    if (!isObject(c) || typeof c.sha !== "string") return [];
+    const files = Array.isArray(c.files)
+      ? c.files.flatMap((f: unknown) => (isObject(f) && typeof f.path === "string" ? [{ path: f.path, additions: count(f.additions), deletions: count(f.deletions) }] : []))
+      : [];
+    return [{
+      sha: c.sha,
+      subject: text(c.subject),
+      author: text(c.author),
+      source: c.source === "github" ? "github" as const : "sandbox" as const,
+      ...(typeof c.url === "string" && c.url.startsWith("https://github.com/") ? { url: c.url } : {}),
+      additions: count(c.additions),
+      deletions: count(c.deletions),
+      files,
+      filesTotal: count(c.filesTotal) || files.length,
+    }];
+  });
+  return { kind: "git_commits", repo: text(raw.repo), branch: text(raw.branch), commits };
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
 const WIRE_RISK_LEVELS = ["low", "medium", "high", "critical"] as const;

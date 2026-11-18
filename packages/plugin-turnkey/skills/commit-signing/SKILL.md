@@ -11,7 +11,7 @@ Most accounts sign each commit with the user's passkey. A few accounts use a sig
 
 ## Passkey mode (default): `turnkey.sign_commits`
 
-1. Finish the work and commit it normally. The user taps their passkey once per commit, so squash to as few commits as makes sense. The limit is 10.
+1. Finish the work and commit it normally. The user taps their passkey once per commit, so squash to as few commits as makes sense. The limit is 10. If the repository accepts unsigned pushes on this branch, push first: the card then links each commit's diff on GitHub, so the user can review exactly what they sign.
 2. Ask for signatures, naming where the branch starts:
 
 ```

@@ -14,14 +14,17 @@ export interface StampedRequest {
   stampHeaderValue: string;
 }
 
-export type ForwardStamped = (apiBaseUrl: string, request: StampedRequest) => Promise<TurnkeyActivity>;
+/** The Turnkey activity endpoints a passkey may be asked to stamp. */
+export type StampedActivityPath = "sign_raw_payload" | "create_private_keys";
+
+export type ForwardStamped = (apiBaseUrl: string, request: StampedRequest, path?: StampedActivityPath) => Promise<TurnkeyActivity>;
 
 export function isWebauthnStamp(name: string): boolean {
   return name.toLowerCase() === WEBAUTHN_STAMP_HEADER.toLowerCase();
 }
 
-export const forwardStampedSignature: ForwardStamped = async (apiBaseUrl, request) => {
-  const res = await fetch(`${apiBaseUrl.replace(/\/+$/, "")}/public/v1/submit/sign_raw_payload`, {
+export const forwardStamped: ForwardStamped = async (apiBaseUrl, request, path = "sign_raw_payload") => {
+  const res = await fetch(`${apiBaseUrl.replace(/\/+$/, "")}/public/v1/submit/${path}`, {
     method: "POST",
     headers: { "content-type": "application/json", [WEBAUTHN_STAMP_HEADER]: request.stampHeaderValue },
     body: request.body,

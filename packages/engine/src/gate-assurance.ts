@@ -21,8 +21,8 @@ export const PRESENCE_REQUIRED_MESSAGE =
   "This approval needs your passkey. Open the thread in Valet and approve it with your passkey.";
 
 export class PresenceRequiredError extends Error {
-  constructor() {
-    super(PRESENCE_REQUIRED_MESSAGE);
+  constructor(message: string = PRESENCE_REQUIRED_MESSAGE) {
+    super(message);
     this.name = "PresenceRequiredError";
   }
 }

@@ -105,4 +105,41 @@ describe("Session.resolveDecision on a presence gate", () => {
     expect(resolved?.resolution?.approval?.state.activities.map((a) => a.activity_id)).toEqual(["act-1"]);
     faux.unregister();
   });
+
+  it("refuses a well-shaped approval the host verifier rejects", async () => {
+    const faux = registerFauxProvider({ provider: "gate-presence-verifier" });
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("sign_it", {}, { id: "tc1" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage("done"),
+    ]);
+    const store = new InMemorySessionStore();
+    const bus = new InMemoryEventStream();
+    const events: BusEvent[] = [];
+    bus.subscribe({}, (e) => events.push(e));
+    const verified: string[] = [];
+    const engine = new Engine({
+      providers: {
+        store, stream: bus, sandboxProvider: new VirtualSandboxProvider(),
+        verifyPresenceApproval: async (gate, resolution) => {
+          verified.push(gate.id);
+          return resolution.approval?.state.activities[0]?.activity_id === "act-1" ? "Turnkey has no such activity." : null;
+        },
+      },
+    });
+    const session = await engine.createSession({
+      userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel(), tools: [presenceTool()],
+    });
+    void session.prompt("sign it");
+    await waitFor(() => events.some((e) => e.event.type === "decision_gate"));
+    const gate = events.flatMap((e) => (e.event.type === "decision_gate" ? [e.event.gate] : []))[0] as DecisionGate;
+    await expect(
+      session.resolveDecision(gate.id, { actionId: "approve", resolvedBy: "u1", resolvedAt: Date.now(), assurance: "presence", approval }),
+    ).rejects.toThrow("Turnkey has no such activity.");
+    expect(verified).toEqual([gate.id]);
+    expect((await store.getDecisionGate(session.id, gate.id))?.status).toBe("pending");
+    // A reject never reaches the verifier.
+    await session.resolveDecision(gate.id, { actionId: "reject", resolvedBy: "u1", resolvedAt: Date.now() });
+    expect(verified).toEqual([gate.id]);
+    faux.unregister();
+  });
 });

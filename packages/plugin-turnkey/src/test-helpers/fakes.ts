@@ -15,7 +15,7 @@ import type {
   PluginStoreScope,
   ScopedPluginStore,
 } from "@valet/engine";
-import type { GitHubAccount } from "../github-keys.js";
+import type { GitHubAccount, GitHubCommitView } from "../github-keys.js";
 import type { TurnkeyOps } from "../turnkey-client.js";
 
 // Raw Ed25519 public key from `ssh-keygen`; see ssh.test.ts for the derived line and fingerprint.
@@ -29,6 +29,7 @@ export interface FakeTurnkey extends TurnkeyOps {
 
 export function fakeTurnkey(): FakeTurnkey {
   const calls: FakeTurnkey["calls"] = [];
+  let rootNames: string[] = ["passkey", "valet-parent"];
   const counters = new Map<string, number>();
   const id = (prefix: string) => {
     const n = (counters.get(prefix) ?? 0) + 1;
@@ -39,6 +40,7 @@ export function fakeTurnkey(): FakeTurnkey {
     calls,
     async createSubOrganization(args) {
       calls.push({ op: "createSubOrganization", args });
+      rootNames = args.rootUsers.map((u) => u.userName);
       return { subOrgId: id("suborg"), activityId: id("act") };
     },
     async createUsers(args) {
@@ -59,10 +61,8 @@ export function fakeTurnkey(): FakeTurnkey {
     },
     async listRootUsers(args) {
       calls.push({ op: "listRootUsers", args });
-      return [
-        { userId: "passkey-user", userName: "passkey" },
-        { userId: "parent-user", userName: "valet-parent" },
-      ];
+      const ids: Record<string, string> = { passkey: "passkey-user", "valet-parent": "parent-user" };
+      return rootNames.map((name) => ({ userId: ids[name] ?? `${name}-user`, userName: name }));
     },
     async updateRootQuorum(args) {
       calls.push({ op: "updateRootQuorum", args });
@@ -78,6 +78,10 @@ export function fakeTurnkey(): FakeTurnkey {
     async deleteApiKeys(args) {
       calls.push({ op: "deleteApiKeys", args });
     },
+    async getPrivateKeyPublicHex(args) {
+      calls.push({ op: "getPrivateKeyPublicHex", args });
+      return RAW_ED25519_HEX;
+    },
     async getActivity(args) {
       calls.push({ op: "getActivity", args });
       return { id: args.activityId, organizationId: args.subOrgId, status: "ACTIVITY_STATUS_PENDING", type: "ACTIVITY_TYPE_SIGN_RAW_PAYLOAD_V2", votes: [] };
@@ -88,11 +92,18 @@ export function fakeTurnkey(): FakeTurnkey {
 export interface FakeGitHub extends GitHubAccount {
   /** Signing key lines the fake account lists publicly. */
   listed: Set<string>;
+  /** Commits GitHub "has", by sha. */
+  pushed: Map<string, GitHubCommitView>;
 }
 
 export function fakeGithub(): FakeGitHub {
+  const pushed = new Map<string, GitHubCommitView>();
   return {
     listed: new Set(),
+    pushed,
+    async commit(_repo, sha) {
+      return pushed.get(sha) ?? null;
+    },
     async login() {
       return "octo";
     },

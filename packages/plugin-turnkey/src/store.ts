@@ -72,8 +72,14 @@ export interface EnrollmentDoc {
   /** Absent on enrollments from before assurance modes existed. */
   mode?: ApprovalAssurance;
   signingKey?: PersonSigningKey;
-  /** Private key tag the signing key carries, named in the agent policy. */
-  signingTagId: string;
+  /**
+   * Presence setup is two steps: Valet creates the organization with the
+   * passkey as its only root, then the passkey creates the signing key.
+   * True between the two.
+   */
+  pendingKey?: true;
+  /** Private key tag the signing key carries, named in the agent policy. Session mode only. */
+  signingTagId?: string;
   /** `valet-agent`, holder of the session API keys. Session mode only. */
   agentUserId?: string;
   /** User tag on `valet-agent`, named in the allow policy. Session mode only. */

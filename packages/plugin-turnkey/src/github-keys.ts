@@ -8,8 +8,22 @@
  * `fetch` rather than Octokit: two endpoints do not earn a dependency.
  */
 
+/** What GitHub shows for a pushed commit: the reviewable diff the card links to. */
+export interface GitHubCommitView {
+  url: string;
+  additions: number;
+  deletions: number;
+  files: Array<{ path: string; additions: number; deletions: number }>;
+}
+
 export interface GitHubAccount {
   login(): Promise<string>;
+  /**
+   * GitHub's view of a commit, or null when GitHub does not have it (not
+   * pushed yet). The commit id fixes the tree, so this diff is exactly what
+   * the signature will cover.
+   */
+  commit(repo: string, sha: string): Promise<GitHubCommitView | null>;
   /**
    * `<id>+<login>@users.noreply.github.com` for the token's account. GitHub
    * marks a signed commit Verified only when its committer email is a
@@ -43,6 +57,12 @@ export function githubAccount(token: string, apiUrl: string = resolveGithubApiUr
   return {
     async login() {
       return (await read()).login;
+    },
+    async commit(repo, sha) {
+      const res = await fetch(`${apiUrl}/repos/${repo}/commits/${sha}`, { headers: { ...HEADERS, authorization: `Bearer ${token}` } });
+      if (res.status === 404 || res.status === 422) return null;
+      if (!res.ok) throw new Error(`GitHub refused to read commit ${sha}: ${res.status} ${await safeText(res)}`);
+      return parseCommitView(await res.json());
     },
     async noreplyEmail() {
       const { id, login } = await read();
@@ -80,4 +100,25 @@ async function safeText(res: Response): Promise<string> {
   } catch {
     return "";
   }
+}
+
+function num(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+/** Narrows GitHub's commit JSON to the card's fields. */
+export function parseCommitView(body: unknown): GitHubCommitView | null {
+  if (typeof body !== "object" || body === null || !("html_url" in body) || typeof body.html_url !== "string") return null;
+  const stats = "stats" in body && typeof body.stats === "object" && body.stats !== null ? body.stats : {};
+  const files = "files" in body && Array.isArray(body.files) ? body.files : [];
+  return {
+    url: body.html_url,
+    additions: num("additions" in stats ? stats.additions : 0),
+    deletions: num("deletions" in stats ? stats.deletions : 0),
+    files: files.flatMap((f: unknown) =>
+      typeof f === "object" && f !== null && "filename" in f && typeof f.filename === "string"
+        ? [{ path: f.filename, additions: num("additions" in f ? f.additions : 0), deletions: num("deletions" in f ? f.deletions : 0) }]
+        : [],
+    ),
+  };
 }

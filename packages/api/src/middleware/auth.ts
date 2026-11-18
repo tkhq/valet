@@ -26,6 +26,8 @@ export interface AuthUser {
   name?: string;
   role: "admin" | "member";
   orgId: string;
+  /** When the browser session signed in, for actions that need a recent sign-in. Absent on keys and the dev stub. */
+  sessionCreatedAt?: number;
 }
 
 /** Route prefixes that consume `c.var.sandbox` today. Must match the mount
@@ -128,6 +130,7 @@ async function userFromSession(auth: ValetAuth, db: AppDb, headers: Headers): Pr
     name: sessionResult.user.name,
     role: normalizeRole(sessionResult.user.role),
     orgId: await resolveOrgId(db),
+    sessionCreatedAt: new Date(sessionResult.session.createdAt).getTime(),
   };
 }
 

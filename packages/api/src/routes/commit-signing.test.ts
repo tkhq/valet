@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { SigningKeyIndexDoc } from "@valet/plugin-turnkey/store";
-import { parseEnrollBody, renderAllowedSigners } from "./commit-signing.js";
+import { ENROLL_FRESH_SIGN_IN_MS, freshSignInRefusal, parseEnrollBody, renderAllowedSigners } from "./commit-signing.js";
 
 const attestation = {
   credentialId: "cred",
@@ -80,5 +80,14 @@ describe("renderAllowedSigners", () => {
     const { userEmail: _drop, ...noEmail } = row;
     expect(renderAllowedSigners([noEmail]).startsWith("user:u1@valet ")).toBe(true);
     expect(renderAllowedSigners([])).toBe("");
+  });
+});
+
+describe("freshSignInRefusal", () => {
+  it("allows a recent browser sign-in and the dev stub, and refuses an old one", () => {
+    const now = 10 * ENROLL_FRESH_SIGN_IN_MS;
+    expect(freshSignInRefusal({ sessionCreatedAt: now - 60_000 }, now)).toBeNull();
+    expect(freshSignInRefusal({}, now)).toBeNull();
+    expect(freshSignInRefusal({ sessionCreatedAt: now - ENROLL_FRESH_SIGN_IN_MS - 1 }, now)).toContain("sign in again");
   });
 });

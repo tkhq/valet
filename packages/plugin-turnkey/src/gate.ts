@@ -67,7 +67,7 @@ export function commitSigningGateRequest(args: {
   repo: string;
   branch: string;
   headSha: string;
-  commits: Array<{ sha: string; subject: string; author: string }>;
+  commits: Array<{ sha: string }>;
   context: Record<string, unknown>;
 }): DecisionGateRequest {
   const n = args.commits.length;
@@ -82,6 +82,9 @@ export function commitSigningGateRequest(args: {
       { id: "reject", label: "Reject", style: "danger" },
     ],
     resumeKey: `sign-commits:${args.repo}:${args.branch}:${args.headSha}`,
+    // A rejection answers every later request for this branch in the same
+    // turn, so a looping agent cannot keep asking for taps.
+    dedupeKey: `sign-commits:${args.repo}:${args.branch}`,
     context: args.context,
   };
 }

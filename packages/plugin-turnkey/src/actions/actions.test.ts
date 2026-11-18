@@ -128,7 +128,7 @@ function setup(opts: { enrollment?: EnrollmentDoc | null; githubToken?: string |
     const doc = opts.enrollment === undefined ? PRESENCE : opts.enrollment;
     if (doc) await store.user("user-1").put(COLLECTIONS.enrollment, DEFAULT_KEY, doc);
   };
-  return { turnkey, store, ctx, refs, sign: find("turnkey.sign_commits"), request: find("turnkey.request_signing_key"), revoke: find("turnkey.revoke_signing_key"), enroll };
+  return { turnkey, github, store, ctx, refs, sign: find("turnkey.sign_commits"), request: find("turnkey.request_signing_key"), revoke: find("turnkey.revoke_signing_key"), enroll };
 }
 
 const signArgs = { repo: "tkhq/valet", branch: "feature", base: "origin/main" };
@@ -164,6 +164,57 @@ describe("turnkey.sign_commits", () => {
     expect(head).not.toBe(UNSIGNED_2_SHA);
     expect(head).not.toBe(SIGNED_1_SHA);
     expect(s.turnkey.calls).toHaveLength(0);
+  });
+
+  it("shows GitHub's view of a pushed commit and the sandbox's numstat for an unpushed one", async () => {
+    const s = setup();
+    await s.enroll();
+    s.github.pushed.set(UNSIGNED_1_SHA, { url: "https://github.com/tkhq/valet/commit/x", additions: 3, deletions: 1, files: [{ path: "a.txt", additions: 3, deletions: 1 }] });
+    const ctx = fakeContext({
+      pluginStore: s.store,
+      decision: async () => ({ actionId: "reject", resolvedBy: "user-1", resolvedAt: NOW }),
+      exec: (c) => (c.includes("git diff-tree") ? { exitCode: 0, stdout: "2\t0\tb.txt\n-\t-\timg.png\n", stderr: "" } : repoExec(s.refs)(c)),
+    });
+    await s.sign.execute(signArgs, ctx);
+    const view = ctx.gates[0]?.context?.presence as { commits: Array<Record<string, unknown>> };
+    expect(view.commits[0]).toMatchObject({ source: "github", url: "https://github.com/tkhq/valet/commit/x", additions: 3, filesTotal: 1 });
+    expect(view.commits[1]).toMatchObject({ source: "sandbox", additions: 2, deletions: 0, filesTotal: 2, files: [{ path: "b.txt" }, { path: "img.png" }] });
+    expect(ctx.gates[0]?.dedupeKey).toBe("sign-commits:tkhq/valet:feature");
+  });
+
+  it("refuses a tag object presented as a commit, before opening a gate", async () => {
+    const s = setup();
+    await s.enroll();
+    const tag = `object ${"a".repeat(40)}\ntype commit\ntag v1\ntagger T <t@x> 1 +0000\n\nrelease\n`;
+    const tagSha = gitObjectId(tag);
+    const ctx = fakeContext({
+      pluginStore: s.store,
+      exec: (c) =>
+        c.includes("git rev-list") ? { exitCode: 0, stdout: `${tagSha}\n`, stderr: "" }
+          : c.endsWith(`git cat-file commit ${tagSha}`) ? { exitCode: 0, stdout: tag, stderr: "" }
+            : repoExec(s.refs)(c),
+    });
+    const res = await s.sign.execute(signArgs, ctx);
+    expect(res.success).toBe(false);
+    expect(res.error).toContain("not a plain git commit");
+    expect(ctx.gates).toHaveLength(0);
+  });
+
+  it("refuses to write commits when a stored signature does not verify", async () => {
+    const s = setup();
+    await s.enroll();
+    const ctx = fakeContext({
+      pluginStore: s.store,
+      exec: repoExec(s.refs),
+      decision: async (req) => {
+        const doc: PresenceStepsDoc = { signatures: [{ activityId: "a", signatureHex: "00".repeat(64) }, { activityId: "b", signatureHex: "00".repeat(64) }] };
+        await s.store.session("session-1").put(COLLECTIONS.presenceSteps, presenceStepsKey(req.resumeKey ?? "", 1), doc);
+        return { actionId: "approve", resolvedBy: "user-1", resolvedAt: NOW, assurance: "presence", gateOrdinal: 1 };
+      },
+    });
+    const res = await s.sign.execute(signArgs, ctx);
+    expect(res.error).toContain("does not match your signing key");
+    expect(s.refs.get("feature")).toBe(UNSIGNED_2_SHA);
   });
 
   it("refuses more than 10 commits with the fix", async () => {

@@ -1891,7 +1891,20 @@ export interface DecisionGate {
 
 export type PresenceGateView =
   | { kind: "challenge" }
-  | { kind: "git_commits"; repo: string; branch: string; commits: Array<{ sha: string; subject: string; author: string }> };
+  | { kind: "git_commits"; repo: string; branch: string; commits: PresenceCommitView[] };
+
+/** One commit on a passkey signing card. `source: "github"` means `url` shows the exact diff that gets signed. */
+export interface PresenceCommitView {
+  sha: string;
+  subject: string;
+  author: string;
+  source: "github" | "sandbox";
+  url?: string;
+  additions: number;
+  deletions: number;
+  files: Array<{ path: string; additions: number; deletions: number }>;
+  filesTotal: number;
+}
 
 export interface DecisionResolution {
   attachments?: Array<{ url: string; mimeType: string; name?: string }>;
@@ -7266,6 +7279,8 @@ export interface GetCommitSigningResponse {
   mode?: "session" | "presence";
   /** The enrollment predates per-person keys; the person must set up again. */
   needsReenroll?: boolean;
+  /** Setup created the organization but the passkey has not created the key yet. */
+  pendingKey?: boolean;
   /** The person's Valet signing key, to add to GitHub as a Signing Key. */
   signingKey?: { publicKey: string; fingerprint: string };
   /** Values the browser needs to create the passkey. */
@@ -7299,6 +7314,8 @@ export interface PostCommitSigningEnrollRequest {
 export interface PostCommitSigningEnrollResponse {
   subOrgId: string;
   enrolledAt: number;
+  /** Presence mode: the key-creation request to stamp with the same passkey, then post to `/enroll/key`. */
+  keyStep?: { body: string };
 }
 
 /**

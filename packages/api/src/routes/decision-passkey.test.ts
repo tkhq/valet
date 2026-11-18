@@ -9,9 +9,13 @@ import { afterEach, describe, expect, it } from "vitest";
 import { PRESENCE_REQUIRED_MESSAGE } from "@valet/engine";
 import { COLLECTIONS, DEFAULT_KEY, PLUGIN_NAME, type EnrollmentDoc } from "@valet/plugin-turnkey/store";
 import { PUBLIC_HEX, signWithTestKey } from "@valet/plugin-turnkey/test-helpers/commit-fixtures";
+import { fakeTurnkey } from "@valet/plugin-turnkey/test-helpers";
 import type { TurnkeyActivity } from "@valet/plugin-turnkey/turnkey-client";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { pluginStore } from "../services/plugin-store.js";
+import { eq } from "drizzle-orm";
+import { agentSessions } from "../schema/index.js";
+import { loadSessionMeta } from "../engine/session-meta.js";
 import type { CreateSessionResponse, PresenceStepResponse } from "../wire/types.js";
 import { presenceDeps, type PresenceDeps } from "./decision-passkey.js";
 
@@ -53,21 +57,31 @@ async function setup() {
   });
   await pluginStore(api.providers.db, PLUGIN_NAME).user("local-user").put(COLLECTIONS.enrollment, DEFAULT_KEY, ENROLLMENT);
   const forwarded: string[] = [];
+  const activities = new Map<string, TurnkeyActivity>();
+  const turnkey = fakeTurnkey();
+  turnkey.getActivity = async ({ activityId }) => {
+    const found = activities.get(activityId);
+    if (!found) throw new Error("no such activity");
+    return found;
+  };
   Object.assign(presenceDeps, {
+    turnkey: () => turnkey,
     config: () => ({ organizationId: "parent", apiPublicKey: "02aa", apiPrivateKey: "bb", apiBaseUrl: "https://turnkey.test", assurance: "presence" }),
     forward: async (_base: string, req: { body: string }): Promise<TurnkeyActivity> => {
       forwarded.push(req.body);
       const payload = (JSON.parse(req.body) as { parameters: { payload: string } }).parameters.payload;
       const sig = signWithTestKey(Buffer.from(payload, "hex")).toString("hex");
-      return {
+      const activity: TurnkeyActivity = {
         id: `act-${forwarded.length}`, organizationId: "sub-1", status: "ACTIVITY_STATUS_COMPLETED", type: "ACTIVITY_TYPE_SIGN_RAW_PAYLOAD_V2",
         votes: [{ userId: "passkey-user", selection: "VOTE_SELECTION_APPROVED", scheme: "SIGNATURE_SCHEME_TK_WEBAUTHN", publicKey: "04cred", createdAtMs: 1_800_000_000_000 }],
         result: { signRawPayloadResult: { r: sig.slice(0, 64), s: sig.slice(64) } },
       };
+      activities.set(activity.id, activity);
+      return activity;
     },
   } satisfies Partial<PresenceDeps>);
   const base = `${api.baseUrl}/api/sessions/${sessionId}/decisions/g1`;
-  return { sessionId, base, forwarded, store };
+  return { sessionId, base, forwarded, store, activities };
 }
 
 const json = { "Content-Type": "application/json" };
@@ -129,6 +143,22 @@ describe("passkey approval", () => {
     const approval = gate?.resolution?.approval;
     expect(approval?.id).toMatch(/^apr_/);
     expect(approval?.approved_until).toBe(approval?.approved_at);
+  });
+
+  it("refuses a forged approval record that Turnkey cannot back", async () => {
+    const { sessionId, store } = await setup();
+    if (!api) throw new Error("no api");
+    const [row] = await api.providers.db.select().from(agentSessions).where(eq(agentSessions.id, sessionId)).limit(1);
+    if (!row) throw new Error("no session row");
+    const engineSession = await api.providers.engineHost.sessionFor(sessionId, await loadSessionMeta(api.providers.db, row));
+    const forged = {
+      id: "apr_forged", approved_at: "2026-11-18T00:00:00.000Z", approved_until: "2026-11-18T00:00:00.000Z",
+      state: { iss: "turnkey" as const, organization_id: "sub-1", amr: ["pop" as const, "user" as const], approver: { user_id: "passkey-user" },
+        activities: [{ activity_id: "act-made-up", payload_sha256: "00", approved_at: "2026-11-18T00:00:00.000Z" }] },
+    };
+    await expect(engineSession.resolveDecision("g1", { actionId: "approve", resolvedBy: "local-user", resolvedAt: 1, assurance: "presence", approval: forged }))
+      .rejects.toThrow("Turnkey has no activity act-made-up");
+    expect((await store.getDecisionGate(sessionId, "g1"))?.status).toBe("pending");
   });
 
   it("names the setup fix when the approver has no signing setup", async () => {

@@ -1,5 +1,8 @@
 import { useState } from "react";
-import { Turnkey } from "@turnkey/sdk-browser";
+import { Turnkey, WebauthnStamper } from "@turnkey/sdk-browser";
+import { useQueryClient } from "@tanstack/react-query";
+import { api } from "~/api/client";
+import { qkCommitSigning } from "~/api/commit-signing";
 import type { CommitSigningKeySummary, GetCommitSigningResponse } from "@valet/api/wire";
 import { Badge, Button, Spinner } from "~/components/primitives";
 import { FieldRow } from "~/components/settings/field-row";
@@ -27,6 +30,7 @@ export function CommitSigningSection() {
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [keyOpen, setKeyOpen] = useState(false);
+  const qc = useQueryClient();
 
   if (signingQ.isLoading) {
     return (
@@ -54,6 +58,19 @@ export function CommitSigningSection() {
     );
   }
 
+  // Presence setup is two passkey prompts: create the passkey, then let it
+  // create your signing key, so Valet's server never holds authority in your
+  // Turnkey organization. If the second prompt fails, "Finish setup" retries it.
+  const finishKey = async (body: string, credentialId?: string) => {
+    const signed = await new WebauthnStamper({
+      rpId: data.passkey?.rpId ?? window.location.hostname,
+      userVerification: "required",
+      ...(credentialId ? { allowCredentials: [{ id: base64UrlToBytes(credentialId), type: "public-key" as const }] } : {}),
+    }).stamp(body);
+    await api.finishCommitSigningKey({ body, ...signed });
+    await qc.invalidateQueries({ queryKey: qkCommitSigning.all() });
+  };
+
   const onSetUp = async () => {
     const passkey = data.passkey;
     if (!passkey) return;
@@ -62,13 +79,41 @@ export function CommitSigningSection() {
     try {
       const email = meQ.data?.email ?? "valet user";
       const attestation = await createPasskey(passkey, email);
-      await enroll.mutateAsync(attestation);
+      const resp = await enroll.mutateAsync(attestation);
+      if (resp.keyStep) await finishKey(resp.keyStep.body, attestation.attestation.credentialId);
     } catch (err) {
       setError(errorText(err, "Could not set up commit signing. Try again."));
     } finally {
       setCreating(false);
     }
   };
+
+  const onFinish = async () => {
+    setError(null);
+    setCreating(true);
+    try {
+      const step = await api.getCommitSigningKeyStep();
+      await finishKey(step.body);
+    } catch (err) {
+      setError(errorText(err, "Could not create your signing key. Try again."));
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  if (data.pendingKey) {
+    return (
+      <FieldRow
+        label="Status"
+        hint="Your passkey has not created your signing key yet. Finish setup asks for your passkey once."
+        {...(error ? { error } : {})}
+      >
+        <Button type="button" disabled={creating} onClick={() => void onFinish()}>
+          {creating ? "Finishing…" : "Finish setup"}
+        </Button>
+      </FieldRow>
+    );
+  }
 
   if (!data.enrolled || data.needsReenroll) {
     return (
@@ -115,7 +160,9 @@ export function CommitSigningSection() {
           <SigningKeyModal open={keyOpen} onOpenChange={setKeyOpen} publicKey={data.signingKey.publicKey} />
         </FieldRow>
       )}
-      {data.keys.length > 0 && (
+      {/* Passkey mode has no windows: the key never expires and every push
+          asks for a tap. The list only exists for window (session) mode. */}
+      {data.mode === "session" && data.keys.length > 0 && (
         <FieldRow label="Signing windows" hint="Windows close at their end time.">
           <ul className="space-y-2 text-sm text-ink">
             {data.keys.slice(0, 10).map((key) => (
@@ -177,4 +224,11 @@ async function createPasskey(
       transports: passkey.attestation.transports,
     },
   };
+}
+
+function base64UrlToBytes(value: string): Uint8Array<ArrayBuffer> {
+  const binary = atob(value.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(value.length / 4) * 4, "="));
+  const out = new Uint8Array(new ArrayBuffer(binary.length));
+  for (let i = 0; i < binary.length; i += 1) out[i] = binary.charCodeAt(i);
+  return out;
 }

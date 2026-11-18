@@ -70,7 +70,7 @@ import type {
   WriteFence,
 } from "./types.js";
 import { credentialSecret, THREAD_USER_TIMEZONE_KEY } from "./types.js";
-import { presenceRefusal, PresenceRequiredError } from "./gate-assurance.js";
+import { gateAssurance, isApprovingAction, presenceRefusal, PresenceRequiredError } from "./gate-assurance.js";
 import { reportError } from "./error-report.js";
 
 
@@ -1564,6 +1564,13 @@ export class Session {
     // every surface resolves through, before any waiter sees the answer.
     const stored = await this.providers.store.getDecisionGate(this.id, gateId);
     if (stored && presenceRefusal(stored, resolution)) throw new PresenceRequiredError();
+    // The shape is right; the host re-checks the proof itself (for Turnkey,
+    // it reads each activity back), so a record written by any other path
+    // cannot pass for a passkey approval.
+    if (stored && gateAssurance(stored) === "presence" && isApprovingAction(stored.actions, resolution.actionId) && this.providers.verifyPresenceApproval) {
+      const refusal = await this.providers.verifyPresenceApproval(stored, resolution);
+      if (refusal) throw new PresenceRequiredError(refusal);
+    }
     // Command gates first — they are session-level, not owned by any thread.
     if (this.commandGates.isPending(gateId)) {
       const existing = await this.providers.store.getDecisionGate(this.id, gateId);
