@@ -18,10 +18,8 @@ import { randomUUID } from "node:crypto";
 import type { Context } from "hono";
 import { Hono } from "hono";
 import { gateAssurance, isApprovingAction, type AuthzenApproval, type DecisionGate as EngineDecisionGate } from "@valet/engine";
-import { loadTurnkeyConfig, type TurnkeyDeploymentConfig } from "@valet/plugin-turnkey/config";
 import { presenceStepsKey, signingContextOf } from "@valet/plugin-turnkey/presence";
 import { COLLECTIONS, DEFAULT_KEY, PLUGIN_NAME, type EnrollmentDoc, type PresenceStepsDoc } from "@valet/plugin-turnkey/store";
-import { turnkeyOps, type TurnkeyOpsFactory } from "@valet/plugin-turnkey/turnkey-client";
 import type { AppEnv } from "../env.js";
 import { isAgentCaller } from "../lib/request-principal.js";
 import { pluginStore } from "../services/plugin-store.js";
@@ -33,25 +31,13 @@ import {
   type PresenceSigner,
   type PresenceStep,
 } from "../services/passkey-approval/steps.js";
-import { forwardStampedSignature, isWebauthnStamp, settleActivity, type ForwardStamped } from "../services/passkey-approval/turnkey-forward.js";
+import { presenceDeps } from "../services/passkey-approval/deps.js";
+import { isWebauthnStamp, settleActivity } from "../services/passkey-approval/turnkey-forward.js";
 import { answersGate } from "../services/session-access.js";
 import type { PresenceStepResponse } from "../wire/types.js";
 import { canAnswerDecision, decisionDenied, loadDecisionSession, visibleGates } from "./messages.js";
 
-export interface PresenceDeps {
-  config: () => TurnkeyDeploymentConfig | null;
-  turnkey: TurnkeyOpsFactory;
-  forward: ForwardStamped;
-  now: () => number;
-}
-
-/** Production wiring. Tests replace fields with `Object.assign` and restore them after. */
-export const presenceDeps: PresenceDeps = {
-  config: () => loadTurnkeyConfig(process.env),
-  turnkey: turnkeyOps,
-  forward: forwardStampedSignature,
-  now: () => Date.now(),
-};
+export { presenceDeps, type PresenceDeps } from "../services/passkey-approval/deps.js";
 
 const NOT_SET_UP_MESSAGE =
   "This approval needs a passkey you set up for Valet. Open Settings, Commit signing, set it up, then approve again.";

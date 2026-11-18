@@ -1,4 +1,5 @@
 import { hostedToolUsageSink } from "../services/external-usage.js";
+import { presenceApprovalVerifier } from "../services/passkey-approval/verify.js";
 import { modelFetchFor } from "../lib/outbound-url.js";
 import { buildToolFocusTool, workflowToolFocus } from "../plugins/tool-focus.js";
 import { HOME_THREAD_CONTEXT, HOME_THREAD_KEY } from "../home/context.js";
@@ -998,6 +999,7 @@ export class EngineHost {
       blobs: this.opts.blobs,
       sanitizeToolOutput: sanitizeSecurityCredentialOutput,
       canStreamToolCallArguments: (id) => !hasSecurityCredentialValues(id),
+      ...(this.opts.db ? { verifyPresenceApproval: presenceApprovalVerifier(this.opts.db) } : {}),
     };
   }
 

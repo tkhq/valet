@@ -6,6 +6,26 @@
 import type { SourceCommit } from "./commits.js";
 
 export const GIT_COMMITS_KIND = "git_commits";
+/** Files listed per commit on the card; the rest are counted. */
+export const MAX_CARD_FILES = 20;
+
+/**
+ * One commit as the card shows it. `source` says where the diff came from:
+ * `github` when GitHub already has the commit (its id fixes the content, so
+ * the linked diff is what gets signed), `sandbox` when only the sandbox
+ * reported it and the numbers are the agent's own account.
+ */
+export interface CommitCardView {
+  sha: string;
+  subject: string;
+  author: string;
+  source: "github" | "sandbox";
+  url?: string;
+  additions: number;
+  deletions: number;
+  files: Array<{ path: string; additions: number; deletions: number }>;
+  filesTotal: number;
+}
 
 /** Stored at `context.signing` on a `git_commits` gate. Never sent to the browser. */
 export interface GitCommitsSigningContext {

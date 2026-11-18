@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { commitAuthor, commitSubject, gitObjectId, planCommitChain, unsignedRewrite, withSignature } from "./commits.js";
+import {
+  commitAuthor,
+  commitObjectRefusal,
+  commitSubject,
+  gitObjectId,
+  planCommitChain,
+  unsignedRewrite,
+  verifiedSignatureCount,
+  withSignature,
+} from "./commits.js";
 import {
   EMAIL,
   PUBLIC_HEX,
@@ -62,5 +71,34 @@ describe("labels", () => {
     expect(commitSubject(unsigned2("p"))).toBe("second commit");
     expect(commitAuthor(UNSIGNED_1)).toBe("Valet Test <valet@example.com>");
     expect(withSignature("tree t\n\nm\n", "A\nB\n")).toBe("tree t\ngpgsig A\n B\n\nm\n");
+  });
+});
+
+describe("commitObjectRefusal", () => {
+  it("accepts commits, including a signed merge with an encoding header", () => {
+    expect(commitObjectRefusal(UNSIGNED_1)).toBeNull();
+    expect(commitObjectRefusal(SIGNED_1)).toBeNull();
+    expect(commitObjectRefusal(unsigned2("a".repeat(40)).replace("committer", "parent " + "b".repeat(40) + "\nauthor X <x@y> 1 +0000\ncommitter").replace(/author Valet[^\n]*\n/, ""))).toBeNull();
+  });
+
+  it("refuses a tag object, an unknown header, and a missing author", () => {
+    const tag = `object ${"a".repeat(40)}\ntype commit\ntag v1.0\ntagger T <t@x> 1 +0000\n\nrelease\n`;
+    expect(commitObjectRefusal(tag)).toContain("tree line");
+    expect(commitObjectRefusal(UNSIGNED_1.replace("\n\n", "\nx-extra 1\n\n"))).toContain("unexpected header");
+    expect(commitObjectRefusal(UNSIGNED_1.replace(/author [^\n]*\n/, ""))).toContain("author");
+    expect(commitObjectRefusal("tree x")).toContain("blank line");
+  });
+});
+
+describe("verifiedSignatureCount", () => {
+  const commits = [{ sha: gitObjectId(UNSIGNED_1), object: UNSIGNED_1 }];
+
+  it("counts valid signatures and stops at the first bad one", () => {
+    const payload = planCommitChain({ commits, committerEmail: EMAIL, signatures: [], publicKeyHex: PUBLIC_HEX }).nextPayload!;
+    const good = signWithTestKey(payload);
+    expect(verifiedSignatureCount({ commits, committerEmail: EMAIL, signatures: [good], publicKeyHex: PUBLIC_HEX })).toBe(1);
+    const bad = Buffer.from(good);
+    bad[0] = bad[0]! ^ 1;
+    expect(verifiedSignatureCount({ commits, committerEmail: EMAIL, signatures: [bad], publicKeyHex: PUBLIC_HEX })).toBe(0);
   });
 });

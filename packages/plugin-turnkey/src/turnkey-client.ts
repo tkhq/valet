@@ -90,8 +90,10 @@ export interface TurnkeyOps {
     expirationSeconds: number;
   }): Promise<{ apiKeyId: string; activityId: string }>;
   deleteApiKeys(args: { subOrgId: string; userId: string; apiKeyIds: string[] }): Promise<void>;
-  /** Reads an activity in a sub-organization. The parent key stays a member after it leaves the root quorum. */
+  /** Reads an activity in a sub-organization. A parent organization can read its sub-organizations without being a member. */
   getActivity(args: { subOrgId: string; activityId: string }): Promise<TurnkeyActivity>;
+  /** The raw public key of a private key in a sub-organization, as hex. */
+  getPrivateKeyPublicHex(args: { subOrgId: string; privateKeyId: string }): Promise<string>;
 }
 
 /** The fields of a Turnkey activity that a passkey step checks. */
@@ -102,7 +104,7 @@ export interface TurnkeyActivity {
   type: string;
   /** `scheme` and `publicKey` name the credential that signed the vote; for a passkey, its WebAuthn key. */
   votes: Array<{ userId: string; selection: string; scheme?: string; publicKey?: string; createdAtMs?: number }>;
-  result?: { signRawPayloadResult?: { r: string; s: string } };
+  result?: { signRawPayloadResult?: { r: string; s: string }; createdPrivateKeyIds?: string[] };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -129,7 +131,12 @@ export function parseTurnkeyActivity(value: unknown): TurnkeyActivity | null {
     : [];
   const raw = isRecord(value.result) ? value.result.signRawPayloadResult : undefined;
   const sig = isRecord(raw) && typeof raw.r === "string" && typeof raw.s === "string" ? { r: raw.r, s: raw.s } : undefined;
-  return { id, organizationId, status, type, votes, ...(sig ? { result: { signRawPayloadResult: sig } } : {}) };
+  const created = isRecord(value.result) && isRecord(value.result.createPrivateKeysResultV2) ? value.result.createPrivateKeysResultV2.privateKeys : undefined;
+  const createdPrivateKeyIds = Array.isArray(created)
+    ? created.flatMap((k: unknown) => (isRecord(k) && typeof k.privateKeyId === "string" ? [k.privateKeyId] : []))
+    : undefined;
+  const result = { ...(sig ? { signRawPayloadResult: sig } : {}), ...(createdPrivateKeyIds ? { createdPrivateKeyIds } : {}) };
+  return { id, organizationId, status, type, votes, ...(Object.keys(result).length > 0 ? { result } : {}) };
 }
 
 /**
@@ -235,6 +242,10 @@ export function turnkeyOps(config: TurnkeyDeploymentConfig): TurnkeyOps {
     },
     async deleteApiKeys({ subOrgId, userId, apiKeyIds }) {
       await api.deleteApiKeys({ organizationId: subOrgId, userId, apiKeyIds });
+    },
+    async getPrivateKeyPublicHex({ subOrgId, privateKeyId }) {
+      const read = await api.getPrivateKey({ organizationId: subOrgId, privateKeyId });
+      return read.privateKey.publicKey;
     },
     async getActivity({ subOrgId, activityId }) {
       const res = await api.getActivity({ organizationId: subOrgId, activityId });

@@ -58,6 +58,11 @@ export function signingGateRequest(scope: SigningScope): DecisionGateRequest {
   };
 }
 
+/** One chain of commits to sign: the gate's resume key and the key of its stored signatures. */
+export function commitSigningResumeKey(repo: string, branch: string, headSha: string): string {
+  return `sign-commits:${repo}:${branch}:${headSha}`;
+}
+
 /**
  * The passkey gate for `turnkey.sign_commits`. Each approving step is a
  * passkey-stamped Turnkey signature, so the approve action is marked
@@ -67,7 +72,7 @@ export function commitSigningGateRequest(args: {
   repo: string;
   branch: string;
   headSha: string;
-  commits: Array<{ sha: string; subject: string; author: string }>;
+  commits: Array<{ sha: string }>;
   context: Record<string, unknown>;
 }): DecisionGateRequest {
   const n = args.commits.length;
@@ -81,7 +86,10 @@ export function commitSigningGateRequest(args: {
       { id: "approve", label: "Sign with passkey", style: "primary", approves: true },
       { id: "reject", label: "Reject", style: "danger" },
     ],
-    resumeKey: `sign-commits:${args.repo}:${args.branch}:${args.headSha}`,
+    resumeKey: commitSigningResumeKey(args.repo, args.branch, args.headSha),
+    // A rejection answers every later request for this branch in the same
+    // turn, so a looping agent cannot keep asking for taps.
+    dedupeKey: `sign-commits:${args.repo}:${args.branch}`,
     context: args.context,
   };
 }

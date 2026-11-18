@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import type { ReactNode } from "react";
 import type { GetCommitSigningResponse } from "@valet/api/wire";
 
 let signingData: GetCommitSigningResponse | undefined;
@@ -9,6 +10,14 @@ let signingError = false;
 const enrollMutateAsync = vi.fn();
 const createUserPasskey = vi.fn();
 
+vi.mock("@tanstack/react-router", () => ({
+  Link: ({ children, params: _params, search: _search, to: _to, ...rest }: { children: ReactNode; [key: string]: unknown }) => (
+    <a href="#" {...rest}>
+      {children}
+    </a>
+  ),
+}));
+
 vi.mock("~/api/commit-signing", () => ({
   useCommitSigning: () => ({
     data: signingData,
@@ -16,6 +25,7 @@ vi.mock("~/api/commit-signing", () => ({
     error: signingError ? new Error("boom") : null,
   }),
   useEnrollCommitSigning: () => ({ mutateAsync: enrollMutateAsync, isPending: false }),
+  useFinishCommitSigningKey: () => ({ mutateAsync: (b: unknown) => finishCommitSigningKey(b), isPending: false }),
 }));
 
 vi.mock("~/api/settings", () => ({
@@ -23,15 +33,31 @@ vi.mock("~/api/settings", () => ({
 }));
 
 const checkCommitSigningGithub = vi.fn();
+const finishCommitSigningKey = vi.fn();
+const getCommitSigningKeyStep = vi.fn();
+const stamp = vi.fn(async (body: string) => ({ stampHeaderName: "X-Stamp-WebAuthn", stampHeaderValue: `s:${body}` }));
 vi.mock("~/api/client", async (importOriginal) => ({
   ...(await importOriginal<typeof import("~/api/client")>()),
-  api: { checkCommitSigningGithub: () => checkCommitSigningGithub() },
+  api: {
+    checkCommitSigningGithub: () => checkCommitSigningGithub(),
+    finishCommitSigningKey: (b: unknown) => finishCommitSigningKey(b),
+    getCommitSigningKeyStep: () => getCommitSigningKeyStep(),
+  },
+}));
+vi.mock("@tanstack/react-query", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@tanstack/react-query")>()),
+  useQueryClient: () => ({ invalidateQueries: async () => undefined }),
 }));
 
 vi.mock("@turnkey/sdk-browser", () => ({
   Turnkey: class {
     passkeyClient() {
       return { createUserPasskey };
+    }
+  },
+  WebauthnStamper: class {
+    stamp(body: string) {
+      return stamp(body);
     }
   },
 }));
@@ -43,6 +69,7 @@ const configured: GetCommitSigningResponse = {
   enrolled: false,
   passkey: { apiBaseUrl: "https://api.turnkey.com", organizationId: "parent-org" },
   keys: [],
+  history: [],
 };
 
 beforeEach(() => {
@@ -55,7 +82,7 @@ beforeEach(() => {
 
 describe("CommitSigningSection", () => {
   it("names the deployment fix when signing is not configured", () => {
-    signingData = { configured: false, enrolled: false, keys: [] };
+    signingData = { configured: false, enrolled: false, keys: [], history: [] };
     render(<CommitSigningSection />);
     expect(screen.getByText(/not configured for this deployment/)).toBeTruthy();
     expect(screen.queryByRole("button")).toBeNull();
@@ -96,10 +123,11 @@ describe("CommitSigningSection", () => {
     expect(enrollMutateAsync).not.toHaveBeenCalled();
   });
 
-  it("lists the granted keys once enrolled", () => {
+  it("lists signing windows for a window-mode account", () => {
     signingData = {
       ...configured,
       enrolled: true,
+      mode: "session",
       subOrgId: "sub-1",
       enrolledAt: Date.parse("2026-09-12T10:00:00Z"),
       keys: [
@@ -128,6 +156,33 @@ describe("CommitSigningSection", () => {
     expect(screen.getByRole("button", { name: "Set up again" })).toBeTruthy();
   });
 
+  it("shows no windows list for a passkey-mode account", () => {
+    signingData = {
+      ...configured, enrolled: true, mode: "presence", subOrgId: "sub-1",
+      signingKey: { publicKey: "ssh-ed25519 AAAAkey", fingerprint: "SHA256:person" },
+      keys: [{ fingerprint: "SHA256:old", repo: "a/b", branch: "x", sessionId: "s", notBefore: 1, notAfter: 2, status: "closed" }],
+    };
+    render(<CommitSigningSection />);
+    expect(screen.queryByText("Signing windows")).toBeNull();
+  });
+
+  it("lists passkey-signed commits with their Turnkey activity and the approval thread", () => {
+    signingData = {
+      ...configured, enrolled: true, mode: "presence", subOrgId: "sub-1",
+      signingKey: { publicKey: "ssh-ed25519 AAAAkey", fingerprint: "SHA256:person" },
+      history: [{
+        repo: "tkhq/valet", branch: "valet/x", commits: [{ old: "a".repeat(40), new: "9d56a33".padEnd(40, "0") }],
+        signedAt: Date.parse("2026-11-18T14:52:55Z"), activityIds: ["01a1ef25-act"], sessionId: "child-1", threadId: "th-1",
+      }],
+    };
+    render(<CommitSigningSection />);
+    expect(screen.getByText("Signed commits")).toBeTruthy();
+    expect(screen.getByText("tkhq/valet · valet/x")).toBeTruthy();
+    expect(screen.getByRole("link", { name: "9d56a33" }).getAttribute("href")).toBe(`https://github.com/tkhq/valet/commit/${"9d56a33".padEnd(40, "0")}`);
+    expect(screen.getByText("01a1ef25-act")).toBeTruthy();
+    expect(screen.getByRole("link", { name: "approval" })).toBeTruthy();
+  });
+
   it("shows the person's key and checks GitHub from the modal", async () => {
     signingData = {
       ...configured,
@@ -144,5 +199,26 @@ describe("CommitSigningSection", () => {
     expect(screen.getByText("ssh-ed25519 AAAAkey")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Check GitHub" }));
     await waitFor(() => expect(screen.getByText(/Not on github.com\/octo yet/)).toBeTruthy());
+  });
+
+  it("has the new passkey create the signing key right after setup", async () => {
+    createUserPasskey.mockResolvedValue({
+      encodedChallenge: "chal",
+      attestation: { credentialId: "Y3JlZA", clientDataJson: "{}", attestationObject: "ao", transports: [] },
+    });
+    enrollMutateAsync.mockResolvedValue({ subOrgId: "sub", enrolledAt: 1, keyStep: { body: "create-key" } });
+    finishCommitSigningKey.mockResolvedValue({ subOrgId: "sub", enrolledAt: 2 });
+    render(<CommitSigningSection />);
+    fireEvent.click(screen.getByRole("button", { name: "Set up commit signing" }));
+    await waitFor(() => expect(finishCommitSigningKey).toHaveBeenCalledWith({ body: "create-key", stampHeaderName: "X-Stamp-WebAuthn", stampHeaderValue: "s:create-key" }));
+  });
+
+  it("offers Finish setup when the key step did not complete", async () => {
+    signingData = { ...configured, enrolled: true, pendingKey: true, subOrgId: "sub" };
+    getCommitSigningKeyStep.mockResolvedValue({ body: "retry-key" });
+    finishCommitSigningKey.mockResolvedValue({ subOrgId: "sub", enrolledAt: 2 });
+    render(<CommitSigningSection />);
+    fireEvent.click(screen.getByRole("button", { name: "Finish setup" }));
+    await waitFor(() => expect(finishCommitSigningKey).toHaveBeenCalledWith({ body: "retry-key", stampHeaderName: "X-Stamp-WebAuthn", stampHeaderValue: "s:retry-key" }));
   });
 });

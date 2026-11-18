@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { TurnkeyDeploymentConfig } from "./config.js";
-import { enrollUser } from "./enrollment.js";
+import { enrollUser, finishPresenceEnrollment, keyCreationBody, keyCreationRefusal, startPresenceEnrollment } from "./enrollment.js";
 import { EXPECTED_FINGERPRINT, EXPECTED_LINE, RAW_ED25519_HEX, fakeTurnkey } from "./test-helpers/fakes.js";
 
 const CONFIG: TurnkeyDeploymentConfig = {
@@ -84,5 +84,40 @@ describe("enrollUser", () => {
     );
     expect(parentGrant.condition).not.toContain("CREATE_PRIVATE_KEYS");
     expect(doc).toMatchObject({ mode: "session", agentUserId: "user-1", agentTagId: "utag-1", policyId: "policy-1" });
+  });
+});
+
+describe("presence enrollment", () => {
+  it("creates the organization with the passkey as its only root; the parent never joins", async () => {
+    const ops = fakeTurnkey();
+    const pending = await startPresenceEnrollment(ops, { userId: "user-1", passkey: PASSKEY, now: () => 5 });
+    expect(ops.calls.map((c) => c.op)).toEqual(["createSubOrganization", "listRootUsers"]);
+    const create = ops.calls[0]?.args as { rootUsers: Array<{ userName: string; apiKeys: unknown[] }> };
+    expect(create.rootUsers).toHaveLength(1);
+    expect(create.rootUsers[0]).toMatchObject({ userName: "passkey", apiKeys: [] });
+    expect(pending).toEqual({ subOrgId: "suborg-1", passkeyUserId: "passkey-user", mode: "presence", pendingKey: true, createdAt: 5 });
+  });
+
+  it("issues a key-creation body and refuses any other", () => {
+    const body = keyCreationBody("suborg-1", 1000);
+    expect(keyCreationRefusal(body, "suborg-1", 2000)).toBeNull();
+    expect(keyCreationRefusal(body, "suborg-2", 2000)).toContain("not the key creation step");
+    expect(keyCreationRefusal(body.replace("CURVE_ED25519", "CURVE_SECP256K1"), "suborg-1", 2000)).toContain("different key");
+    expect(keyCreationRefusal(body, "suborg-1", 1000 + 6 * 60_000)).toContain("too old");
+  });
+
+  it("records the key only from a completed activity the passkey approved", async () => {
+    const ops = fakeTurnkey();
+    const pending = { subOrgId: "suborg-1", passkeyUserId: "passkey-user", mode: "presence" as const, pendingKey: true as const, createdAt: 5 };
+    const activity = {
+      id: "act-9", organizationId: "suborg-1", status: "ACTIVITY_STATUS_COMPLETED", type: "ACTIVITY_TYPE_CREATE_PRIVATE_KEYS_V2",
+      votes: [{ userId: "passkey-user", selection: "VOTE_SELECTION_APPROVED" }], result: { createdPrivateKeyIds: ["pk-9"] },
+    };
+    const done = await finishPresenceEnrollment(ops, pending, activity, () => 7);
+    expect(done).toEqual({
+      subOrgId: "suborg-1", passkeyUserId: "passkey-user", mode: "presence", createdAt: 7,
+      signingKey: { privateKeyId: "pk-9", publicKeyHex: RAW_ED25519_HEX, publicKey: EXPECTED_LINE, fingerprint: EXPECTED_FINGERPRINT, activityId: "act-9" },
+    });
+    await expect(finishPresenceEnrollment(ops, pending, { ...activity, votes: [] })).rejects.toThrow("passkey");
   });
 });

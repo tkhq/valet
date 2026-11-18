@@ -29,7 +29,32 @@ export const COLLECTIONS = {
    * collected so far (`PresenceStepsDoc`). The api writes it between steps.
    */
   presenceSteps: "presence_steps",
+  /**
+   * Scope `session`, key = the sign_commits resume key (repo, branch, head
+   * commit): the verified signatures of a chain that was signed. A re-run on
+   * the same commits, for example after the sandbox was replaced before the
+   * push, reuses them instead of asking for the passkey again.
+   */
+  signedChains: "signed_chains",
+  /**
+   * Scope `user`, key `<sessionId>:<resume key>`: one row per passkey-signed
+   * chain (`SigningHistoryDoc`), listed in Settings, Commit signing.
+   */
+  signingHistory: "signing_history",
 } as const;
+
+/** One passkey-signed chain, for the person's signing history. */
+export interface SigningHistoryDoc {
+  repo: string;
+  branch: string;
+  /** Oldest first: each unsigned commit and the signed commit that replaced it. */
+  commits: Array<{ old: string; new: string }>;
+  signedAt: number;
+  /** One Turnkey activity per signed commit, in the same order. */
+  activityIds: string[];
+  sessionId: string;
+  threadId: string;
+}
 
 export interface PresenceStepsDoc {
   signatures: Array<{
@@ -72,8 +97,14 @@ export interface EnrollmentDoc {
   /** Absent on enrollments from before assurance modes existed. */
   mode?: ApprovalAssurance;
   signingKey?: PersonSigningKey;
-  /** Private key tag the signing key carries, named in the agent policy. */
-  signingTagId: string;
+  /**
+   * Presence setup is two steps: Valet creates the organization with the
+   * passkey as its only root, then the passkey creates the signing key.
+   * True between the two.
+   */
+  pendingKey?: true;
+  /** Private key tag the signing key carries, named in the agent policy. Session mode only. */
+  signingTagId?: string;
   /** `valet-agent`, holder of the session API keys. Session mode only. */
   agentUserId?: string;
   /** User tag on `valet-agent`, named in the allow policy. Session mode only. */

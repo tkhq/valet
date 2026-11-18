@@ -1331,6 +1331,9 @@ export const api = {
   getCommitSigning: () => request<GetCommitSigningResponse>("GET", "/me/commit-signing"),
   enrollCommitSigning: (body: PostCommitSigningEnrollRequest) =>
     request<PostCommitSigningEnrollResponse>("POST", "/me/commit-signing/enroll", body),
+  getCommitSigningKeyStep: () => request<{ body: string }>("GET", "/me/commit-signing/enroll/key-step"),
+  finishCommitSigningKey: (body: PresenceStepRequest) =>
+    request<PostCommitSigningEnrollResponse>("POST", "/me/commit-signing/enroll/key", body),
   checkCommitSigningGithub: () =>
     request<PostCommitSigningGithubCheckResponse>("POST", "/me/commit-signing/github-check"),
   getThreadProjects: (sessionId: string, expectedViewerId: string, signal?: AbortSignal) => request<ThreadProjectsResponse>("GET", `/me/thread-projects/${encodeURIComponent(sessionId)}?expectedViewerId=${encodeURIComponent(expectedViewerId)}`, undefined, signal),

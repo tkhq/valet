@@ -1,11 +1,13 @@
 import { useState } from "react";
-import { Turnkey } from "@turnkey/sdk-browser";
-import type { CommitSigningKeySummary, GetCommitSigningResponse } from "@valet/api/wire";
+import { Link } from "@tanstack/react-router";
+import { Turnkey, WebauthnStamper } from "@turnkey/sdk-browser";
+import { api } from "~/api/client";
+import type { CommitSigningHistoryEntry, CommitSigningKeySummary, GetCommitSigningResponse } from "@valet/api/wire";
 import { Badge, Button, Spinner } from "~/components/primitives";
 import { FieldRow } from "~/components/settings/field-row";
 import { errorText } from "~/lib/error-text";
-import { formatDateOr } from "~/lib/format-when";
-import { useCommitSigning, useEnrollCommitSigning } from "~/api/commit-signing";
+import { formatDateOr, formatDateTime } from "~/lib/format-when";
+import { useCommitSigning, useEnrollCommitSigning, useFinishCommitSigningKey } from "~/api/commit-signing";
 import { useMe } from "~/api/settings";
 import { SigningKeyModal } from "~/components/settings/signing-key-modal";
 
@@ -27,6 +29,7 @@ export function CommitSigningSection() {
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [keyOpen, setKeyOpen] = useState(false);
+  const finish = useFinishCommitSigningKey();
 
   if (signingQ.isLoading) {
     return (
@@ -54,6 +57,18 @@ export function CommitSigningSection() {
     );
   }
 
+  // Presence setup is two passkey prompts: create the passkey, then let it
+  // create your signing key, so Valet's server never holds authority in your
+  // Turnkey organization. If the second prompt fails, "Finish setup" retries it.
+  const finishKey = async (body: string, credentialId?: string) => {
+    const signed = await new WebauthnStamper({
+      rpId: data.passkey?.rpId ?? window.location.hostname,
+      userVerification: "required",
+      ...(credentialId ? { allowCredentials: [{ id: base64UrlToBytes(credentialId), type: "public-key" as const }] } : {}),
+    }).stamp(body);
+    await finish.mutateAsync({ body, ...signed });
+  };
+
   const onSetUp = async () => {
     const passkey = data.passkey;
     if (!passkey) return;
@@ -62,13 +77,41 @@ export function CommitSigningSection() {
     try {
       const email = meQ.data?.email ?? "valet user";
       const attestation = await createPasskey(passkey, email);
-      await enroll.mutateAsync(attestation);
+      const resp = await enroll.mutateAsync(attestation);
+      if (resp.keyStep) await finishKey(resp.keyStep.body, attestation.attestation.credentialId);
     } catch (err) {
       setError(errorText(err, "Could not set up commit signing. Try again."));
     } finally {
       setCreating(false);
     }
   };
+
+  const onFinish = async () => {
+    setError(null);
+    setCreating(true);
+    try {
+      const step = await api.getCommitSigningKeyStep();
+      await finishKey(step.body);
+    } catch (err) {
+      setError(errorText(err, "Could not create your signing key. Try again."));
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  if (data.pendingKey) {
+    return (
+      <FieldRow
+        label="Status"
+        hint="Your passkey has not created your signing key yet. Finish setup asks for your passkey once."
+        {...(error ? { error } : {})}
+      >
+        <Button type="button" disabled={creating} onClick={() => void onFinish()}>
+          {creating ? "Finishing…" : "Finish setup"}
+        </Button>
+      </FieldRow>
+    );
+  }
 
   if (!data.enrolled || data.needsReenroll) {
     return (
@@ -115,7 +158,9 @@ export function CommitSigningSection() {
           <SigningKeyModal open={keyOpen} onOpenChange={setKeyOpen} publicKey={data.signingKey.publicKey} />
         </FieldRow>
       )}
-      {data.keys.length > 0 && (
+      {/* Passkey mode has no windows: the key never expires and every push
+          asks for a tap. The list only exists for window (session) mode. */}
+      {data.mode === "session" && data.keys.length > 0 && (
         <FieldRow label="Signing windows" hint="Windows close at their end time.">
           <ul className="space-y-2 text-sm text-ink">
             {data.keys.slice(0, 10).map((key) => (
@@ -124,7 +169,50 @@ export function CommitSigningSection() {
           </ul>
         </FieldRow>
       )}
+      {data.history.length > 0 && (
+        <FieldRow label="Signed commits" hint="Each row is one passkey approval. The activity id finds the signature in your Turnkey organization.">
+          <ul className="space-y-3 text-sm text-ink">
+            {data.history.map((entry) => (
+              <SigningHistoryRow key={`${entry.sessionId}:${entry.commits[entry.commits.length - 1]?.new ?? ""}`} entry={entry} />
+            ))}
+          </ul>
+        </FieldRow>
+      )}
     </>
+  );
+}
+
+function SigningHistoryRow({ entry }: { entry: CommitSigningHistoryEntry }) {
+  return (
+    <li className="space-y-1">
+      <div className="flex flex-wrap items-center gap-x-2">
+        <span className="min-w-0 break-words">
+          {entry.repo} · {entry.branch}
+        </span>
+        <span className="text-xs text-muted">{formatDateTime(entry.signedAt)}</span>
+        <Link
+          to="/sessions/$sessionId"
+          params={{ sessionId: entry.sessionId }}
+          search={{ thread: entry.threadId }}
+          className="inline-flex min-h-11 items-center text-xs text-accent-600 underline sm:min-h-0"
+        >
+          approval
+        </Link>
+      </div>
+      {entry.commits.map((commit, i) => (
+        <div key={commit.new} className="text-xs text-muted">
+          <a
+            href={`https://github.com/${entry.repo}/commit/${commit.new}`}
+            target="_blank"
+            rel="noreferrer"
+            className="font-mono text-accent-600 underline"
+          >
+            {commit.new.slice(0, 7)}
+          </a>{" "}
+          · Turnkey activity <span className="break-all font-mono">{entry.activityIds[i] ?? "unknown"}</span>
+        </div>
+      ))}
+    </li>
   );
 }
 
@@ -177,4 +265,11 @@ async function createPasskey(
       transports: passkey.attestation.transports,
     },
   };
+}
+
+function base64UrlToBytes(value: string): Uint8Array<ArrayBuffer> {
+  const binary = atob(value.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(value.length / 4) * 4, "="));
+  const out = new Uint8Array(new ArrayBuffer(binary.length));
+  for (let i = 0; i < binary.length; i += 1) out[i] = binary.charCodeAt(i);
+  return out;
 }

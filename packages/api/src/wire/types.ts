@@ -1891,7 +1891,20 @@ export interface DecisionGate {
 
 export type PresenceGateView =
   | { kind: "challenge" }
-  | { kind: "git_commits"; repo: string; branch: string; commits: Array<{ sha: string; subject: string; author: string }> };
+  | { kind: "git_commits"; repo: string; branch: string; commits: PresenceCommitView[] };
+
+/** One commit on a passkey signing card. `source: "github"` means `url` shows the exact diff that gets signed. */
+export interface PresenceCommitView {
+  sha: string;
+  subject: string;
+  author: string;
+  source: "github" | "sandbox";
+  url?: string;
+  additions: number;
+  deletions: number;
+  files: Array<{ path: string; additions: number; deletions: number }>;
+  filesTotal: number;
+}
 
 export interface DecisionResolution {
   attachments?: Array<{ url: string; mimeType: string; name?: string }>;
@@ -7266,11 +7279,29 @@ export interface GetCommitSigningResponse {
   mode?: "session" | "presence";
   /** The enrollment predates per-person keys; the person must set up again. */
   needsReenroll?: boolean;
+  /** Setup created the organization but the passkey has not created the key yet. */
+  pendingKey?: boolean;
   /** The person's Valet signing key, to add to GitHub as a Signing Key. */
   signingKey?: { publicKey: string; fingerprint: string };
   /** Values the browser needs to create the passkey. */
   passkey?: { apiBaseUrl: string; organizationId: string; rpId?: string };
   keys: CommitSigningKeySummary[];
+  /** Passkey-signed commits, newest first, at most 50. */
+  history: CommitSigningHistoryEntry[];
+}
+
+/** One passkey approval: the commits it signed and the Turnkey activity behind each signature. */
+export interface CommitSigningHistoryEntry {
+  repo: string;
+  branch: string;
+  /** Oldest first: each unsigned commit and the signed commit that replaced it. */
+  commits: Array<{ old: string; new: string }>;
+  signedAt: number;
+  /** One Turnkey activity per signed commit, in the same order. */
+  activityIds: string[];
+  /** The thread that holds the approval card. */
+  sessionId: string;
+  threadId: string;
 }
 
 export interface CommitSigningKeySummary {
@@ -7299,6 +7330,8 @@ export interface PostCommitSigningEnrollRequest {
 export interface PostCommitSigningEnrollResponse {
   subOrgId: string;
   enrolledAt: number;
+  /** Presence mode: the key-creation request to stamp with the same passkey, then post to `/enroll/key`. */
+  keyStep?: { body: string };
 }
 
 /**

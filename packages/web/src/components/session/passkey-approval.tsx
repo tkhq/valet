@@ -78,11 +78,39 @@ export function PasskeyApproval({
           <p className="text-xs text-muted">
             {view.repo} · <span className="font-mono">{view.branch}</span>
           </p>
-          <ul className="space-y-1 text-xs">
+          <ul className="space-y-2 text-xs">
             {view.commits.map((commit) => (
-              <li key={commit.sha} className="flex min-w-0 gap-2">
-                <span className="shrink-0 font-mono text-muted">{commit.sha.slice(0, 7)}</span>
-                <span className="min-w-0 break-words text-ink">{commit.subject}</span>
+              <li key={commit.sha} className="min-w-0 space-y-0.5">
+                <div className="flex min-w-0 gap-2">
+                  <span className="shrink-0 font-mono text-muted">{commit.sha.slice(0, 7)}</span>
+                  <span className="min-w-0 break-words text-ink">{commit.subject}</span>
+                </div>
+                <div className="flex flex-wrap items-center gap-x-2 text-muted">
+                  <span>
+                    {commit.filesTotal} {commit.filesTotal === 1 ? "file" : "files"}, +{commit.additions} −{commit.deletions}
+                  </span>
+                  {commit.url ? (
+                    <a className="text-accent-600 underline" href={commit.url} target="_blank" rel="noreferrer">
+                      Review on GitHub
+                    </a>
+                  ) : (
+                    <span>Not pushed: these numbers come from the agent's sandbox.</span>
+                  )}
+                </div>
+                {commit.files.length > 0 && (
+                  <details className="text-muted">
+                    <summary className="cursor-pointer">Files</summary>
+                    <ul className="mt-1 space-y-0.5">
+                      {commit.files.map((file) => (
+                        <li key={file.path} className="flex min-w-0 gap-2">
+                          <span className="min-w-0 break-all font-mono">{file.path}</span>
+                          <span className="shrink-0">+{file.additions} −{file.deletions}</span>
+                        </li>
+                      ))}
+                      {commit.filesTotal > commit.files.length && <li>and {commit.filesTotal - commit.files.length} more</li>}
+                    </ul>
+                  </details>
+                )}
               </li>
             ))}
           </ul>

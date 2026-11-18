@@ -20,11 +20,25 @@
  */
 import { Type, type Static, type TSchema } from "typebox";
 import type { ActionPlugin, PluginAction, PluginActionContext, PluginActionResult, Sandbox } from "@valet/engine";
-import { commitAuthor, commitSubject, gitObjectId, planCommitChain, type SourceCommit } from "../commits.js";
+import {
+  commitAuthor,
+  commitObjectRefusal,
+  commitSubject,
+  gitObjectId,
+  planCommitChain,
+  verifiedSignatureCount,
+  type SourceCommit,
+} from "../commits.js";
 import { loadTurnkeyConfig, NOT_CONFIGURED_MESSAGE } from "../config.js";
-import { clampWindowMinutes, commitSigningGateRequest, signingGateRequest, type SigningScope } from "../gate.js";
+import { clampWindowMinutes, commitSigningGateRequest, commitSigningResumeKey, signingGateRequest, type SigningScope } from "../gate.js";
 import { githubAccount, publicSigningKeyListed, SIGNING_KEY_MISSING_MESSAGE, type GitHubAccount } from "../github-keys.js";
-import { GIT_COMMITS_KIND, presenceStepsKey, type GitCommitsSigningContext } from "../presence.js";
+import {
+  GIT_COMMITS_KIND,
+  MAX_CARD_FILES,
+  presenceStepsKey,
+  type CommitCardView,
+  type GitCommitsSigningContext,
+} from "../presence.js";
 import { disableSandboxSigning, enableSandboxSigning, generateSessionKey, shQuote } from "../sandbox.js";
 import {
   COLLECTIONS,
@@ -35,6 +49,7 @@ import {
   type PersonSigningKey,
   type PresenceStepsDoc,
   type SessionKeyDoc,
+  type SigningHistoryDoc,
   type SigningKeyDoc,
   type SigningKeyIndexDoc,
 } from "../store.js";
@@ -126,6 +141,37 @@ async function git(sandbox: Sandbox, path: string, command: string, what: string
   return res.stdout;
 }
 
+/** Parses `git diff-tree --numstat` lines: `added<TAB>deleted<TAB>path`, `-` for binary files. */
+export function parseNumstat(text: string): Array<{ path: string; additions: number; deletions: number }> {
+  return text
+    .split("\n")
+    .map((line) => line.split("\t"))
+    .filter((parts) => parts.length >= 3 && parts[2])
+    .map(([add, del, ...path]) => ({ path: path.join("\t"), additions: Number(add) || 0, deletions: Number(del) || 0 }));
+}
+
+/**
+ * The card's view of one commit. GitHub's view when GitHub already has the
+ * commit: the commit id fixes the content, so the person can review the real
+ * diff there. Otherwise the sandbox's own numstat, labeled as such.
+ */
+async function commitCard(sandbox: Sandbox, path: string, github: GitHubAccount, repo: string, commit: SourceCommit): Promise<CommitCardView> {
+  const base = { sha: commit.sha, subject: commitSubject(commit.object), author: commitAuthor(commit.object) };
+  const view = await github.commit(repo, commit.sha).catch(() => null);
+  if (view) {
+    return { ...base, source: "github", url: view.url, additions: view.additions, deletions: view.deletions, files: view.files.slice(0, MAX_CARD_FILES), filesTotal: view.files.length };
+  }
+  const files = parseNumstat(await git(sandbox, path, `git diff-tree --no-commit-id --numstat -r --root ${commit.sha}`, `listing files in ${commit.sha}`));
+  return {
+    ...base,
+    source: "sandbox",
+    additions: files.reduce((n, f) => n + f.additions, 0),
+    deletions: files.reduce((n, f) => n + f.deletions, 0),
+    files: files.slice(0, MAX_CARD_FILES),
+    filesTotal: files.length,
+  };
+}
+
 /** `/workspace/<name>` for `owner/name`, the path workspace prep clones into. */
 export function defaultRepoPath(repo: string): string {
   return `/workspace/${repo.split("/").pop() ?? repo}`;
@@ -177,8 +223,12 @@ export function buildTurnkeyActionPlugin(overrides: Partial<SigningDeps> = {}): 
         if (gitObjectId(object) !== sha) {
           return fail(`Commit ${sha} did not read back exactly (non-UTF-8 content?). Rewrite it, then run this again.`);
         }
+        const malformed = commitObjectRefusal(object);
+        if (malformed) return fail(`${sha} is not a plain git commit (${malformed}). Only commits can be signed.`);
         commits.push({ sha, object });
       }
+      const cards: CommitCardView[] = [];
+      for (const commit of commits) cards.push(await commitCard(ctx.sandbox, path, ready.github, repo, commit));
 
       const signing: GitCommitsSigningContext = {
         commits,
@@ -188,50 +238,86 @@ export function buildTurnkeyActionPlugin(overrides: Partial<SigningDeps> = {}): 
         subOrgId: ready.enrollment.subOrgId,
         passkeyUserId: ready.enrollment.passkeyUserId,
       };
-      const summaries = commits.map((c) => ({ sha: c.sha, subject: commitSubject(c.object), author: commitAuthor(c.object) }));
+      const writeChain = async (signatures: Buffer[]): Promise<{ head: string; commits: Array<{ old: string; new: string }> } | { error: string }> => {
+        const chain = { commits, committerEmail: signing.committerEmail, signatures, publicKeyHex: signing.publicKeyHex };
+        // Check every signature against the key before writing anything: the
+        // stored signatures are trusted only after they verify.
+        if (verifiedSignatureCount(chain) !== signatures.length) {
+          return { error: "A stored signature does not match your signing key. The branch was not changed. Ask the user to sign again in Valet." };
+        }
+        const plan = planCommitChain(chain);
+        if (plan.rewritten.length !== commits.length) {
+          return { error: `Only ${plan.rewritten.length} of ${commits.length} commits were signed. Ask the user to sign again in Valet.` };
+        }
+        for (const commit of plan.rewritten) {
+          const encoded = Buffer.from(commit.object, "utf8").toString("base64");
+          const written = (
+            await git(ctx.sandbox, path, `printf '%s' ${shQuote(encoded)} | base64 -d | git hash-object -t commit -w --stdin`, "writing a signed commit")
+          ).trim();
+          if (written !== commit.newSha) throw new Error(`git wrote ${written} for signed commit ${commit.newSha}; the branch was not moved.`);
+        }
+        const newHead = plan.rewritten[plan.rewritten.length - 1]!.newSha;
+        await git(ctx.sandbox, path, `git update-ref ${shQuote(`refs/heads/${branch}`)} ${newHead} ${headSha}`, "moving the branch");
+        return { head: newHead, commits: plan.rewritten.map((c) => ({ old: c.oldSha, new: c.newSha })) };
+      };
+      const signed = (written: { head: string; commits: Array<{ old: string; new: string }> }, reused: boolean) => ({
+        success: true as const,
+        data: {
+          ...written,
+          ...(reused ? { reused: true } : {}),
+          next: `${branch} now points at the signed commits. Push with: git push --force-with-lease origin ${branch}`,
+        },
+      });
+
+      // The person already approved these exact commits in this session, and
+      // the signatures still verify against their key: write them again
+      // without a new passkey prompt. A signature covers the exact commit
+      // bytes, so reuse cannot sign anything the person did not approve.
+      const chainsStore = ctx.pluginStore?.session(ctx.sessionId);
+      const chainKey = commitSigningResumeKey(repo, branch, headSha);
+      const stored = await chainsStore?.get<PresenceStepsDoc>(COLLECTIONS.signedChains, chainKey);
+      const storedSignatures = (stored?.doc.signatures ?? []).map((s) => Buffer.from(s.signatureHex, "hex"));
+      if (storedSignatures.length === commits.length) {
+        // writeChain verifies first; a signature from an older key falls through to a new gate.
+        const written = await writeChain(storedSignatures);
+        if (!("error" in written)) return signed(written, true);
+      }
+
       const request = commitSigningGateRequest({
         repo,
         branch,
         headSha,
-        commits: summaries,
+        commits: cards,
         context: {
           assurance: "presence",
-          presence: { kind: GIT_COMMITS_KIND, repo, branch, commits: summaries },
+          presence: { kind: GIT_COMMITS_KIND, repo, branch, commits: cards },
           signing,
         },
       });
       const resolution = await ctx.requestDecision(request);
       if (resolution.actionId !== "approve") return fail(REJECTED_MESSAGE);
-      if (resolution.assurance !== "presence" || resolution.gateOrdinal === undefined || !request.resumeKey) {
+      if (resolution.assurance !== "presence" || resolution.gateOrdinal === undefined) {
         return fail("The approval carried no passkey signatures. Ask the user to sign again in Valet.");
       }
 
-      const steps = await ctx.pluginStore
-        ?.session(ctx.sessionId)
-        .get<PresenceStepsDoc>(COLLECTIONS.presenceSteps, presenceStepsKey(request.resumeKey, resolution.gateOrdinal));
+      const steps = await chainsStore?.get<PresenceStepsDoc>(COLLECTIONS.presenceSteps, presenceStepsKey(chainKey, resolution.gateOrdinal));
       const signatures = (steps?.doc.signatures ?? []).map((s) => Buffer.from(s.signatureHex, "hex"));
-      const plan = planCommitChain({ commits, committerEmail: signing.committerEmail, signatures, publicKeyHex: signing.publicKeyHex });
-      if (plan.rewritten.length !== commits.length) {
-        return fail(`Only ${plan.rewritten.length} of ${commits.length} commits were signed. Ask the user to sign again in Valet.`);
+      const written = await writeChain(signatures);
+      if ("error" in written) return fail(written.error);
+      if (steps) {
+        await chainsStore?.put(COLLECTIONS.signedChains, chainKey, steps.doc);
+        const history: SigningHistoryDoc = {
+          repo,
+          branch,
+          commits: written.commits,
+          signedAt: deps.now(),
+          activityIds: steps.doc.signatures.map((s) => s.activityId),
+          sessionId: ctx.sessionId,
+          threadId: ctx.threadId,
+        };
+        await ctx.pluginStore?.user(ctx.userId).put(COLLECTIONS.signingHistory, `${ctx.sessionId}:${chainKey}`, history);
       }
-      for (const commit of plan.rewritten) {
-        const encoded = Buffer.from(commit.object, "utf8").toString("base64");
-        const written = (
-          await git(ctx.sandbox, path, `printf '%s' ${shQuote(encoded)} | base64 -d | git hash-object -t commit -w --stdin`, "writing a signed commit")
-        ).trim();
-        if (written !== commit.newSha) throw new Error(`git wrote ${written} for signed commit ${commit.newSha}; the branch was not moved.`);
-      }
-      const newHead = plan.rewritten[plan.rewritten.length - 1]!.newSha;
-      await git(ctx.sandbox, path, `git update-ref ${shQuote(`refs/heads/${branch}`)} ${newHead} ${headSha}`, "moving the branch");
-
-      return {
-        success: true,
-        data: {
-          commits: plan.rewritten.map((c) => ({ old: c.oldSha, new: c.newSha })),
-          head: newHead,
-          next: `${branch} now points at the signed commits. Push with: git push --force-with-lease origin ${branch}`,
-        },
-      };
+      return signed(written, false);
     },
   });
 

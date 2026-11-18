@@ -9,8 +9,9 @@ import { qkIntegrations } from "~/api/integrations";
 
 let teamId: string | undefined;
 vi.mock("~/api/commit-signing", () => ({
-  useCommitSigning: () => ({ data: { configured: false, enrolled: false, keys: [] }, isLoading: false, error: null }),
+  useCommitSigning: () => ({ data: { configured: false, enrolled: false, keys: [], history: [] }, isLoading: false, error: null }),
   useEnrollCommitSigning: () => ({ mutateAsync: vi.fn(), isPending: false }),
+  useFinishCommitSigningKey: () => ({ mutateAsync: vi.fn(), isPending: false }),
 }));
 
 vi.mock("~/lib/workspace-scope", async (importOriginal) => {

@@ -63,7 +63,7 @@ A passkey approval is a proof of presence: evidence that a person was present at
 Where each part of the authority stack does its job:
 
 - **Facts (policy information point):** Turnkey's completed activities are the trusted facts. Valet reads them back with the parent key. It does not trust the browser's account of what happened.
-- **Approvals verifier:** the passkey endpoint. It checks each activity's type, organization, passkey vote, and signature before it builds the approval. The engine accepts a `presence` approval only from this path.
+- **Approvals verifier:** two checks. The passkey endpoint checks each activity's type, organization, passkey vote, and signature before it builds the approval. Then, when any path resolves a `presence` gate, the engine calls the host's verifier (`ProviderBundle.verifyPresenceApproval`). It trusts nothing in the record: it reads every listed activity back from Turnkey, rebuilds the payload each step had to cover from the gate itself, and checks the vote, the signature, and the payload digest. A record written by any other path fails. A fully compromised api could replace this code too; the check protects against forged or corrupted records, not a hostile server.
 - **Records (decision log):** the engine persists the resolution, including the full approval object, on the gate. When the authorization contracts land, `ApprovalFact` carries `assurance` and the same `approval` object into the decision record. `ApprovalRequirement` and the `approval_tier` obligation gain an `assurance` member beside `tier`, so a policy can require a proof of presence at any tier.
 
 The contracts are not on `dev-v2` yet. This work ships the gate field, the engine check, the verifier, and the persisted approval on their own.
@@ -100,7 +100,17 @@ The key of the person who asked for the work signs: the author of the queue item
 
 ### One signing key per person, registered by the person
 
-Enrollment runs while Valet's parent key is a temporary root of the new sub-organization. It now also creates one Ed25519 private key with the `agent-signing` tag. That key is the person's Valet signing key. It replaces the per-approval keys. Valet creates it through the Turnkey API. The person does not run `tk`.
+Each person has one Ed25519 signing key. It replaces the per-approval keys and never expires: setup happens once, and the key lasts until the person deletes it on GitHub. The person does not run `tk`.
+
+In presence mode, setup never gives Valet's server authority in the person's sub-organization:
+
+1. The browser creates a passkey. The api creates the sub-organization with that passkey as its only root user. The parent key never joins it. A parent organization can still read its sub-organizations, which the endpoint and the verifier need, but cannot write to them.
+2. The api checks that the root quorum is exactly the passkey, records a pending enrollment, and returns an unsigned `CREATE_PRIVATE_KEYS_V2` body for one Ed25519 key named `valet-signing`.
+3. The browser stamps that body with the same passkey. The api checks the body is the one it issued, forwards it to Turnkey, checks the completed activity carries the passkey's vote, and records the key.
+
+Setup is two passkey prompts. If the second fails, Settings shows "Finish setup", which issues a fresh key-creation body. Setup needs a sign-in less than 15 minutes old, so a stolen session cannot enroll its own passkey for someone else.
+
+In session mode, the parent key is a temporary root during setup so it can create `valet-agent`, the tags, the key, and the policies. That mode trusts Valet's server at setup.
 
 After enrollment, Settings, Commit signing, shows a setup modal:
 
@@ -121,10 +131,19 @@ Add your Valet signing key to GitHub
 
 1. The agent commits without signing, then calls `turnkey.sign_commits` with the repository, the branch, and the base it branched from.
 2. The action reads the commits in `base..HEAD` from the sandbox with `git cat-file`. It refuses more than 10 commits with a message that names the fix: squash to fewer commits. It refuses SHA-256 object format repositories.
-3. The gate opens with `assurance: "presence"`. The card lists each commit: short id, subject, and author. The button reads "Sign with passkey".
-4. For each commit, oldest first, the browser stamps one `SIGN_RAW_PAYLOAD_V2` request. The payload is the `SSHSIG` signed-data blob for the commit object: namespace `git`, hash `sha512`.
-5. A commit object names its parent's hash, and signing changes that hash. So the api builds commit N+1 only after commit N is signed. The person taps once per commit. One commit per push means one tap.
-6. When the gate resolves, the action writes the signed objects into the sandbox with `git hash-object -w`, checks each hash against the one the api computed, and moves the branch with `git update-ref`. The agent force-pushes with lease.
+3. The action refuses anything that is not a well-formed commit object: `tree`, any `parent` lines, `author`, `committer`, then only `encoding`, `gpgsig`, or `mergetag`. Without this check a compromised sandbox could get a signature over a tag object, which git would accept as a signed tag.
+4. The gate opens with `assurance: "presence"`. The card lists each commit with its short id, subject, files changed, and line counts. If GitHub already has the commit, the counts come from GitHub and the card links to the commit there. The commit id fixes the content, so that page shows exactly what the signature covers. If the commit is not pushed, the counts come from the sandbox, and the card says so. The button reads "Sign with passkey".
+5. For each commit, oldest first, the browser stamps one `SIGN_RAW_PAYLOAD_V2` request. The payload is the `SSHSIG` signed-data blob for the commit object: namespace `git`, hash `sha512`.
+6. A commit object names its parent's hash, and signing changes that hash. So the api builds commit N+1 only after commit N is signed. The person taps once per commit. One commit per push means one tap.
+7. When the gate resolves, the action verifies every stored signature against the person's key, then writes the signed objects into the sandbox with `git hash-object -w`, checks each hash against the one the api computed, and moves the branch with `git update-ref`. The agent force-pushes with lease.
+
+A rejection answers every later signing request for the same branch in that turn, so a looping agent cannot keep asking for taps.
+
+The signed commits exist only in the sandbox until the agent pushes them. If the sandbox is replaced first, for example by an api restart, the agent checks out the pushed unsigned branch again and calls the action again. The action keeps the verified signatures of each signed chain in the plugin store (`signed_chains`, scope session, keyed by repository, branch, and head commit). On a call with the same commits it verifies them against the person's current key and writes them again without a gate. A signature covers the exact commit bytes, so reuse cannot sign anything the person did not approve. The rebuilt commits are byte-identical to the first ones. A signature from an older key fails the check, and the action opens a new gate. Reuse stays within one session.
+
+Each new passkey approval also adds a row to the person's signing history (`signing_history`, scope user): repository, branch, each unsigned commit and the signed commit that replaced it, the time, the Turnkey activity id of each signature, and the session and thread that hold the approval card. Settings, Commit signing lists the 50 newest rows. Each row links each signed commit to GitHub and the approval to its thread. The activity id finds the signature in the person's Turnkey organization, so the history can be checked without trusting Valet's record. A reused approval adds no row.
+
+Turnkey app proofs are not stored. The shipped design planned to store the `POLICY_OUTCOME` app proof of each signing activity. On 2026-11-18 Turnkey returned no app proofs for `SIGN_RAW_PAYLOAD_V2` activities: the activity's `appProofs` was empty, and `get_app_proofs` returned none. No other activity type in the parent or sub-organization had one either. If Turnkey adds them, the change is small. Read `appProofs` with the activity, check each with `verifyAppProofSignature` from `@turnkey/crypto`, and add them to each activity in the approval's `state`.
 
 The rewrite sets the committer email to the person's GitHub noreply address, read with their token (`GET /user`), as the shipped design does. It keeps the committer name and time, the author, the tree, and the message.
 
@@ -152,11 +171,13 @@ Sub-organizations from the shipped design have per-approval keys and an unscoped
 | --- | --- | --- | --- |
 | GitHub App credentials leak | With the write permission, adds its own key to every account and signs as anyone, forever. | No path. The app has no key permission. | Same as presence mode. |
 | Sandbox compromised (prompt injection, hostile repository code) | Holds the session key. Signs any bytes until the window ends. | Holds no Turnkey credential. Can ask for signatures, and each one needs the person's tap. | Same as shipped. |
-| Valet api, database, or parent key compromised | The parent key creates keys and API keys in any sub-organization. Signs as anyone, any time. | The parent key has no grant. The attacker needs a live tap for each signature. | The parent grant can add API keys to `valet-agent` only. The attacker opens windows at will. |
+| Valet api, database, or parent key compromised | The parent key creates keys and API keys in any sub-organization. Signs as anyone, any time. | The parent key was never a member of the sub-organization. A forged approval record fails the verifier. The attacker needs a live tap for each signature. | The parent grant can add API keys to `valet-agent` only. The attacker opens windows at will. |
+| Valet api compromised during a person's setup | Not relevant. | It chooses the root users when it creates the sub-organization, and could add its own. The api checks the quorum is exactly the passkey, but a compromised api could skip that. | It is a root during setup and can leave any policy behind. |
+| Stolen Valet session | Approves windows. | Cannot approve: approval needs the passkey. Cannot enroll a new passkey without a sign-in less than 15 minutes old. | Approves windows. |
 | Valet web app served by a compromised api | Not relevant. | Can show commit A and ask the passkey to stamp commit B. The passkey prompt does not show the payload. The attacker still needs a live tap and gets one signature per tap. | Not relevant. |
 | Turnkey sub-organization | Root is the person's passkey. | Unchanged. | Unchanged. |
 
-The last row is the remaining gap. Closing it needs an approval page that Valet does not serve, such as a Turnkey-hosted iframe that shows the payload, or `tk` on the person's own machine. That is future work.
+Two gaps remain, both needing a live attack on Valet's server or web app. The compromised web app row needs an approval page that Valet does not serve, such as a Turnkey-hosted iframe that shows the payload, or `tk` on the person's own machine. The setup row needs the person to confirm the root quorum from a surface Valet does not control. Both are future work. The card's GitHub link narrows the first gap for pushed commits: an honest page shows the real diff, and the commit id it names is the one the person approves.
 
 ## Approaches considered
 

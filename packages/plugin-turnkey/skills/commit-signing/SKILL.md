@@ -11,7 +11,7 @@ Most accounts sign each commit with the user's passkey. A few accounts use a sig
 
 ## Passkey mode (default): `turnkey.sign_commits`
 
-1. Finish the work and commit it normally. The user taps their passkey once per commit, so squash to as few commits as makes sense. The limit is 10.
+1. Finish the work and commit it normally. The user taps their passkey once per commit, so squash to as few commits as makes sense. The limit is 10. If the repository accepts unsigned pushes on this branch, push first: the card then links each commit's diff on GitHub, so the user can review exactly what they sign.
 2. Ask for signatures, naming where the branch starts:
 
 ```
@@ -22,6 +22,8 @@ call_tool turnkey.sign_commits params={"repo":"owner/name","branch":"my-branch",
 4. Push: `git push --force-with-lease origin my-branch`.
 
 Run `turnkey.sign_commits` again after any new commit you want signed.
+
+If the push fails because the branch is gone (`src refspec ... does not match any`), the sandbox was replaced after signing. Check out the pushed unsigned branch with `git fetch origin my-branch && git checkout -B my-branch origin/my-branch`, then call `turnkey.sign_commits` again. It reuses the user's approval for the same commits and asks for no new tap.
 
 ## Window mode: `turnkey.request_signing_key`
 
