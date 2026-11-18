@@ -71,7 +71,7 @@ describe('All release paths require CI', () => {
     expect(ci.getIn(['jobs', 'publish-cli', 'needs'])).toBe('ci');
     expect(ci.getIn(['jobs', 'publish-cli', 'if'])).toBe(ci.getIn(['jobs', 'publish', 'if']));
     expect(ci.getIn(['jobs', 'publish-cli', 'permissions', 'contents'])).toBe('write');
-    expect(cli.getIn(['jobs', 'publish', 'needs'])).toBe('binaries');
+    expect(cli.getIn(['jobs', 'publish', 'needs']).toJSON()).toEqual(['binaries', 'smoke-cross']);
     expect(cli.hasIn(['jobs', 'publish', 'if'])).toBe(false);
     const builds = cli.getIn(['jobs', 'binaries']);
     expect(String(builds)).not.toContain('gh release upload');
@@ -87,10 +87,12 @@ describe('All release paths require CI', () => {
     expect(steps).toContain('pnpm --filter @valet/web build');
     expect(steps).toContain('node packages/api/build/compile-binary.mjs');
     expect(steps).toContain('Smoke test (native target)');
-    expect(steps).toContain('/api/health');
+    expect(steps).toContain('scripts/smoke-binary.sh');
+    expect(readFileSync('scripts/smoke-binary.sh', 'utf8')).toContain('/api/health');
+    expect(String(cli.getIn(['jobs', 'smoke-cross', 'steps']))).toContain('scripts/smoke-binary.sh');
     expect(cli.getIn(['jobs', 'binaries', 'strategy', 'matrix', 'include', 0, 'smoke'])).toBe('valet-darwin-arm64');
     expect(cli.getIn(['jobs', 'binaries', 'strategy', 'matrix', 'include', 1, 'smoke'])).toBe('valet-linux-x64');
-    expect(cli.getIn(['jobs', 'publish', 'needs'])).toBe('binaries');
+    expect(cli.getIn(['jobs', 'publish', 'needs']).toJSON()).toEqual(['binaries', 'smoke-cross']);
   });
 
   it('requires shared checks before creating an application release or tag', () => {
