@@ -62,6 +62,26 @@ export interface AuthorizationResource {
   ownerId?: string;
 }
 
+/**
+ * How strong an approval is. `session`: a signed-in person clicked Approve.
+ * `presence`: a proof of presence that a third party verified, such as a
+ * passkey tap Turnkey checked. In AuthZEN terms a `presence` requirement is a
+ * `step-up` obligation with RFC 8176 `amr_values` `pop` and `user`.
+ */
+export type ApprovalAssurance = "session" | "presence";
+
+/**
+ * The approval object of the AuthZEN Access Request and Approval Profile
+ * (section 8.1). `state` is the verifier's proof, carried unchanged; the
+ * verifier checks its integrity, issuer, and binding before it trusts it.
+ */
+export interface AuthzenApprovalObject {
+  id: string;
+  approved_at: string;
+  approved_until: string;
+  state?: JsonValue;
+}
+
 /** A recorded human approval. It applies only to the request subject it names. */
 export interface ApprovalFact {
   resolutionId: string;
@@ -70,6 +90,10 @@ export interface ApprovalFact {
   effect: "approved" | "rejected";
   resolvedBy: string;
   resolvedAtMs: number;
+  /** Absent means `session`. */
+  assurance?: ApprovalAssurance;
+  /** The proof behind a `presence` approval, as an AuthZEN approval object. */
+  approval?: AuthzenApprovalObject;
 }
 
 export interface AuthorizationRequest {
@@ -88,7 +112,7 @@ export interface AuthorizationRequest {
 
 /** Work the enforcement point must do before it acts on an allow decision. */
 export type Obligation =
-  | { type: "approval_tier"; tier: string }
+  | { type: "approval_tier"; tier: string; assurance?: ApprovalAssurance }
   | { type: "credential_owner"; ownerType: string; ownerId: string }
   | { type: "egress_hosts"; hosts: string[] }
   | { type: "sandbox_capabilities"; capabilities: string[] }
@@ -101,6 +125,8 @@ export interface RedactionDirective {
 
 export interface ApprovalRequirement {
   tier: string;
+  /** The approval strength the requirement needs. Absent means `session`. */
+  assurance?: ApprovalAssurance;
   approverType: "user" | "team" | "org";
   approverId?: string;
   replay: "once" | "session" | "workflow";

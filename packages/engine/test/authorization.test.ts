@@ -6,7 +6,7 @@ import {
   routeAuthorizationSubject,
   workflowAuthorizationSubject,
 } from "../src/authorization/identity.js";
-import type { AuthorizationRequest, PolicyDecisionV1 } from "../src/authorization/types.js";
+import type { ApprovalAssurance, ApprovalFact, AuthorizationRequest, Obligation, PolicyDecisionV1 } from "../src/authorization/types.js";
 
 type IsAssignable<Value, Target> = Value extends Target ? true : false;
 
@@ -26,6 +26,28 @@ describe("authorization contracts", () => {
       >
     >().toEqualTypeOf<false>();
     expectTypeOf<IsAssignable<Omit<PolicyDecisionV1, "effect">, PolicyDecisionV1>>().toEqualTypeOf<false>();
+  });
+
+  it("carries a proof of presence as an AuthZEN approval object", () => {
+    const fact: ApprovalFact = {
+      resolutionId: "r1",
+      decisionDigest: "d",
+      requestSubjectDigest: "s",
+      effect: "approved",
+      resolvedBy: "u1",
+      resolvedAtMs: 1,
+      assurance: "presence",
+      approval: {
+        id: "apr_1",
+        approved_at: "2026-11-17T00:00:00.000Z",
+        approved_until: "2026-11-17T00:00:00.000Z",
+        state: { iss: "turnkey", amr: ["pop", "user"], activities: [{ activity_id: "act-1", payload_sha256: "ab" }] },
+      },
+    };
+    expect(fact.approval?.id).toBe("apr_1");
+    expectTypeOf<ApprovalAssurance>().toEqualTypeOf<"session" | "presence">();
+    expectTypeOf<IsAssignable<{ type: "approval_tier"; tier: "high"; assurance: "presence" }, Obligation>>().toEqualTypeOf<true>();
+    expectTypeOf<IsAssignable<{ type: "approval_tier"; tier: "high"; assurance: "biometric" }, Obligation>>().toEqualTypeOf<false>();
   });
 });
 
