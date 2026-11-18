@@ -143,6 +143,9 @@ const LOOKALIKES: readonly { id: string; make: (r: R) => string; render: (v: str
   { id: "camel-identifier", make: () => "handleSecretRequestAnswerRefusal", render: (v) => `rename ${v}` },
   { id: "secret-ref", make: () => "secret://personal/HCLOUD_TOKEN", render: (v) => `use ${v} for the deploy` },
   { id: "key-talk", make: () => "rotate", render: () => "can you rotate the api key and tell me when the new token is live?" },
+  // Reported from a live deployment: names next to a provider word were saved as keys.
+  { id: "branch-provider", make: () => "valet/passkey-pilot-2", render: (v) => `Pushed the signed commit to ${v}. Check origin/${v} on GitHub.` },
+  { id: "action-id", make: () => "turnkey.sign_commits", render: (v) => `${v} failed on the turnkey signing key step` },
 ];
 
 const PASSWORDS: readonly ((r: R) => string)[] = [
@@ -259,6 +262,8 @@ const HELD_OUT_LOOKALIKES: readonly { id: string; make: (r: R) => string; render
   { id: "github-run-url", make: (r) => `https://github.com/acme/app/actions/runs/${str(r, DIGITS, 11)}/job/${str(r, DIGITS, 11)}`, render: (v) => `CI failed: ${v}` },
   { id: "sha-in-sentence", make: (r) => str(r, HEXCH, 40), render: (v) => `cherry-pick ${v} onto main` },
   { id: "ens-name", make: () => "vitalik.eth", render: (v) => `resolve ${v}` },
+  { id: "ref-provider", make: () => "origin/release/stripe-webhooks-v2", render: (v) => `rebase onto ${v} before the stripe key rotation` },
+  { id: "dotted-call", make: () => "SecretStore.confirmIntake", render: (v) => `${v} timed out for the openai key` },
 ];
 
 /** A set built from held-out providers, templates, and look-alikes. */

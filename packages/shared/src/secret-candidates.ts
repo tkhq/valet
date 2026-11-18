@@ -81,6 +81,23 @@ function charClasses(value: string): number {
   return n;
 }
 
+/**
+ * One piece of a name made of words: `passkey`, `API`, `Sign`, `signCommits`,
+ * `SecretStore`, a short number (`2`, `2026`), or a version (`v1`). A random
+ * key's pieces mix letters and digits, so they never match.
+ */
+const WORD_PIECE = /^(?:[a-z]{1,14}|[A-Z]{1,10}|[A-Z][a-z]{1,14}|[A-Z]?[a-z]+(?:[A-Z][a-z]+)+|\d{1,4}|v\d{1,3})$/;
+
+/**
+ * A branch, ref, action id, dotted call, or constant made of words, such as
+ * `origin/valet/passkey-pilot-2`, `turnkey.sign_commits`, or
+ * `SecretStore.confirmIntake`. Never a key on its own.
+ */
+function isWordSegmented(value: string): boolean {
+  const pieces = value.split(/[/._:-]+/).filter(Boolean);
+  return pieces.length >= 2 && pieces.every((p) => WORD_PIECE.test(p));
+}
+
 /** A path made of ordinary words, such as `src/lib/secret-detect.ts`. */
 function isWordyPath(value: string): boolean {
   if (!WORDY_PATH.test(value)) return false;
@@ -170,6 +187,8 @@ export function findSecretCandidates(text: string, opts: { credentialRequested?:
     if (value.length < 16) continue;
     if (/^(?:ssh-(?:ed25519|rsa|dss)|ecdsa-sha2-)/.test(value) || /^AAAA[A-Za-z0-9+/]{60,}/.test(value)) continue;
     if (isWordyPath(value)) continue;
+    // A passphrase after "password is" may be words joined by dashes; keep it.
+    if (!passwordAhead && isWordSegmented(value)) continue;
     if (/^[a-z]+(?:[-_][a-z]+)+$/.test(value)) continue; // kebab or snake words
     if (MEDIA_PREFIX.test(value) || DIGEST_OR_VERSION.test(raw)) continue;
 

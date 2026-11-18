@@ -41,7 +41,7 @@ Intake catches such a key before the message is stored or reaches the agent, swa
 
 - A token is a run of non-space characters, cut at quotes, brackets, backticks and commas, with trailing sentence punctuation removed. `NAME=value` and `name: value` yield the value. A URL yields its password if it has one, and is otherwise skipped.
 - Shape: at least 16 characters; at least two character classes; Shannon entropy at least 3.0 bits per character.
-- Look-alikes that are not keys unless a credential word is nearby: hex-only strings (commit SHAs, hashes, transaction hashes), UUIDs, and base58 strings that look like crypto addresses. Never candidates: SSH and PEM public keys, `secret://` and `op://` references, file paths whose segments are words.
+- Look-alikes that are not keys unless a credential word is nearby: hex-only strings (commit SHAs, hashes, transaction hashes), UUIDs, and base58 strings that look like crypto addresses. Never candidates: SSH and PEM public keys, `secret://` and `op://` references, file paths whose segments are words, and names made only of word pieces split by `/ . _ - :` (branches such as `origin/valet/passkey-pilot-2`, action ids such as `turnkey.sign_commits`), unless a password word comes just before.
 - Context raises the score: a credential word within 40 characters before the token (key, token, secret, api, password, pat, credential, bearer, auth), or a provider name, or an open credential request in the thread.
 - Short passwords (8 to 15 characters) are candidates only right after a password word ("password is …", "pw: …").
 - Known provider formats from `detectSecrets` score highest and name the provider.

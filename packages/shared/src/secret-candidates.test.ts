@@ -65,4 +65,16 @@ describe("findSecretCandidates", () => {
     expect(shannonEntropy("aaaa")).toBe(0);
     expect(shannonEntropy("abcd")).toBe(2);
   });
+
+  it("leaves branch names, refs and action ids next to a provider word", () => {
+    // Reported from a live deployment, where each was saved as a key.
+    const text = "Pushed the signed commit to valet/passkey-pilot-2. Check origin/valet/passkey-pilot-2 on GitHub; turnkey.sign_commits wrote it.";
+    expect(findSecretCandidates(text)).toEqual([]);
+    expect(findSecretCandidates("the turnkey signing key is on branch valet/passkey-pilot-2")).toEqual([]);
+    expect(findSecretCandidates("SecretStore.confirmIntake timed out for the openai key")).toEqual([]);
+  });
+
+  it("still catches a dashed passphrase after a password word", () => {
+    expect(findSecretCandidates("password is correct-horse-battery-staple-9").map((c) => c.value)).toEqual(["correct-horse-battery-staple-9"]);
+  });
 });
