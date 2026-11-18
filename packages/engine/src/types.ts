@@ -2937,7 +2937,10 @@ export type ThreadAccessCheck = (req: {
   owner: Principal;
   orgId: string;
   reader: { id: string; key: string };
-  target: { id: string; key: string };
+  /** `sessionId` is set for a thread of another session of the workspace
+   * (`workspaceSessions`), whose audience the host reads from the
+   * conversation that owns that session. */
+  target: { id: string; key: string; sessionId?: string };
 }) => Promise<boolean>;
 
 export interface CreateSessionOptions {
@@ -2968,6 +2971,13 @@ export interface CreateSessionOptions {
    * audiences, such as a team runtime's private threads.
    */
   threadAccess?: ThreadAccessCheck;
+  /**
+   * The other sessions of this session's workspace. A team workspace runs
+   * each conversation in its own session, so `thread_read` and
+   * `list_threads` also read threads there. `threadAccess` still decides
+   * what each reader sees. Absent, they read only this session.
+   */
+  workspaceSessions?: () => Promise<string[]>;
   sandbox: Sandbox | SandboxCreateOpts;
   tools?: ToolDef[];
   /**

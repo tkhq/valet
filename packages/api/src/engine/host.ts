@@ -7,6 +7,7 @@ import type { ToolScope } from "@valet/shared";
 import { assistantMemoryNamespace, delegatedMemoryScope, memorySessionId } from "../services/memory-scope.js";
 import { NotFoundError } from "@valet/shared";
 import { assistantExecutions, sessionConfigInvalidations } from "../schema/index.js";
+import { workspaceSiblingSessions } from "../services/workspace-sessions.js";
 import { workspaceSenderIdentity } from "../services/workspace-sender.js";
 import { threadReadAccess } from "../services/thread-access.js";
 import { isWorkflowRunThread, workflowThreadContext } from "../workflows/editor-thread-context.js";
@@ -1480,7 +1481,7 @@ export class EngineHost {
             threadSystemContext: threadLink,
             ...this.wakeupsOptions(sessionId, () => builtSession, { orgId: meta.orgId, owner: principal }),
             ...this.leaseOptions(sessionId),
-            ...this.threadAccessOptions(),
+            ...this.threadAccessOptions(sessionId),
             ...this.threadFilesOptions(),
             ...timezoneOptions,
             ...(this.opts.db ? {
@@ -1522,7 +1523,7 @@ export class EngineHost {
           threadSystemContext: threadLink,
           ...this.wakeupsOptions(sessionId, () => builtSession, { orgId: meta.orgId, owner: principal }),
           ...this.leaseOptions(sessionId),
-          ...this.threadAccessOptions(),
+          ...this.threadAccessOptions(sessionId),
           ...this.threadFilesOptions(),
           ...timezoneOptions,
             ...(this.opts.db ? {
@@ -2159,10 +2160,15 @@ export class EngineHost {
   }
 
   /** Team runtime threads read only what their audience may see
-   * (`services/thread-access.ts`). */
-  private threadAccessOptions() {
+   * (`services/thread-access.ts`). With `sessionId`, `thread_read` and
+   * `list_threads` also reach the workspace's other conversation sessions. */
+  private threadAccessOptions(sessionId?: string) {
     const { db, engineCredentials, onePassword } = this.opts;
-    return db ? { threadAccess: threadReadAccess({ db, engineCredentials, onePassword }) } : {};
+    if (!db) return {};
+    return {
+      threadAccess: threadReadAccess({ db, engineCredentials, onePassword }),
+      ...(sessionId ? { workspaceSessions: () => workspaceSiblingSessions(db, sessionId) } : {}),
+    };
   }
 
   /** Durable thread downloads for plugin actions, the store `file_attach`
@@ -3360,7 +3366,7 @@ export class EngineHost {
       extractDocument: extractDocumentText,
       ...this.wakeupsOptions(sessionId, () => builtSession, { orgId: meta.orgId, owner: principal }),
       ...this.leaseOptions(sessionId),
-      ...this.threadAccessOptions(),
+      ...this.threadAccessOptions(sessionId),
       ...this.threadFilesOptions(),
             ...(this.opts.db ? {
               skillTelemetry: skillTelemetrySink(this.opts.db, meta.orgId),
@@ -4918,7 +4924,7 @@ export class EngineHost {
       extractDocument: extractDocumentText,
       ...this.wakeupsOptions(sessionId, () => builtSession),
       ...this.leaseOptions(sessionId),
-      ...this.threadAccessOptions(),
+      ...this.threadAccessOptions(sessionId),
       ...this.threadFilesOptions(),
             ...(this.opts.db ? {
               skillTelemetry: skillTelemetrySink(this.opts.db, opts.orgId),

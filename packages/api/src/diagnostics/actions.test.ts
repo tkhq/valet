@@ -333,6 +333,16 @@ describe("diagnostics.list_thread_outcomes", () => {
     expect(JSON.stringify(body)).not.toContain("Private ask");
   });
 
+  it("gives a member in the team's workspace the team's threads, with the team audience's view", async () => {
+    const body = data(await run({}, context("member", { owner: { type: "team", id: "team-1" } })));
+    expect(body.scope).toBe("team");
+    expect(threadIds(body)).toEqual(["t-team", "t-private"]);
+    // The transcript is shared with the team, so a private thread adds no text.
+    expect(JSON.stringify(body)).not.toContain("Private ask");
+    // A person off the team gets no team view from its workspace.
+    expect(await run({}, context("outsider", { owner: { type: "team", id: "team-2" } }))).toMatchObject({ success: false });
+  });
+
   it("filters by outcome, window and limit", async () => {
     expect(threadIds(data(await run({ outcomes: ["completed"] }, context("admin"))))).toEqual(["t-done"]);
     expect(threadIds(data(await run({ hours: 96, outcomes: ["failed"] }, context("admin"))))).toEqual(["t-admin", "t-private", "t-old"]);

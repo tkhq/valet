@@ -1,5 +1,6 @@
 import { intersectToolScopes, readToolScope, TOOL_SCOPE_KEY } from "@valet/shared";
-import { Thread, isItemDrivenInProcess, resolveModelId as resolveSessionModel } from "./thread.js";
+import { THREAD_BRANCHED_KEY, Thread, isItemDrivenInProcess, resolveModelId as resolveSessionModel } from "./thread.js";
+import { walkTranscriptDag } from "./compaction.js";
 import { uid } from "./ids.js";
 import { builtinTools, CHILD_EXCLUDED_TOOL_NAMES, WAKEUP_TOOL_NAMES } from "./builtin-tools/index.js";
 import { decideReconciliation, type ReconcileContext } from "./submission.js";
@@ -227,6 +228,10 @@ export interface ThreadInitialSettings {
    * before anyone can list the thread, such as where its content came from. */
   metadata?: Record<string, unknown>;
 }
+
+/** The most threads `thread_read` and `list_threads` read from the
+ * workspace's other sessions, newest first. */
+const WORKSPACE_THREADS_MAX = 200;
 
 export class Session {
   readonly id: string;
@@ -1802,21 +1807,51 @@ export class Session {
    * missing. */
   async readEntries(threadKey: string, opts?: MessageQuery, reader?: { id: string; key: string }): Promise<SessionEntry[]> {
     const t = (await this.threadByKey(threadKey)) ?? this.threadById(threadKey);
-    if (!t || (reader && !(await this.threadReadable(reader, t)))) return [];
-    return t.readEntries(opts);
+    if (t) {
+      if (reader && !(await this.threadReadable(reader, t))) return [];
+      return t.readEntries(opts);
+    }
+    // A sibling conversation of the workspace lives in its own session.
+    const siblings = await this.workspaceThreads();
+    const other = siblings.find((d) => d.id === threadKey)
+      ?? siblings.filter((d) => d.key === threadKey).sort((a, b) => b.updatedAt - a.updatedAt)[0];
+    if (!other || (reader && !(await this.threadReadable(reader, other)))) return [];
+    if (other.metadata?.[THREAD_BRANCHED_KEY] !== true || opts?.queueItemId !== undefined) {
+      return this.providers.store.getEntries(other.sessionId, other.id, opts);
+    }
+    // An edited thread keeps abandoned branches. Read its active path, as
+    // `Thread.readEntries` does.
+    const snapshot = await this.providers.store.getThreadSnapshot(other.sessionId, other.id);
+    if (!snapshot) return [];
+    let path = walkTranscriptDag(snapshot.entries, snapshot.thread.activeLeafEntryId);
+    if (opts?.includeCompacted === false) path = path.filter((entry) => entry.type !== "compaction");
+    return opts?.limit && opts.limit > 0 ? path.slice(-opts.limit) : path;
+  }
+
+  /** Threads of the workspace's other sessions (`CreateSessionOptions.workspaceSessions`),
+   * the WORKSPACE_THREADS_MAX most recently updated. */
+  private async workspaceThreads(): Promise<ThreadData[]> {
+    const ids = (await this.options.workspaceSessions?.().catch(() => [] as string[])) ?? [];
+    const others = ids.filter((id) => id !== this.id);
+    if (others.length === 0) return [];
+    const threads = await this.providers.store.listThreadsForSessions(others);
+    return threads.sort((a, b) => b.updatedAt - a.updatedAt).slice(0, WORKSPACE_THREADS_MAX);
   }
 
   /** Whether `reader` may see `target` (`CreateSessionOptions.threadAccess`). */
-  async threadReadable(reader: { id: string; key: string }, target: { id: string; key: string }): Promise<boolean> {
+  async threadReadable(reader: { id: string; key: string }, target: { id: string; key: string; sessionId?: string }): Promise<boolean> {
     const check = this.options.threadAccess;
     if (!check || reader.id === target.id) return true;
-    return check({ owner: this.principal, orgId: this.options.orgId, reader: { id: reader.id, key: reader.key }, target: { id: target.id, key: target.key } })
+    const foreign = target.sessionId !== undefined && target.sessionId !== this.id ? { sessionId: target.sessionId } : {};
+    return check({ owner: this.principal, orgId: this.options.orgId, reader: { id: reader.id, key: reader.key }, target: { id: target.id, key: target.key, ...foreign } })
       .catch(() => false);
   }
 
   /** The stored threads `reader` may see, for `list_threads`. */
   async readableThreads(reader: { id: string; key: string }): Promise<ThreadData[]> {
-    const datas = await this.providers.store.listThreads(this.id);
+    const own = await this.providers.store.listThreads(this.id);
+    const ownIds = new Set(own.map((d) => d.id));
+    const datas = [...own, ...(await this.workspaceThreads()).filter((d) => !ownIds.has(d.id))];
     const shown = await Promise.all(datas.map((d) => this.threadReadable(reader, d)));
     return datas.filter((_, i) => shown[i]);
   }

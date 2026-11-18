@@ -520,7 +520,7 @@ export const threadReadTool = defineTool({
   concurrencySafe: true,
   ownerOnly: true,
   description:
-    "Read recent messages from another thread in this session. Useful for cross-thread context (e.g. an orchestrator pulling notes from a worker thread, or a thread checking what a sibling has done). " +
+    "Read recent messages from another thread in this session or this workspace. Useful for cross-thread context (e.g. an orchestrator pulling notes from a worker thread, or a thread checking what a sibling has done). " +
     "Accepts a thread key, a thread id, or a Valet thread link a person pasted (`/threads/<id>`, or a chat link with `?thread=<id>`).",
   parameters: Type.Object({
     key: Type.String({ description: "Thread key (e.g. 'web:default', 'task:research'), thread id, or a pasted Valet thread link." }),
@@ -534,7 +534,7 @@ export const threadReadTool = defineTool({
     };
     const ref = threadReference(args.key);
     const entries = await ctx.threadRead(ref, opts);
-    if (entries.length === 0) return { text: `(thread "${ref}" has no messages, or is not a thread in this session)` };
+    if (entries.length === 0) return { text: `(thread "${ref}" has no messages, or is not a thread you can read in this workspace)` };
     return { text: renderEntries(`thread:${ref}`, entries) };
   },
 });
@@ -910,7 +910,7 @@ export const listThreadsTool = defineTool({
   concurrencySafe: true,
   ownerOnly: true,
   description:
-    "List sibling threads in this session, including paused ones. Use this " +
+    "List sibling threads in this session and this workspace, including paused ones. Use this " +
     "to discover thread keys before calling `thread_read`. Returns key, " +
     "status, model override (if any), and a short summary when available.",
   parameters: Type.Object({}),

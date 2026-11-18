@@ -41,6 +41,21 @@ export function sanitizeReceiptSubscriptions(value: unknown): ReceiptSubscriptio
 export function receiptWire(row: typeof eventReceipts.$inferSelect): EventReceiptWire {
   return { id: row.id, service: bounded(row.service), externalId: row.externalId === null ? null : bounded(row.externalId), metadata: sanitizeReceiptMetadata(row.metadata), stages: sanitizeReceiptStages(row.stages), subscriptions: sanitizeReceiptSubscriptions(row.subscriptions), eventKey: row.eventKey === null ? null : bounded(row.eventKey), eventId: row.eventId === null ? null : bounded(row.eventId), createdAt: row.createdAt, updatedAt: row.updatedAt };
 }
+/** The receipt metadata a member reads, as on Problems: where and what, not who. */
+const MEMBER_RECEIPT_METADATA_KEYS = ["channelId", "place", "rawType", "rawSubtype"] as const;
+
+/** A receipt as one workspace may read it: only its own lines' decisions,
+ * the metadata a member reads, and stages without detail, which can name
+ * another workspace's line. */
+export function receiptForOwner(receipt: EventReceiptWire, owner: { ownerType: string; ownerId: string }): EventReceiptWire {
+  return {
+    ...receipt,
+    externalId: null,
+    metadata: Object.fromEntries(MEMBER_RECEIPT_METADATA_KEYS.flatMap((key) => key in receipt.metadata ? [[key, receipt.metadata[key]!]] : [])),
+    stages: receipt.stages.map((stage) => ({ ...stage, detail: "" })),
+    subscriptions: receipt.subscriptions.filter((d) => d.ownerType === owner.ownerType && d.ownerId === owner.ownerId),
+  };
+}
 export async function createEventReceipt(db: AppDb, input: { orgId: string; service: string; externalId?: string; metadata?: Record<string, unknown> }): Promise<string | undefined> {
   try {
     const id = randomUUID(), now = Date.now();

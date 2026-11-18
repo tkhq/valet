@@ -257,4 +257,32 @@ describe("thread_read access", () => {
     expect((await session.readEntries("task:B", undefined, tB)).length).toBeGreaterThan(0);
     faux.unregister();
   });
+
+  it("reads a thread in another session of the workspace, as access allows", async () => {
+    // A team workspace runs each conversation in its own session.
+    const faux = registerFauxProvider({ provider: "thread-read-workspace" });
+    faux.setResponses([fauxAssistantMessage("sibling-reply"), fauxAssistantMessage("hidden-reply")]);
+    const { engine, events } = makeEngine();
+    const other = await engine.createSession({ userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel() });
+    const run = other.thread("sub:run-1");
+    await run.submitPrompt("event", {});
+    await waitFor(() => events.some((e) => e.threadId === run.id && e.event.type === "turn_end"));
+    const hidden = other.thread("app-assistant:u2:private");
+    await hidden.submitPrompt("private", {});
+    await waitFor(() => events.some((e) => e.threadId === hidden.id && e.event.type === "turn_end"));
+
+    const session = await engine.createSession({
+      userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: faux.getModel(),
+      workspaceSessions: async () => [other.id],
+      threadAccess: async ({ target }) => !target.key.startsWith("app-assistant:u2:"),
+    });
+    const reader = session.thread("web:default");
+    expect((await session.readEntries("sub:run-1", undefined, reader)).some((e) => JSON.stringify(e).includes("sibling-reply"))).toBe(true);
+    expect((await session.readEntries(run.id, undefined, reader)).length).toBeGreaterThan(0);
+    expect(await session.readEntries("app-assistant:u2:private", undefined, reader)).toEqual([]);
+    const keys = (await session.readableThreads(reader)).map((t) => t.key);
+    expect(keys).toContain("sub:run-1");
+    expect(keys).not.toContain("app-assistant:u2:private");
+    faux.unregister();
+  });
 });

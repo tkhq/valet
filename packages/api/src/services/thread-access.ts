@@ -689,8 +689,19 @@ export async function visibleThreadIds(
 export function threadReadAccess(deps: AccessDeps): ThreadAccessCheck {
   return async ({ owner, orgId, reader, target }) => {
     if (owner.type !== "team") return true;
-    const targetRecorded = await recordedChannelsById(deps.db, target.id);
     const person = privateThreadOwner(reader.key);
+    // A thread of another conversation session takes the audience of the
+    // conversation that owns that session, as the web reads it. An
+    // execution with no parent link has an unknown audience.
+    if (target.sessionId !== undefined) {
+      const governing = await governingThreadKey(deps.db, target.sessionId, target.id);
+      if (governing === null) return false;
+      if (governing !== target.key && isPersonalThreadKey(governing)) {
+        const ownerOfThread = privateThreadOwner(governing);
+        if (!person || ownerOfThread !== person) return false;
+      }
+    }
+    const targetRecorded = await recordedChannelsById(deps.db, target.id);
     if (person) {
       return threadVisibility(deps, { ownerType: "team" }, { orgId, userId: person })(
         { key: target.key, metadata: { [SLACK_CHANNELS_METADATA_KEY]: targetRecorded } });

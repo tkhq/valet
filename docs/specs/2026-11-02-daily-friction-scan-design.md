@@ -38,7 +38,8 @@ The person is the session's member. For a team session that a team run started, 
 
 - An organization admin in a private conversation reads the whole organization.
 - A team workflow run (`team:{id}`) reads the sessions that team owns.
-- Any other caller gets an error that names the corrective action. That includes a member, an admin in a conversation other people read, and an external Slack sender.
+- A team member in the team's workspace reads the same team view (2026-11-17). The transcript is shared with the team, so titles and excerpts come only from threads the whole team may read.
+- Any other caller gets an error that names the corrective action. That includes a member outside a team workspace, an admin in a conversation other people read, and an external Slack sender.
 
 The tool is read-only and writes nothing.
 

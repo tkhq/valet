@@ -5,6 +5,7 @@ import { ensureAssistantExecution, ensureDefaultAssistantSession } from "../assi
 import { linkIdentity } from "../channels/identity-links.js";
 import { slackChannelPrivacy } from "../schema/index.js";
 import { createTeam } from "./teams.js";
+import { workspaceSiblingSessions } from "./workspace-sessions.js";
 import { channelVisibility, cachedThreadVisibility, governingThreadKeySql, isAssistantConversationOf, privateThreadOwner, resetThreadAccessCache, runOriginVisible, sharedWithWholeTeamSql, SLACK_CHANNELS_METADATA_KEY, threadReadAccess, threadRef, threadSlackChannelsSql, threadVisibility, visibleThreadIds, visibleThreadRowsSql } from "./thread-access.js";
 import type { WireEvent } from "../wire/types.js";
 
@@ -560,3 +561,32 @@ it.each(["channel_not_found", "not_in_channel", "is_archived", "ratelimited", "i
     }
   },
 );
+
+it("reads another conversation session's thread by the audience of the conversation that owns it", async () => {
+  api = await bootTestApi();
+  const p = api.providers;
+  const t = await createTeam(p.db, { orgId: "local-org", name: "Sibling reads", creatorUserId: "local-user" });
+  const owner = { type: "team" as const, id: t.id };
+  const actor = { orgId: "local-org", actorUserId: "local-user" };
+  // A rule run and a member's private conversation each run in their own session.
+  const shared = await ensureAssistantExecution(p, owner, actor, "sub:rule-sib");
+  const sharedThread = await shared.session.createThread("sub:rule-sib");
+  const privateRun = await ensureAssistantExecution(p, owner, actor, "app-assistant:u2:conv");
+  // A workflow step thread inside the private conversation has a key that is not personal.
+  const step = await privateRun.session.createThread("signal:workflow:run-1:step");
+  const canRead = threadReadAccess(p);
+  const read = (readerKey: string, target: { id: string; key: string }, sessionId: string) =>
+    canRead({ owner, orgId: "local-org", reader: ref(readerKey), target: { ...target, sessionId } });
+
+  expect(await read("web:default", { id: sharedThread.id, key: "sub:rule-sib" }, shared.sessionId)).toBe(true);
+  // The step thread is private to u2, as its conversation is.
+  expect(await read("web:default", { id: step.id, key: "signal:workflow:run-1:step" }, privateRun.sessionId)).toBe(false);
+  expect(await read("app-assistant:u1:mine", { id: step.id, key: "signal:workflow:run-1:step" }, privateRun.sessionId)).toBe(false);
+  expect(await read("app-assistant:u2:other", { id: step.id, key: "signal:workflow:run-1:step" }, privateRun.sessionId)).toBe(true);
+  // A thread whose session cannot be traced has an unknown audience.
+  expect(await read("web:default", { id: "missing", key: "sub:rule-sib" }, "execution:missing")).toBe(false);
+  // The host names the workspace's other conversation sessions, not the reader's own.
+  const siblings = await workspaceSiblingSessions(p.db, shared.sessionId);
+  expect(siblings).toContain(privateRun.sessionId);
+  expect(siblings).not.toContain(shared.sessionId);
+});
