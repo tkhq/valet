@@ -112,7 +112,8 @@ export interface TurnkeySecretMetadata {
   secretId: string;
   name?: string;
   createdAtUnixMs: string;
-  staticProperties?: { key: string; value: string }[];
+  /** The SDK's `getSecrets` returns these as an object, not Turnkey's key-value pairs. */
+  staticProperties?: Record<string, string>;
 }
 
 /** Turnkey's name for the sealed-import encryption. */
@@ -363,7 +364,7 @@ export function createTurnkeySecretStore(
           name: s.name ?? "",
           id: s.secretId,
           createdAt: Number(s.createdAtUnixMs),
-          ...(s.staticProperties ? { labels: Object.fromEntries(s.staticProperties.map((p) => [p.key, p.value])) } : {}),
+          ...(s.staticProperties ? { labels: { ...s.staticProperties } } : {}),
         }));
     },
 

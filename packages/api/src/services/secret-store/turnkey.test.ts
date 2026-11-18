@@ -88,13 +88,10 @@ function fakeTurnkey() {
       calls.push({ who, method: "getSecrets", input: paginationOptions });
       const list = secrets.get(organizationId) ?? [];
       const start = paginationOptions.after ? list.findIndex((s) => s.secretId === paginationOptions.after) + 1 : 0;
-      // Turnkey returns static properties as key-value pairs.
+      // The SDK's getSecrets returns static properties as an object.
       return list
         .slice(start, start + Number(paginationOptions.limit))
-        .map(({ plaintext: _p, staticProperties, ...meta }) => ({
-          ...meta,
-          staticProperties: Object.entries(staticProperties).map(([key, value]) => ({ key, value })),
-        }));
+        .map(({ plaintext: _p, staticProperties, ...meta }) => ({ ...meta, staticProperties: { ...staticProperties } }));
     },
     async deleteSecrets({ organizationId, secretIds }) {
       calls.push({ who, method: "deleteSecrets", input: secretIds });
