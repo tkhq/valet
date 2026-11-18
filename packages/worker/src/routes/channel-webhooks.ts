@@ -6,6 +6,7 @@ import { channelRegistry } from '../channels/registry.js';
 import * as db from '../lib/db.js';
 import { getDb } from '../lib/drizzle.js';
 import { getCredential } from '../services/credentials.js';
+import { TELEGRAM_SECRET_HEADER, registerTelegramWebhook, telegramWebhookSecret } from '../services/telegram.js';
 import { dispatchOrchestratorPrompt } from '../services/orchestrator.js';
 import { recordWebhookDeliveryFireAndForget as recordDelivery } from '../lib/webhook-delivery.js';
 
@@ -23,15 +24,34 @@ function mapAttachments(message: InboundMessage) {
 
 // ─── Universal Webhook Route ─────────────────────────────────────────────────
 
+/** Compares two strings without leaking where they first differ. */
+function constantTimeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
+/**
+ * Users whose webhook this isolate has already re-registered with a secret.
+ * Bots connected before webhook secrets existed call without the header; the
+ * first such call re-registers the webhook with the secret and is refused,
+ * and Telegram retries it with the header. The set bounds that to one
+ * setWebhook per user per isolate.
+ */
+const telegramSecretBackfilled = new Set<string>();
+
 /**
  * POST /channels/:channelType/webhook/:userId
- * Universal webhook endpoint. Each channel transport handles parsing/verification.
+ * Webhook endpoint for Telegram bots. Slack has its own signed route
+ * (/channels/slack/events), so no other channel is accepted here: the user ID
+ * in the path is not a secret and cannot authenticate a caller.
  */
 channelWebhooksRouter.post('/:channelType/webhook/:userId', async (c) => {
   const channelType = c.req.param('channelType');
   const userId = c.req.param('userId');
 
-  const transport = channelRegistry.getTransport(channelType);
+  const transport = channelType === 'telegram' ? channelRegistry.getTransport(channelType) : undefined;
   if (!transport) {
     return c.json({ error: `Unknown channel type: ${channelType}` }, 404);
   }
@@ -45,6 +65,20 @@ channelWebhooksRouter.post('/:channelType/webhook/:userId', async (c) => {
   }
 
   const botToken = credResult.credential.accessToken;
+
+  const presented = c.req.header(TELEGRAM_SECRET_HEADER);
+  if (!presented) {
+    if (!telegramSecretBackfilled.has(userId)) {
+      telegramSecretBackfilled.add(userId);
+      const url = new URL(c.req.url);
+      await registerTelegramWebhook(c.env, userId, botToken, `${url.origin}${url.pathname}`);
+    }
+    return c.json({ error: 'Missing webhook secret' }, 401);
+  }
+  if (!constantTimeEqual(presented, await telegramWebhookSecret(c.env.ENCRYPTION_KEY, userId))) {
+    return c.json({ error: 'Invalid webhook secret' }, 401);
+  }
+
   const rawBody = await c.req.text();
   const rawHeaders: Record<string, string> = {};
   c.req.raw.headers.forEach((value, key) => {

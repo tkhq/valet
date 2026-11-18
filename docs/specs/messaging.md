@@ -195,20 +195,21 @@ interface InteractivePromptRef {
 
 **Endpoint:** `POST /channels/:channelType/webhook/:userId`
 
-All non-Slack channels use this single endpoint. The flow:
+Only Telegram uses this endpoint; any other `channelType` returns 404 (Slack has its own signed route). The flow:
 
 1. **Transport lookup:** Get `ChannelTransport` from channel registry by `channelType`.
 2. **Credential resolution:** Fetch user's credential for the channel type (bot token).
-3. **Channel-specific config:** For Telegram, fetch `userTelegramConfig` (owner ID, bot info).
-4. **Telegram pre-parse:** Parse raw body as JSON once. Handle `callback_query` before `parseInbound` (callback queries are structurally different from messages).
-5. **Parse inbound:** Call `transport.parseInbound()` to extract `InboundMessage`.
-6. **Owner verification (Telegram):** If `ownerTelegramUserId` is set, reject messages from non-owners.
-7. **Group filtering (Telegram):** In group/supergroup chats, only process commands and `@bot` mentions. Mention detection uses Telegram entity offsets against the raw text (not the formatted `message.text` from `parseInbound`).
-8. **Slash commands:** If `message.command` is set, delegate to `handleChannelCommand`.
-9. **Binding lookup:** Build scope key, look up channel binding in D1.
-10. **Thread resolution (Telegram):** Call `getOrCreateChannelThread` to map chat ID → orchestrator thread UUID.
-11. **Dispatch to bound session:** If binding exists, send `POST http://do/prompt` to the bound session's DO. On failure, re-resolve thread against orchestrator session before falling through.
-12. **Dispatch to orchestrator:** Call `dispatchOrchestratorPrompt` which saves the message to D1, ensures a channel binding exists, normalizes thread IDs, and sends to the orchestrator DO.
+3. **Webhook secret:** Require `X-Telegram-Bot-Api-Secret-Token` to equal the user's secret (HMAC of the user ID under `ENCRYPTION_KEY`, registered as `secret_token` on `setWebhook`). A wrong secret gets 401. A missing one gets 401 and, once per user per isolate, re-registers the webhook with the secret so bots connected before secrets existed recover on Telegram's retry.
+4. **Channel-specific config:** For Telegram, fetch `userTelegramConfig` (owner ID, bot info).
+5. **Telegram pre-parse:** Parse raw body as JSON once. Handle `callback_query` before `parseInbound` (callback queries are structurally different from messages).
+6. **Parse inbound:** Call `transport.parseInbound()` to extract `InboundMessage`.
+7. **Owner verification (Telegram):** If `ownerTelegramUserId` is set, reject messages from non-owners.
+8. **Group filtering (Telegram):** In group/supergroup chats, only process commands and `@bot` mentions. Mention detection uses Telegram entity offsets against the raw text (not the formatted `message.text` from `parseInbound`).
+9. **Slash commands:** If `message.command` is set, delegate to `handleChannelCommand`.
+10. **Binding lookup:** Build scope key, look up channel binding in D1.
+11. **Thread resolution (Telegram):** Call `getOrCreateChannelThread` to map chat ID → orchestrator thread UUID.
+12. **Dispatch to bound session:** If binding exists, send `POST http://do/prompt` to the bound session's DO. On failure, re-resolve thread against orchestrator session before falling through.
+13. **Dispatch to orchestrator:** Call `dispatchOrchestratorPrompt` which saves the message to D1, ensures a channel binding exists, normalizes thread IDs, and sends to the orchestrator DO.
 
 ### Slack Events Handler
 

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Hono } from 'hono';
 
 const {
@@ -50,6 +50,13 @@ vi.mock('../services/orchestrator.js', () => ({
 }));
 
 import { channelWebhooksRouter } from './channel-webhooks.js';
+import { TELEGRAM_SECRET_HEADER, telegramWebhookSecret } from '../services/telegram.js';
+
+const ENCRYPTION_KEY = 'test-encryption-key';
+let secret = '';
+beforeAll(async () => {
+  secret = await telegramWebhookSecret(ENCRYPTION_KEY, 'user-1');
+});
 
 function buildApp() {
   const app = new Hono();
@@ -98,6 +105,7 @@ describe('channelWebhooksRouter Telegram', () => {
         get: vi.fn(() => ({ fetch: doFetch })),
       },
       DB: {},
+      ENCRYPTION_KEY,
     };
     const executionCtx = { waitUntil: vi.fn((promise: Promise<unknown>) => promise) };
     getChannelBindingByScopeKeyMock.mockResolvedValue({
@@ -111,7 +119,7 @@ describe('channelWebhooksRouter Telegram', () => {
       '/telegram/webhook/user-1',
       {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: { 'content-type': 'application/json', [TELEGRAM_SECRET_HEADER]: secret },
         body: JSON.stringify({
           update_id: 1,
           callback_query: {
@@ -168,14 +176,14 @@ describe('channelWebhooksRouter Telegram', () => {
       sendMessage: vi.fn(),
     };
     getTransportMock.mockReturnValue(transport);
-    const env = { DB: {} };
+    const env = { DB: {}, ENCRYPTION_KEY };
     const executionCtx = { waitUntil: vi.fn((promise: Promise<unknown>) => promise) };
 
     const res = await app.request(
       '/telegram/webhook/user-1',
       {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: { 'content-type': 'application/json', [TELEGRAM_SECRET_HEADER]: secret },
         body: JSON.stringify({
           update_id: 2,
           message: {
@@ -214,5 +222,56 @@ describe('channelWebhooksRouter Telegram', () => {
       replyTo: { channelType: 'telegram', channelId: '12345' },
       scopeKey: 'user:user-1:telegram:12345',
     }));
+  });
+
+  describe('webhook authentication', () => {
+    const update = JSON.stringify({ update_id: 9, message: { message_id: 1, chat: { id: 1 }, from: { id: 1 }, text: 'hi' } });
+
+    function post(path: string, headers: Record<string, string>) {
+      return buildApp().request(
+        path,
+        { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: update },
+        { DB: {}, ENCRYPTION_KEY } as any,
+      );
+    }
+
+    it('rejects a call with the wrong secret before parsing it', async () => {
+      const parseInbound = vi.fn();
+      getTransportMock.mockReturnValue({ parseInbound });
+
+      const res = await post('/telegram/webhook/user-1', { [TELEGRAM_SECRET_HEADER]: 'forged' });
+
+      expect(res.status).toBe(401);
+      expect(parseInbound).not.toHaveBeenCalled();
+      expect(dispatchOrchestratorPromptMock).not.toHaveBeenCalled();
+    });
+
+    it('refuses a call without a secret and re-registers the webhook with one, once', async () => {
+      const parseInbound = vi.fn();
+      getTransportMock.mockReturnValue({ parseInbound });
+      const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => new Response(JSON.stringify({ ok: true }), { status: 200 }));
+      vi.stubGlobal('fetch', fetchMock);
+
+      const first = await post('/telegram/webhook/user-legacy', {});
+      const second = await post('/telegram/webhook/user-legacy', {});
+
+      expect(first.status).toBe(401);
+      expect(second.status).toBe(401);
+      expect(parseInbound).not.toHaveBeenCalled();
+      const setWebhookCalls = fetchMock.mock.calls.filter((call) => String(call[0]).endsWith('/setWebhook'));
+      expect(setWebhookCalls).toHaveLength(1);
+      const body = JSON.parse(String(setWebhookCalls[0][1]?.body));
+      expect(body).toEqual({
+        url: 'http://localhost/telegram/webhook/user-legacy',
+        secret_token: await telegramWebhookSecret(ENCRYPTION_KEY, 'user-legacy'),
+      });
+    });
+
+    it('does not accept Slack or other channels on the unsigned route', async () => {
+      const res = await post('/slack/webhook/user-1', { [TELEGRAM_SECRET_HEADER]: secret });
+
+      expect(res.status).toBe(404);
+      expect(getCredentialMock).not.toHaveBeenCalled();
+    });
   });
 });

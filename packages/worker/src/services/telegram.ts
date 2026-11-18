@@ -11,6 +11,46 @@ function botUrl(token: string, method: string): string {
   return `${TG_API}/bot${token}/${method}`;
 }
 
+/** Header Telegram sends with every webhook call once `secret_token` is set. */
+export const TELEGRAM_SECRET_HEADER = 'x-telegram-bot-api-secret-token';
+
+/**
+ * Per-user webhook secret. Telegram echoes it in TELEGRAM_SECRET_HEADER, which
+ * is the only proof a webhook call came from Telegram; the user ID in the
+ * webhook path is not a secret. Derived from ENCRYPTION_KEY, so nothing is
+ * stored. Hex output stays within Telegram's allowed characters.
+ */
+export async function telegramWebhookSecret(encryptionKey: string, userId: string): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(encryptionKey),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  );
+  const mac = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(`telegram-webhook:${userId}`));
+  return Array.from(new Uint8Array(mac), (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+/** Points the bot's webhook at `webhookUrl` with the user's secret token. */
+export async function registerTelegramWebhook(
+  env: Env,
+  userId: string,
+  botToken: string,
+  webhookUrl: string,
+): Promise<boolean> {
+  const secretToken = await telegramWebhookSecret(env.ENCRYPTION_KEY, userId);
+  const resp = await fetch(botUrl(botToken, 'setWebhook'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url: webhookUrl, secret_token: secretToken }),
+  });
+  if (!resp.ok) {
+    console.error('Failed to set Telegram webhook:', await resp.text().catch(() => ''));
+  }
+  return resp.ok;
+}
+
 // ─── Setup Telegram Bot ─────────────────────────────────────────────────────
 
 export type SetupTelegramResult =
@@ -61,14 +101,7 @@ export async function setupTelegramBot(
 
   // Register webhook with Telegram (new channel-based URL)
   const webhookUrl = `${workerUrl}/channels/telegram/webhook/${userId}`;
-  const webhookResp = await fetch(botUrl(trimmedToken, 'setWebhook'), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ url: webhookUrl }),
-  });
-  if (!webhookResp.ok) {
-    console.error('Failed to set Telegram webhook:', await webhookResp.text().catch(() => ''));
-  }
+  await registerTelegramWebhook(env, userId, trimmedToken, webhookUrl);
 
   // Register bot commands
   const tgCommands = SLASH_COMMANDS
