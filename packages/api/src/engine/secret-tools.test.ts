@@ -18,6 +18,7 @@ function fakeStore(saved: Set<string> = new Set()): SecretStoreService {
     remove: refuse,
     mayRead: refuse,
     read: refuse,
+    findForUse: refuse,
     exists: async (_actor, scope, name) => saved.has(`${scope.kind}:${name}`),
   };
 }
@@ -59,6 +60,40 @@ async function run(store: SecretStoreService, ctx: ToolContext) {
 }
 
 describe("request_secret", () => {
+  it("asks for a use-only secret when the agent names a header, and says how to call it", async () => {
+    const saved = new Set<string>();
+    const { ctx, gates } = context({
+      owner: { type: "user", id: "user-a" },
+      resolve: () => {
+        saved.add("personal:HETZNER_TOKEN");
+        return { actionId: "saved", value: "secret://personal/HETZNER_TOKEN", resolvedBy: "user-a", resolvedAt: 0 };
+      },
+    });
+    const [tool] = buildSecretTools({ secretStore: fakeStore(saved), useAvailable: true });
+    const result = await tool!.execute(
+      { name: "HETZNER_TOKEN", purpose: "Create a server.", sends_to: "api.hetzner.cloud", header: "Authorization", header_format: "Bearer {secret}" },
+      ctx,
+    );
+    expect(secretRequestOf(gates[0]!.context)?.use).toEqual({
+      hosts: ["api.hetzner.cloud"],
+      methods: [],
+      pathPrefixes: [],
+      header: "authorization",
+      format: "Bearer {secret}",
+    });
+    expect(gates[0]!.body).toContain("The agent never gets the value");
+    expect(result.text).toContain("valet-secrets http METHOD https://api.hetzner.cloud/PATH -H 'authorization: Bearer {{secret://personal/HETZNER_TOKEN}}'");
+  });
+
+  it("refuses a header without a use service, and a header without a bare host", async () => {
+    const { ctx, gates } = context({ owner: { type: "user", id: "user-a" } });
+    const [off] = buildSecretTools({ secretStore: fakeStore() });
+    expect((await off!.execute({ name: "K", purpose: "p", sends_to: "api.x.com", header: "x-api-key" }, ctx)).text).toContain("no secret use service");
+    const [on] = buildSecretTools({ secretStore: fakeStore(), useAvailable: true });
+    expect((await on!.execute({ name: "K", purpose: "p", sends_to: "https://api.x.com/v1", header: "x-api-key" }, ctx)).text).toContain("bare host");
+    expect(gates).toHaveLength(0);
+  });
+
   it("opens a card for a personal session and returns only the reference after a save", async () => {
     const saved = new Set<string>();
     const { ctx, gates } = context({

@@ -360,3 +360,47 @@ The product design for Turnkey secrets comes before this spec. The implementatio
 1. References use `secret://`, not `turnkey://`, and `op://` references to 1Password still resolve. The product design moves every secret to Turnkey in one release and rejects every other prefix. Valet keeps 1Password so that existing setups continue to work.
 2. There is no `pnpm valet turnkey import` command. Org admins save company secrets in Settings, Secrets.
 3. A personal sub-organization has no human root user. Its roots are `valet-root` and `valet-broker` at a 2-of-2 quorum. The product design left this choice to the implementation spec.
+
+## Using a secret without exporting it (2026-11-18)
+
+`valet-secrets run` gives the command the plaintext. A prompt-injected command can send it anywhere, and the api holds a key that can export any secret. A **use service** removes both: it runs in an attested enclave, fetches the secret from the secret store itself, makes the HTTPS call, and returns only the response. Valet never holds the value, and neither does the sandbox.
+
+### Use-only secrets
+
+A secret saved for the use service is **use-only**. The browser seals JSON instead of the bare value:
+
+```json
+{ "v": 1, "value": "…", "client": "<Valet's use-service public key>", "owner": "<owner>",
+  "rules": { "hosts": ["api.example.com"], "methods": [], "pathPrefixes": [], "header": "authorization", "format": "Bearer {secret}" } }
+```
+
+- The rules travel inside the sealed value, so Valet cannot change them. Changing them means saving the value again.
+- `owner` is `valet:<orgId>:user:<userId>`, `valet:<orgId>:team:<teamId>`, or `valet:<orgId>:company`, from the scope the secret is saved in.
+- The `scope` label is `use-personal`, `use-team` or `use-company`. Broker export policies require exactly `personal`, `team` or `company`, so they never match a use-only secret, and existing policies need no change. A Turnkey policy cannot test for a missing label: reading one makes the condition error, which denies. So a separate scope value, not an extra label, keeps the two apart.
+- The labels also add `use_via=use-service` plus display copies `use_hosts`, `use_header` and `use_format`. The use service enforces the sealed copy; the labels only drive the UI.
+- `read` refuses a use-only secret, and the broker's policies cannot export it, so `valet-secrets run` cannot export it.
+
+### The agent
+
+```sh
+valet-secrets http POST https://api.example.com/v1/x \
+  -H 'Authorization: Bearer {{secret://personal/EXAMPLE_KEY}}' -H 'content-type: application/json' -d @body.json
+```
+
+- One header holds a `{{secret://…}}` placeholder. The script removes that header and sends the reference with the rest of the request to `POST /api/sandbox-secrets/use`. The header name must match the secret's rule.
+- The route applies the same session rule as `/resolve` (`mayRead`), finds the secret, and forwards the request to the use service, stamped with the deployment's use-service key. The response body goes to stdout and `HTTP <status>` to stderr.
+- A refusal names the fix: the allowed host and header, or that the secret is not use-only.
+
+### The person
+
+- `request_secret` takes `use_host` and `use_header`. The card shows "Used with HOST in header HEADER" and saves a use-only secret. The agent names the host because it knows which API it will call; the person confirms it by saving. Valet never learns the host from a first use.
+- Settings, Secrets offers "Only for HOST" with a header picker (`Authorization: Bearer`, `x-api-key`, custom). The list shows each use-only secret's host and header.
+
+### Configuration
+
+`VALET_SECRET_USE_URL` and `VALET_SECRET_USE_CLIENT_KEY` (a P-256 private key, hex) turn it on. Unset leaves today's behavior. The secret store provider must let the use service export use-only secrets. For Turnkey, `VALET_TURNKEY_USE_SERVICE_PUBLIC_KEY` (from the use service's `/v1/keys`) makes each new personal sub-organization get a `valet-use-service` user and a policy that exports scope `use-personal` with the broker's owner checks. Sub-organizations created before need the same user and policy, added with both Valet keys. The deployment organization's root quorum adds the same user and a policy for `use-company` and `use-team`.
+
+### Limits
+
+- Whoever holds the use-service key and can name a secret can call its allowed host with it. Narrow rules reduce that.
+- Tools with their own HTTP stack (SDKs, `gh`) cannot use a placeholder. They keep `valet-secrets run` with a secret that is not use-only.

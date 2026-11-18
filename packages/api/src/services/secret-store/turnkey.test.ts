@@ -26,7 +26,7 @@ const CONFIG = {
   broker: { apiPublicKey: "02brok", apiPrivateKey: "p2" },
 };
 
-type Stored = TurnkeySecretMetadata & { plaintext: string; staticProperties: Record<string, string> };
+type Stored = Omit<TurnkeySecretMetadata, "staticProperties"> & { plaintext: string; staticProperties: Record<string, string> };
 
 /** One Turnkey shared by both fake clients; `calls` records who did what. */
 function fakeTurnkey() {
@@ -59,6 +59,10 @@ function fakeTurnkey() {
         ],
       };
     },
+    async createUsers(input) {
+      calls.push({ who, method: "createUsers", input });
+      return { userIds: ["u-use"] };
+    },
     async createPolicy(input) {
       calls.push({ who, method: "createPolicy", input });
       return { policyId: `pol-${calls.length}` };
@@ -84,7 +88,13 @@ function fakeTurnkey() {
       calls.push({ who, method: "getSecrets", input: paginationOptions });
       const list = secrets.get(organizationId) ?? [];
       const start = paginationOptions.after ? list.findIndex((s) => s.secretId === paginationOptions.after) + 1 : 0;
-      return list.slice(start, start + Number(paginationOptions.limit));
+      // Turnkey returns static properties as key-value pairs.
+      return list
+        .slice(start, start + Number(paginationOptions.limit))
+        .map(({ plaintext: _p, staticProperties, ...meta }) => ({
+          ...meta,
+          staticProperties: Object.entries(staticProperties).map(([key, value]) => ({ key, value })),
+        }));
     },
     async deleteSecrets({ organizationId, secretIds }) {
       calls.push({ who, method: "deleteSecrets", input: secretIds });
@@ -133,6 +143,39 @@ describe("Turnkey secret store", () => {
     expect(brokerPolicy!.condition).toContain("ACTIVITY_TYPE_EXPORT_SECRETS");
     expect(brokerPolicy!.condition).toContain("request_context['valet_session_owner_id'] == secret.static_properties['valet_owner_user_id']");
     expect(fake.calls[4]!.input).toEqual({ organizationId: "sub-1", threshold: 2, userIds: ["u-prov", "u-brok"] });
+  });
+
+  it("adds the use service user and a use-only export policy when its key is set, before the quorum rises", async () => {
+    const fake = fakeTurnkey();
+    const store = createTurnkeySecretStore({ ...CONFIG, useServicePublicKey: "03" + "c".repeat(64) }, { provisioner: fake.provisioner, broker: fake.broker });
+    await store.createPersonalSpace({ orgId: "o", userId: "u1" });
+    expect(fake.calls.map((c) => c.method)).toEqual([
+      "createSubOrganization",
+      "getUsers",
+      "createPolicy",
+      "createPolicy",
+      "createUsers",
+      "createPolicy",
+      "updateRootQuorum",
+    ]);
+    expect(fake.calls[4]!.input).toMatchObject({ organizationId: "sub-1", users: [{ userName: "valet-use-service", apiKeys: [{ publicKey: "03" + "c".repeat(64) }] }] });
+    const usePolicy = fake.calls[5]!.input as { consensus: string; condition: string };
+    expect(usePolicy.consensus).toContain("'u-use'");
+    expect(usePolicy.condition).toContain("secret.static_properties['scope'] == 'use-personal'");
+    // The broker's policy requires scope personal, so it can never export a use-only secret.
+    expect((fake.calls[3]!.input as { condition: string }).condition).toContain("secret.static_properties['scope'] == 'personal'");
+  });
+
+  it("refuses a malformed use service key", () => {
+    const env = {
+      VALET_TURNKEY_ORG_ID: "parent",
+      VALET_TURNKEY_PROVISIONER_API_PUBLIC_KEY: "pub1",
+      VALET_TURNKEY_PROVISIONER_API_PRIVATE_KEY: "priv1",
+      VALET_TURNKEY_BROKER_API_PUBLIC_KEY: "pub2",
+      VALET_TURNKEY_BROKER_API_PRIVATE_KEY: "priv2",
+    };
+    expect(() => turnkeyConfigFromEnv({ ...env, VALET_TURNKEY_USE_SERVICE_PUBLIC_KEY: "nothex" })).toThrow(/compressed P-256/);
+    expect(turnkeyConfigFromEnv({ ...env, VALET_TURNKEY_USE_SERVICE_PUBLIC_KEY: "02" + "a".repeat(64) }).useServicePublicKey).toBe("02" + "a".repeat(64));
   });
 
   it("reads the sub-organization id from the activity when the SDK names another result version", () => {

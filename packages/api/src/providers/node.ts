@@ -83,6 +83,7 @@ import { secretStoreProviderFromEnv } from "../services/secret-store/config.js";
 import { buildSecretTools } from "../engine/secret-tools.js";
 import { createCredentialKeyring, credentialCipher } from "../services/secret-store/credential-keys.js";
 import { createSecretStoreService, disabledSecretStore } from "../services/secret-store/service.js";
+import { secretUseServiceFromEnv } from "../services/secret-use.js";
 import { ServiceProbes } from "../plugins/service-probe.js";
 import { loadNodeModulesPlugins } from "../plugins/node-modules-loader.js";
 import { bundledPlugins } from "../plugins/registry.gen.js";
@@ -532,6 +533,11 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   const secretStore = secretStoreProvider
     ? createSecretStoreService({ db, provider: secretStoreProvider })
     : disabledSecretStore();
+  // Half-set use service variables throw here, at boot.
+  const secretUse = secretUseServiceFromEnv(process.env);
+  if (secretUse && !secretStoreProvider) {
+    throw new Error("VALET_SECRET_USE_URL needs a secret store. Set VALET_SECRET_STORE, or unset the use service variables.");
+  }
   // Owner keys for the credentials table (`services/secret-store/credential-keys.ts`).
   // With a secret store, reads accept owner-key ciphertext; writes use owner
   // keys only when VALET_CREDENTIAL_KEYS=secret-store.
@@ -616,7 +622,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
       if (!homeDepsRef) throw new Error("home tools invoked before provider wiring completed");
       return homeDepsRef;
     }),
-    ...(secretStore.enabled ? { secretTools: () => buildSecretTools({ secretStore }) } : {}),
+    ...(secretStore.enabled ? { secretTools: () => buildSecretTools({ secretStore, useAvailable: secretUse !== null }) } : {}),
     threadLinkTools: () => buildThreadLinkTools(() => {
       if (!homeDepsRef) throw new Error("thread link tools invoked before provider wiring completed");
       return homeDepsRef;
@@ -1052,6 +1058,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     storedCredentials,
     onePassword,
     secretStore,
+    secretUse,
     credentialCipher: baseCredentials.fieldCipher,
     engineHost,
     autoTitleHost,

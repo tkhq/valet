@@ -12,6 +12,7 @@ import { mintSandboxToken } from "../auth/sandbox-tokens.js";
 import { agentSessions, orgMembers, secretStoreSpaces, securityCells, securityEngagements, teamMembers, teams } from "../schema/index.js";
 import { SecretStoreError, type SecretLabels, type SecretStoreProvider } from "../services/secret-store/provider.js";
 import { createSecretStoreService, parseSecretReference, secretReference } from "../services/secret-store/service.js";
+import type { SecretUseRequest, SecretUseResult, SecretUseService, SecretUseTarget } from "../services/secret-use.js";
 
 let api: TestApi | undefined;
 afterEach(async () => {
@@ -55,7 +56,9 @@ function memoryProvider(opts: { failRead?: boolean } = {}) {
       return id;
     },
     async list(spaceId, prefix) {
-      return (spaces.get(spaceId) ?? []).filter((s) => s.name.startsWith(prefix)).map(({ name, createdAt }) => ({ name, createdAt }));
+      return (spaces.get(spaceId) ?? [])
+        .filter((s) => s.name.startsWith(prefix))
+        .map(({ name, createdAt, labels }) => ({ name, id: `${spaceId}:${name}`, createdAt, labels }));
     },
     async put(spaceId, { name, value, labels }) {
       store(spaceId, { name, value, labels, createdAt: Date.now() });
@@ -577,7 +580,7 @@ describe("/api/secrets", () => {
   it("reports the feature off when the deployment has no provider", async () => {
     api = await bootTestApi();
     const res = await fetch(`${api.baseUrl}/api/secrets`);
-    expect(await res.json()).toEqual({ enabled: false, provider: null, canWrite: false, secrets: [] });
+    expect(await res.json()).toEqual({ enabled: false, provider: null, canWrite: false, useAvailable: false, secrets: [] });
   });
 
   it("refuses a sandbox token", async () => {
@@ -609,5 +612,148 @@ describe("keys in answers to an agent's question", () => {
     expect(stored?.resolution?.value).toContain("here: secret://personal/OPENAI_API_KEY");
     expect(JSON.stringify(stored)).not.toContain(key);
     expect((await api!.providers.secretStore.list(as("local-user"), personal)).map((r) => r.name)).toEqual(["OPENAI_API_KEY"]);
+  });
+});
+
+describe("use-only secrets through the use service", () => {
+  const RULE = { hosts: ["api.example.com"], methods: [], pathPrefixes: [], header: "authorization", format: "Bearer {secret}" };
+  const post = (path: string, body: unknown) =>
+    fetch(`${api!.baseUrl}/api/secrets${path}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+
+  function fakeUseService(result?: SecretUseResult) {
+    const calls: { target: SecretUseTarget; request: SecretUseRequest }[] = [];
+    const service: SecretUseService = {
+      clientPublicKey: "02".padEnd(66, "a"),
+      async use(target, request) {
+        calls.push({ target, request });
+        return result ?? { ok: true, status: 200, headers: [["content-type", "application/json"]], body: Buffer.from('{"ok":true}').toString("base64"), receipt: { payload: "{}", publicKey: "04", signature: "30" } };
+      },
+    };
+    return { service, calls };
+  }
+
+  async function bootWithUse(result?: SecretUseResult) {
+    const fake = await bootWithStore();
+    const use = fakeUseService(result);
+    api!.providers.secretUse = use.service;
+    return { fake, use };
+  }
+
+  async function useCall(token: string, body: unknown) {
+    return fetch(`${api!.baseUrl}/api/sandbox-secrets/use`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-valet-sandbox": token },
+      body: JSON.stringify(body),
+    });
+  }
+  const call = (reference: string, header = "authorization") => ({
+    reference,
+    header,
+    request: { method: "GET", url: "https://api.example.com/v1/me", headers: { accept: "application/json" }, body: "" },
+  });
+
+  it("hands the browser the client key, owner and rule to seal, and labels the secret use-only", async () => {
+    const { fake } = await bootWithUse();
+    const begin = await post("/import/begin", { scope: "personal", name: "HETZNER", use: { hosts: ["API.Example.com"], header: "Authorization", format: "Bearer {secret}" } });
+    expect(begin.status).toBe(200);
+    const { envelope } = (await begin.json()) as { envelope: { use: { client: string; owner: string; rules: typeof RULE } } };
+    expect(envelope.use).toEqual({ client: "02".padEnd(66, "a"), owner: "valet:local-org:user:local-user", rules: RULE });
+    const finish = await post("/import/finish", { scope: "personal", name: "HETZNER", sealed: seal("sealed-json"), use: RULE });
+    expect(finish.status).toBe(201);
+    expect((await finish.json()) as unknown).toMatchObject({ use: { hosts: ["api.example.com"], header: "authorization", format: "Bearer {secret}" } });
+    expect([...fake.spaces.values()].flat()[0]!.labels).toMatchObject({
+      scope: "use-personal",
+      use_via: "use-service",
+      use_hosts: "api.example.com",
+      use_header: "authorization",
+      use_format: "Bearer {secret}",
+    });
+    const list = (await (await fetch(`${api!.baseUrl}/api/secrets?scope=personal`)).json()) as { useAvailable: boolean; secrets: { use?: unknown }[] };
+    expect(list.useAvailable).toBe(true);
+    expect(list.secrets[0]!.use).toEqual({ hosts: ["api.example.com"], header: "authorization", format: "Bearer {secret}" });
+  });
+
+  it("refuses a malformed rule, and any rule when no use service is set", async () => {
+    await bootWithUse();
+    for (const use of [{ hosts: ["https://api.example.com/x"], header: "authorization" }, { hosts: ["api.example.com"], header: "Host" }, { hosts: ["api.example.com"], header: "x", format: "no placeholder" }]) {
+      expect((await post("/import/begin", { scope: "personal", name: "K", use })).status).toBe(400);
+    }
+    api!.providers.secretUse = null;
+    const res = await post("/import/begin", { scope: "personal", name: "K", use: RULE });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toContain("no secret use service");
+  });
+
+  it("forwards a use with the provider ids, owner and session context, and returns the response", async () => {
+    const { use } = await bootWithUse();
+    await post("/import/finish", { scope: "personal", name: "HETZNER", sealed: seal("sealed-json"), use: RULE });
+    const token = await userSession("sess-use", "local-user");
+    const res = await useCall(token, call("secret://personal/HETZNER"));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { status: number; body: string; receipt: unknown };
+    expect(body.status).toBe(200);
+    expect(Buffer.from(body.body, "base64").toString()).toBe('{"ok":true}');
+    expect(use.calls).toHaveLength(1);
+    const { target, request } = use.calls[0]!;
+    expect(target.owner).toBe("valet:local-org:user:local-user");
+    expect(target.secretId).toBe(`${target.spaceId}:personal/HETZNER`);
+    expect(target.context).toMatchObject({ valet_session_id: "sess-use", valet_session_owner_type: "user", valet_user_id: "local-user" });
+    expect(request).toEqual({ method: "GET", url: "https://api.example.com/v1/me", headers: { accept: "application/json" }, body: "" });
+  });
+
+  it("names the right header when the placeholder sits in another one", async () => {
+    const { use } = await bootWithUse();
+    await post("/import/finish", { scope: "personal", name: "HETZNER", sealed: seal("sealed-json"), use: RULE });
+    const token = await userSession("sess-hdr", "local-user");
+    const res = await useCall(token, call("secret://personal/HETZNER", "x-api-key"));
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toContain("authorization header");
+    expect(use.calls).toHaveLength(0);
+  });
+
+  it("refuses to export a use-only secret through run, and refuses use for an ordinary secret", async () => {
+    const { use } = await bootWithUse();
+    await post("/import/finish", { scope: "personal", name: "USE_ONLY", sealed: seal("sealed-json"), use: RULE });
+    await api!.providers.secretStore.saveValue(as("local-user"), personal, "PLAIN", "plain-value");
+    const token = await userSession("sess-mix", "local-user");
+    const resolved = await resolve(["secret://personal/USE_ONLY"], token);
+    expect(resolved.status).toBe(403);
+    const refusal = await resolved.text();
+    expect(refusal).not.toContain("sealed-json");
+    expect(refusal).toContain("valet-secrets http");
+    const plain = await useCall(token, call("secret://personal/PLAIN"));
+    expect(plain.status).toBe(400);
+    expect(((await plain.json()) as { error: string }).error).toContain("valet-secrets run");
+    expect(use.calls).toHaveLength(0);
+  });
+
+  it("applies the session rule: another user's session cannot use a personal secret", async () => {
+    const { use } = await bootWithUse();
+    await post("/import/finish", { scope: "personal", name: "HETZNER", sealed: seal("sealed-json"), use: RULE });
+    const token = await userSession("sess-other", "user-b");
+    const res = await useCall(token, call("secret://personal/HETZNER"));
+    expect(res.status).toBe(404);
+    expect(use.calls).toHaveLength(0);
+  });
+
+  it("passes the use service's refusal status and message through", async () => {
+    await bootWithUse({ ok: false, httpStatus: 403, error: "host_not_allowed", message: "This secret can only be used with api.example.com." });
+    await post("/import/finish", { scope: "personal", name: "HETZNER", sealed: seal("sealed-json"), use: RULE });
+    const token = await userSession("sess-refused", "local-user");
+    const res = await useCall(token, call("secret://personal/HETZNER"));
+    expect(res.status).toBe(403);
+    expect((await res.json()) as unknown).toEqual({ error: "This secret can only be used with api.example.com.", code: "host_not_allowed" });
+  });
+
+  it("shows where a use-only secret goes in find", async () => {
+    await bootWithUse();
+    await post("/import/finish", { scope: "personal", name: "HETZNER", sealed: seal("sealed-json"), use: RULE });
+    const token = await userSession("sess-find", "local-user");
+    const res = await fetch(`${api!.baseUrl}/api/sandbox-secrets/find`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-valet-sandbox": token },
+      body: JSON.stringify({ query: "*" }),
+    });
+    expect(await res.text()).toBe("saved\tsecret://personal/HETZNER\tuse api.example.com authorization");
   });
 });

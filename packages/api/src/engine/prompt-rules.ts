@@ -117,6 +117,8 @@ If it reports that nothing resolved, name the failing reference to the user and 
 
 Secrets saved in Settings, Secrets use secret://company/NAME, secret://team/TEAM_ID/NAME, and secret://personal/NAME. A personal secret resolves only in its owner's personal session. A team session reads its team's and the company's secrets.
 
+A saved secret that find lists with "use HOST HEADER" is use-only: no command can receive it. Call that host with valet-secrets http METHOD URL -H 'HEADER: {{secret://scope/NAME}}' [-d DATA|@FILE], and use the header's form, such as Bearer {{...}}. Only the response comes back. When you ask for a new API key, prefer request_secret with sends_to set to the bare host and header set to the header it goes in.
+
 Run valet-secrets find <name> when you know what the credential is called but not where it lives. It searches saved secrets and the vaults the session can read, and prints matching references, one per line, tagged saved or with the 1Password scope. Run valet-secrets find '*' to list every saved secret this session can read. When the person describes a secret loosely, such as "my test key", list them and choose by name. Ask only when two names fit. find never prints a value. Use a hit from find as the reference for run.
 
 valet-secrets is the only way to reach a secret here. Never invent a reference to test access: a guessed op:// path fails exactly like a real one you cannot reach, so the result tells you nothing. Ask for the name only after find has come back with nothing.`;

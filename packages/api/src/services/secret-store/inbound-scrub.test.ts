@@ -26,6 +26,7 @@ function fakeStore(opts: { failSave?: boolean; existing?: string[] } = {}) {
     exists: refuse,
     mayRead: refuse,
     read: refuse,
+    findForUse: refuse,
   };
   return { store, saved };
 }

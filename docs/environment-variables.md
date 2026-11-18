@@ -294,6 +294,7 @@ Required when `VALET_SECRET_STORE=turnkey`. A missing value stops the api at boo
 | `VALET_TURNKEY_PROVISIONER_API_PUBLIC_KEY` / `VALET_TURNKEY_PROVISIONER_API_PRIVATE_KEY` | The P-256 API key of the ordinary user `valet-root`. It creates sub-organizations and imports or deletes secrets. Store it like `VALET_ENCRYPTION_KEY`. |
 | `VALET_TURNKEY_BROKER_API_PUBLIC_KEY` / `VALET_TURNKEY_BROKER_API_PRIVATE_KEY` | The P-256 API key of the ordinary user `valet-broker`. It exports secrets. It must differ from the provisioner key. |
 | `VALET_TURNKEY_API_BASE_URL` | Optional. Turnkey API URL. Default `https://api.turnkey.com`. |
+| `VALET_TURNKEY_USE_SERVICE_PUBLIC_KEY` | Optional. The secret use service's Turnkey API public key, from its `/v1/keys`. Each new personal sub-organization then gets a `valet-use-service` user and a policy that exports only use-only secrets (scope `use-personal`). |
 
 Neither user is a Turnkey root. A person with root authority in the organization runs the bootstrap once:
 
@@ -326,6 +327,15 @@ Valet sets up each personal sub-organization itself: both users as roots, one po
 | Variable | Description |
 |----------|-------------|
 | `VALET_CREDENTIAL_KEYS` | Optional. `secret-store` encrypts the OAuth tokens, refresh tokens, and API keys in the `credentials` table with a key per owner (user, team, org) held in the secret store, instead of with the instance key. Unset keeps the instance key for new writes. Needs `VALET_SECRET_STORE`. |
+
+#### Secret use service
+
+A use service runs in an attested enclave and uses a use-only secret on a sandbox's behalf: it fetches the secret from the secret store, makes the HTTPS call, and returns only the response. See `docs/specs/2026-09-01-sandbox-secret-broker-design.md`, "Using a secret without exporting it". Both variables are required together; one alone stops the api at boot.
+
+| Variable | Description |
+|----------|-------------|
+| `VALET_SECRET_USE_URL` | The use service's base URL. Needs `VALET_SECRET_STORE`. |
+| `VALET_SECRET_USE_CLIENT_KEY` | A P-256 private key, 32 bytes as hex. Valet stamps each use request with it, and every use-only secret seals its public key, so only this deployment can ask for its use. Store it like `VALET_ENCRYPTION_KEY`. |
 
 With a secret store set, Valet reads both forms, so unsetting the variable later still reads every row. Rows move to the current form as they are read. The broker needs one more export policy in the deployment organization:
 

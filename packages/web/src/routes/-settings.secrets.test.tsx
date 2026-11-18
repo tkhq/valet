@@ -45,7 +45,7 @@ describe("SecretsPage", () => {
   });
 
   it("says the store is off and shows no form, naming the server setting only to an admin", () => {
-    data = { enabled: false, provider: null, canWrite: false, secrets: [] };
+    data = { enabled: false, provider: null, canWrite: false, useAvailable: false, secrets: [] };
     orgRole = "member";
     const view = render(<SecretsPage />);
     expect(screen.getByText("Secrets are not set up on this Valet. Ask an admin to turn them on.")).toBeTruthy();
@@ -62,6 +62,7 @@ describe("SecretsPage", () => {
       enabled: true,
       provider: "Turnkey",
       canWrite: true,
+      useAvailable: false,
       secrets: [{ name: "granola/api-key", reference: "secret://personal/granola/api-key", createdAt: 0 }],
     };
     render(<SecretsPage />);
@@ -71,7 +72,7 @@ describe("SecretsPage", () => {
   });
 
   it("sends the trimmed name and the exact value on submit", () => {
-    data = { enabled: true, provider: "Turnkey", canWrite: true, secrets: [] };
+    data = { enabled: true, provider: "Turnkey", canWrite: true, useAvailable: false, secrets: [] };
     render(<SecretsPage />);
     fireEvent.change(screen.getByLabelText("Secret name"), { target: { value: "  k  " } });
     fireEvent.change(screen.getByLabelText("Secret value"), { target: { value: " v\n" } });
@@ -79,11 +80,45 @@ describe("SecretsPage", () => {
     expect(saveMutate).toHaveBeenCalledWith({ name: "k", value: " v\n" }, expect.anything());
   });
 
+  it("saves a use-only secret when a host is entered, with the picked header", () => {
+    data = { enabled: true, provider: "Turnkey", canWrite: true, useAvailable: true, secrets: [] };
+    render(<SecretsPage />);
+    fireEvent.change(screen.getByLabelText("Secret name"), { target: { value: "HETZNER" } });
+    fireEvent.change(screen.getByLabelText("Secret value"), { target: { value: "tok" } });
+    fireEvent.change(screen.getByLabelText("Only for host"), { target: { value: "https://api.hetzner.cloud/v1" } });
+    expect(screen.getByText(/The agent never gets this value/)).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Header the secret goes in"), { target: { value: "apiKey" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(saveMutate).toHaveBeenCalledWith(
+      { name: "HETZNER", value: "tok", use: { hosts: ["api.hetzner.cloud"], header: "x-api-key", format: "{secret}" } },
+      expect.anything(),
+    );
+  });
+
+  it("shows where a use-only secret goes and keeps its rule on replace", () => {
+    const use = { hosts: ["api.hetzner.cloud"], header: "authorization", format: "Bearer {secret}" };
+    data = {
+      enabled: true,
+      provider: "Turnkey",
+      canWrite: true,
+      useAvailable: true,
+      secrets: [{ name: "H", reference: "secret://personal/H", createdAt: 0, use }],
+    };
+    render(<SecretsPage />);
+    expect(screen.getByText("Only for api.hetzner.cloud, in the authorization header as Bearer")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Replace" }));
+    fireEvent.change(screen.getByLabelText("New value for H"), { target: { value: "v2" } });
+    const saves = screen.getAllByRole("button", { name: "Save" });
+    fireEvent.click(saves[saves.length - 1]!);
+    expect(saveMutate).toHaveBeenCalledWith({ name: "H", value: "v2", replace: true, use }, expect.anything());
+  });
+
   it("replaces a saved value from its row", () => {
     data = {
       enabled: true,
       provider: "Turnkey",
       canWrite: true,
+      useAvailable: false,
       secrets: [{ name: "K", reference: "secret://personal/K", createdAt: 0 }],
     };
     render(<SecretsPage />);
@@ -95,7 +130,7 @@ describe("SecretsPage", () => {
   });
 
   it("offers the caller's teams and the organization, and hides the form where the caller cannot write", () => {
-    data = { enabled: true, provider: "Turnkey", canWrite: false, secrets: [] };
+    data = { enabled: true, provider: "Turnkey", canWrite: false, useAvailable: false, secrets: [] };
     render(<SecretsPage />);
     expect(screen.getByRole("tab", { name: "Platform" })).toBeTruthy();
     expect(screen.queryByRole("tab", { name: "Not mine" })).toBeNull();

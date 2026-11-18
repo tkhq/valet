@@ -30,6 +30,7 @@ import type { WorkflowScheduler } from "../workflows/scheduler.js";
 import type { ContentSyncService } from "../services/content-sync/service.js";
 import type { WorkflowWebhookRateLimiter } from "../workflows/webhook-service.js";
 import type { OnePasswordService } from "../services/onepassword.js";
+import type { SecretUseService } from "../services/secret-use.js";
 import type { SecretStoreService } from "../services/secret-store/service.js";
 import type { AutoTitleHost } from "../sessions/auto-title-host.js";
 import type { McpServerDecl } from "../config/instance-config.js";
@@ -64,6 +65,9 @@ export interface Providers {
    * (`VALET_SECRET_STORE`). `enabled: false` when none is set; every method
    * then refuses by name. */
   secretStore: SecretStoreService;
+  /** The secret use service (`VALET_SECRET_USE_URL`): uses a use-only secret
+   * on a sandbox's behalf and returns only the response. Null when unset. */
+  secretUse: SecretUseService | null;
   /** Encrypts and decrypts `credentials` columns for code that reads rows
    * directly. Owner keys when a secret store holds them, else the instance key. */
   credentialCipher: CredentialCipher;

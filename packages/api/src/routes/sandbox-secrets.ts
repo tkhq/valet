@@ -14,6 +14,7 @@
  * lifetime for one session's principal and nothing else.
  */
 import { Hono } from "hono";
+import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { and, eq } from "drizzle-orm";
 import type { AppEnv } from "../env.js";
 import { agentSessions } from "../schema/index.js";
@@ -262,7 +263,8 @@ sandboxSecretsRouter.post("/resolve", async (c) => {
   // One failed secret store read fails the run: a command must not start
   // with only some of the secrets it named.
   if (storeErrors[0]) {
-    return c.json({ error: storeErrors[0].message }, 502);
+    // A refusal (a use-only secret, a provider policy) is the caller's to fix.
+    return c.json({ error: storeErrors[0].message }, storeErrors[0].kind === "forbidden" ? 403 : 502);
   }
   if (teamRefused) {
     return c.json({ error: "Team 1Password could not resolve the reference. Check the team token and its vault permissions." }, 502);
@@ -401,6 +403,114 @@ sandboxSecretsRouter.post("/find", async (c) => {
   return c.text(lines.join("\n"), 200, { "content-type": "text/plain; charset=utf-8" });
 });
 
+/** Largest outbound request body `/use` forwards. */
+const MAX_USE_BODY_BYTES = 10 * 1024 * 1024;
+
+/**
+ * Uses a use-only secret through the secret use service (broker design,
+ * "Using a secret without exporting it"). The sandbox sends the reference and
+ * the request with the secret's header removed; the use service puts the
+ * secret in that header, makes the call, and returns the scrubbed response.
+ * Neither the api nor the sandbox holds the value. The session rule is the
+ * one `/resolve` applies.
+ */
+sandboxSecretsRouter.post("/use", async (c) => {
+  const { db, secretStore, secretUse } = c.var.providers;
+  const sandbox = c.var.sandbox;
+  if (!sandbox) {
+    return c.json({ error: "this endpoint answers a sandbox only. Run valet-secrets http inside a session." }, 401);
+  }
+  if (!secretStore.enabled || !secretUse) {
+    return c.json({ error: "This Valet has no secret use service. Use valet-secrets run --env with a saved secret instead." }, 503);
+  }
+  let body: { reference?: unknown; header?: unknown; request?: unknown };
+  try {
+    body = (await c.req.json()) as typeof body;
+  } catch {
+    return c.json({ error: "invalid JSON body" }, 400);
+  }
+  const parsed = typeof body.reference === "string" ? parseSecretReference(body.reference) : null;
+  if (!parsed) {
+    return c.json({ error: "reference must be a secret:// reference, such as secret://personal/NAME." }, 400);
+  }
+  const req = body.request;
+  if (
+    typeof req !== "object" || req === null ||
+    typeof (req as Record<string, unknown>).method !== "string" ||
+    typeof (req as Record<string, unknown>).url !== "string"
+  ) {
+    return c.json({ error: "request must carry method and url." }, 400);
+  }
+  const r = req as Record<string, unknown>;
+  const headers: Record<string, string> = {};
+  if (r.headers !== undefined) {
+    if (typeof r.headers !== "object" || r.headers === null) return c.json({ error: "request.headers must be an object." }, 400);
+    for (const [k, v] of Object.entries(r.headers)) {
+      if (typeof v !== "string") return c.json({ error: `header ${k} must be text.` }, 400);
+      headers[k.toLowerCase()] = v;
+    }
+  }
+  const requestBody = typeof r.body === "string" ? r.body : "";
+  if (Buffer.byteLength(requestBody, "base64") > MAX_USE_BODY_BYTES) {
+    return c.json({ error: "The request body is over 10 MB." }, 413);
+  }
+
+  const row = await sessionOwnerRow(db, sandbox);
+  const ownerUserId = row?.ownerType === "user" ? row.ownerId || row.userId : undefined;
+  const isOwnUserSession = ownerUserId !== undefined && ownerUserId === sandbox.userId;
+  const teamId = row?.ownerType === "team" && row.ownerId ? row.ownerId : undefined;
+  if (row?.ownerType === "team" && (!teamId || !(await getTeamInOrg(db, sandbox.orgId, teamId)))) {
+    return c.json({ error: teamNotFound(row.workflow) }, 403);
+  }
+  const readCtx: SecretReadContext = {
+    orgId: sandbox.orgId,
+    userId: sandbox.userId,
+    sessionId: sandbox.sessionId,
+    sessionOwnerType: teamId ? "team" : isOwnUserSession ? "user" : "org",
+    sessionOwnerId: teamId ?? (isOwnUserSession ? sandbox.userId : sandbox.orgId),
+  };
+  // A security persona resolves only its engagement allowlist of op://
+  // references, so it may not use saved secrets either.
+  const securityCaller = await classifySecurityBrokerCaller(db, sandbox.sessionId);
+  if (securityCaller.kind !== "non-security") {
+    return c.json({ error: "A security persona cannot use saved secrets. Use the engagement's declared credentials." }, 403);
+  }
+
+  let lookup;
+  try {
+    lookup = await secretStore.findForUse(readCtx, parsed.scope, parsed.name);
+  } catch (err) {
+    if (!(err instanceof SecretStoreError)) throw err;
+    return c.json({ error: err.message }, err.kind === "forbidden" ? 403 : err.kind === "invalid_value" ? 400 : 502);
+  }
+  if (!lookup) {
+    return c.json({ error: `Nothing is saved as ${body.reference}. Run valet-secrets find '*' to list saved secrets.` }, 404);
+  }
+  if (typeof body.header === "string" && body.header.toLowerCase() !== lookup.use.header) {
+    return c.json(
+      { error: `${parsed.name} goes in the ${lookup.use.header} header, not ${body.header}. Put the placeholder in ${lookup.use.header}.` },
+      400,
+    );
+  }
+
+  const result = await secretUse.use(
+    { spaceId: lookup.spaceId, secretId: lookup.secretId, owner: lookup.owner, context: lookup.context },
+    { method: r.method as string, url: r.url as string, headers, body: requestBody },
+  );
+  if (!result.ok) {
+    // The use service's refusal status (403 rule, 404 deleted, 409 approval)
+    // tells the agent what to fix, so it passes through.
+    const status = (result.httpStatus >= 400 && result.httpStatus < 600 ? result.httpStatus : 502) as ContentfulStatusCode;
+    return c.json({ error: result.message, code: result.error }, status);
+  }
+  // The receipt is the audit record: the enclave signed which secret went to
+  // which host and path, under which provider export activity.
+  console.info(
+    JSON.stringify({ event: "secret_use", sessionId: sandbox.sessionId, reference: body.reference, status: result.status, receipt: result.receipt.payload }),
+  );
+  return c.json({ status: result.status, headers: result.headers, body: result.body, receipt: result.receipt });
+});
+
 /**
  * Saved secrets whose name contains every word of the query (any name when
  * the query is null; none when it has no letter or digit), as
@@ -432,7 +542,8 @@ async function findSavedSecrets(
     for (const row of await store.list(ctx, scope)) {
       const name = row.name.toLowerCase();
       if (words === null || (words.length > 0 && words.every((word) => name.includes(word)))) {
-        lines.push(`saved\t${row.reference}`);
+        // A use-only secret carries where it may be sent, as a third field.
+        lines.push(row.use ? `saved\t${row.reference}\tuse ${row.use.hosts.join(",")} ${row.use.header}` : `saved\t${row.reference}`);
       }
     }
   }

@@ -3,6 +3,7 @@ import { useId, useState, type FormEvent } from "react";
 import type { SecretSummary } from "@valet/api/wire";
 import { Button, EmptyRow, ErrorRow, Input, LoadingRow, TabBar, Textarea, tabPanelId, type TabDef } from "~/components/primitives";
 import { Section } from "~/components/settings/section";
+import { useRuleText } from "~/lib/secret-use";
 import { useDeleteSecret, useSaveSecret, useSecrets, type SecretTarget } from "~/api/secrets";
 import { useMe, useTeams } from "~/api/settings";
 import { errorText } from "~/lib/error-text";
@@ -69,7 +70,7 @@ function ScopePanel({ target }: { target: SecretTarget }) {
   return (
     <div className="min-w-0 max-w-full space-y-4">
       <p className="text-xs text-muted">{SCOPE_TEXT[target.scope]}</p>
-      {data.canWrite && <SaveSecretForm target={target} />}
+      {data.canWrite && <SaveSecretForm target={target} useAvailable={data.useAvailable} />}
       {data.secrets.length === 0 ? (
         <p className="py-4 text-sm text-muted">
           {data.canWrite ? "No secrets yet. Save one above, then use its reference in a session." : "No secrets here yet."}
@@ -83,28 +84,45 @@ function ScopePanel({ target }: { target: SecretTarget }) {
       )}
       <p className="text-xs text-muted">
         In a session, run <code className="font-mono">valet-secrets run --env NAME=&lt;reference&gt; -- &lt;command&gt;</code>.
+        {data.useAvailable &&
+          " A secret saved for one host is never given to a command: the agent calls that host with valet-secrets http, and only the response comes back."}
         {data.provider && ` Values are encrypted in your browser and stored in ${data.provider}.`}
       </p>
     </div>
   );
 }
 
-function SaveSecretForm({ target }: { target: SecretTarget }) {
+/** How the secret goes into the request, as a person picks it. */
+const HEADER_CHOICES = {
+  bearer: { label: "Authorization: Bearer", header: "authorization", format: "Bearer {secret}" },
+  apiKey: { label: "x-api-key", header: "x-api-key", format: "{secret}" },
+  custom: { label: "Other header", header: "", format: "{secret}" },
+} as const;
+type HeaderChoice = keyof typeof HEADER_CHOICES;
+
+function SaveSecretForm({ target, useAvailable }: { target: SecretTarget; useAvailable: boolean }) {
   const [name, setName] = useState("");
   const [value, setValue] = useState("");
+  const [host, setHost] = useState("");
+  const [choice, setChoice] = useState<HeaderChoice>("bearer");
+  const [customHeader, setCustomHeader] = useState("");
   const save = useSaveSecret(target);
   const trimmed = name.trim();
-  const canSave = trimmed.length > 0 && value.length > 0 && !save.isPending;
+  const hostTrimmed = host.trim().replace(/^https?:\/\//, "").replace(/\/.*$/, "");
+  const header = choice === "custom" ? customHeader.trim() : HEADER_CHOICES[choice].header;
+  const canSave = trimmed.length > 0 && value.length > 0 && !save.isPending && (!hostTrimmed || header.length > 0);
 
   function submit(e: FormEvent) {
     e.preventDefault();
     if (!canSave) return;
+    const use = hostTrimmed ? { hosts: [hostTrimmed], header, format: HEADER_CHOICES[choice].format } : undefined;
     save.mutate(
-      { name: trimmed, value },
+      { name: trimmed, value, ...(use ? { use } : {}) },
       {
         onSuccess: () => {
           setName("");
           setValue("");
+          setHost("");
         },
       },
     );
@@ -130,6 +148,49 @@ function SaveSecretForm({ target }: { target: SecretTarget }) {
         rows={2}
         className="font-mono"
       />
+      {useAvailable && (
+        <div className="flex flex-col gap-2 sm:flex-row">
+          <Input
+            value={host}
+            onChange={(e) => setHost(e.target.value)}
+            placeholder="Only for host (optional), for example api.hetzner.cloud"
+            aria-label="Only for host"
+            autoComplete="off"
+            spellCheck={false}
+            className="min-w-0 flex-1"
+          />
+          {hostTrimmed && (
+            <select
+              value={choice}
+              onChange={(e) => setChoice(e.target.value as HeaderChoice)}
+              aria-label="Header the secret goes in"
+              className="rounded-md border border-line bg-surface px-2 text-sm text-ink"
+            >
+              {Object.entries(HEADER_CHOICES).map(([id, c]) => (
+                <option key={id} value={id}>
+                  {c.label}
+                </option>
+              ))}
+            </select>
+          )}
+          {hostTrimmed && choice === "custom" && (
+            <Input
+              value={customHeader}
+              onChange={(e) => setCustomHeader(e.target.value)}
+              placeholder="Header name"
+              aria-label="Header name"
+              autoComplete="off"
+              spellCheck={false}
+              className="sm:w-40"
+            />
+          )}
+        </div>
+      )}
+      {hostTrimmed && (
+        <p className="text-xs text-muted">
+          The agent never gets this value. Valet sends it only to {hostTrimmed}, and only the response comes back.
+        </p>
+      )}
       <div className="flex items-center justify-end gap-2">
         {save.error && <p role="alert" className="mr-auto text-sm text-danger-500">{errorText(save.error)}</p>}
         <Button type="submit" disabled={!canSave}>
@@ -151,8 +212,10 @@ function SecretRow({ secret, target, canWrite }: { secret: SecretSummary; target
   function replace(e: FormEvent) {
     e.preventDefault();
     if (!nextValue || save.isPending) return;
+    // A use-only secret keeps its rule: the rule is sealed with the value, so a
+    // replace seals it again.
     save.mutate(
-      { name: secret.name, value: nextValue, replace: true },
+      { name: secret.name, value: nextValue, replace: true, ...(secret.use ? { use: secret.use } : {}) },
       {
         onSuccess: () => {
           setNextValue("");
@@ -168,6 +231,7 @@ function SecretRow({ secret, target, canWrite }: { secret: SecretSummary; target
         <div className="min-w-0 flex-1">
           <div className="truncate text-sm font-medium text-ink">{secret.name}</div>
           <div className="truncate font-mono text-xs text-muted">{secret.reference}</div>
+          {secret.use && <div className="truncate text-xs text-muted">{useRuleText(secret.use)}</div>}
         </div>
         <div className="hidden shrink-0 text-xs text-muted sm:block">Saved {formatDateOr(secret.createdAt, "—")}</div>
         <Button type="button" variant="ghost" size="sm" className="shrink-0" onClick={() => void copy(secret.reference)}>

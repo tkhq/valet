@@ -118,12 +118,86 @@ export interface SecretReadContext extends SecretActor {
   sessionOwnerId: string;
 }
 
+/** Where and how a use-only secret may be used. The browser seals it with
+ * the value; the use service enforces the sealed copy. */
+export interface UseRule {
+  /** Exact host names. */
+  hosts: string[];
+  /** Allowed methods; empty means any. */
+  methods: string[];
+  /** Allowed path prefixes; empty means any. */
+  pathPrefixes: string[];
+  /** The one header the secret goes in, lower case. */
+  header: string;
+  /** Header value with `{secret}` once, for example `Bearer {secret}`. */
+  format: string;
+}
+
+/** Label that marks a use-only secret. The provider's export policies key on it. */
+export const USE_VIA_LABEL = "use_via";
+export const USE_VIA_VALUE = "use-service";
+
+const HOST_RE = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$/;
+const HEADER_RE = /^[a-z0-9!#$%&'*+.^_`|~-]+$/;
+const RESERVED_USE_HEADERS = new Set(["host", "content-length", "transfer-encoding", "connection", "proxy-authorization", "upgrade", "te"]);
+
+/** Checks and normalizes a use rule; throws a `SecretStoreError` that names the fix. */
+export function normalizeUseRule(input: {
+  hosts: unknown;
+  methods?: unknown;
+  pathPrefixes?: unknown;
+  header: unknown;
+  format?: unknown;
+}): UseRule {
+  const bad = (message: string) => new SecretStoreError(message, "invalid_value");
+  const list = (v: unknown, what: string): string[] => {
+    if (v === undefined) return [];
+    if (!Array.isArray(v) || !v.every((x) => typeof x === "string")) throw bad(`${what} must be a list of text.`);
+    return v.map((x: string) => x.trim()).filter(Boolean);
+  };
+  const hosts = list(input.hosts, "hosts").map((h) => h.toLowerCase());
+  if (hosts.length === 0 || hosts.length > 10 || !hosts.every((h) => HOST_RE.test(h))) {
+    throw bad("Name the host this secret is used with, such as api.example.com, without https:// or a path.");
+  }
+  const methods = list(input.methods, "methods").map((m) => m.toUpperCase());
+  if (!methods.every((m) => /^[A-Z]+$/.test(m))) throw bad("Methods must be HTTP methods such as GET or POST.");
+  const pathPrefixes = list(input.pathPrefixes, "pathPrefixes");
+  if (!pathPrefixes.every((p) => p.startsWith("/"))) throw bad("Each path prefix must start with /.");
+  const header = typeof input.header === "string" ? input.header.trim().toLowerCase() : "";
+  if (!HEADER_RE.test(header) || RESERVED_USE_HEADERS.has(header)) {
+    throw bad("Name the header the secret goes in, such as Authorization or x-api-key.");
+  }
+  const format = typeof input.format === "string" && input.format.trim() ? input.format.trim() : "{secret}";
+  if (format.split("{secret}").length !== 2) throw bad("The header format must contain {secret} once, such as Bearer {secret}.");
+  return { hosts, methods, pathPrefixes, header, format };
+}
+
+/** The owner a use-only secret seals, from the scope it is saved in. */
+export function useOwner(orgId: string, userId: string, scope: SecretScope): string {
+  if (scope.kind === "personal") return `valet:${orgId}:user:${userId}`;
+  if (scope.kind === "team") return `valet:${orgId}:team:${scope.teamId}`;
+  return `valet:${orgId}:company`;
+}
+
 export interface SaveOptions {
   replace?: boolean;
+  /** Save a use-only secret with this rule. */
+  use?: UseRule;
 }
 
 export interface SecretSummaryRow extends SecretMeta {
   reference: string;
+  /** Set for a use-only secret: where it may be used (display copy). */
+  use?: { hosts: string[]; header: string; format: string };
+}
+
+/** What the use route needs to forward a request for one secret. */
+export interface SecretUseLookup {
+  spaceId: string;
+  secretId: string;
+  owner: string;
+  context: Record<string, string>;
+  use: { hosts: string[]; header: string; format: string };
 }
 
 export interface SecretStoreService {
@@ -148,6 +222,10 @@ export interface SecretStoreService {
   /** The value, or null when no secret has that name. Throws `forbidden`
    * when the session may not read the scope. */
   read(ctx: SecretReadContext, scope: SecretScope, name: string): Promise<string | null>;
+  /** The provider ids of a use-only secret the session may use. Null when no
+   * secret has that name. Throws `forbidden` when the session may not read
+   * the scope, and `invalid_value` when the secret is not use-only. */
+  findForUse(ctx: SecretReadContext, scope: SecretScope, name: string): Promise<SecretUseLookup | null>;
 }
 
 const DISABLED_MESSAGE = "The secret store is not set up on this Valet. Ask an operator to set VALET_SECRET_STORE.";
@@ -167,6 +245,7 @@ export function disabledSecretStore(): SecretStoreService {
     exists: refuse,
     mayRead: refuse,
     read: refuse,
+    findForUse: refuse,
   };
 }
 
@@ -292,8 +371,54 @@ export function createSecretStoreService(deps: {
     return base;
   }
 
-  function row(scope: SecretScope, name: string, createdAt: number): SecretSummaryRow {
-    return { name, createdAt, reference: secretReference(scope, name) };
+  /** A use-only secret's scope label is `use-<scope>`. Broker export
+   * policies require exactly `personal`, `team` or `company`, so they never
+   * match one; the use service's policy matches only these. A policy cannot
+   * test for a missing label (it errors and denies), so the scope label is
+   * what keeps the two apart. */
+  function useLabels(scope: SecretScope, rule: UseRule): SecretLabels {
+    return {
+      scope: `use-${scope.kind}`,
+      [USE_VIA_LABEL]: USE_VIA_VALUE,
+      use_hosts: rule.hosts.join(","),
+      use_header: rule.header,
+      use_format: rule.format,
+    };
+  }
+
+  function useOf(labels: SecretLabels | undefined): { hosts: string[]; header: string; format: string } | undefined {
+    if (labels?.[USE_VIA_LABEL] !== USE_VIA_VALUE) return undefined;
+    return {
+      hosts: (labels.use_hosts ?? "").split(",").filter(Boolean),
+      header: labels.use_header ?? "",
+      format: labels.use_format ?? "{secret}",
+    };
+  }
+
+  function row(scope: SecretScope, name: string, createdAt: number, labels?: SecretLabels): SecretSummaryRow {
+    const use = useOf(labels);
+    return { name, createdAt, reference: secretReference(scope, name), ...(use ? { use } : {}) };
+  }
+
+  function exportContext(ctx: SecretReadContext, scope: SecretScope): Record<string, string> {
+    return {
+      valet_company_org_id: ctx.orgId,
+      valet_user_id: ctx.userId,
+      valet_session_id: ctx.sessionId,
+      valet_session_owner_type: ctx.sessionOwnerType,
+      valet_session_owner_id: ctx.sessionOwnerId,
+      ...(scope.kind === "team" ? { valet_owner_team_id: scope.teamId } : {}),
+    };
+  }
+
+  /** The newest stored version of a secret the session may read, or null. */
+  async function newestReadable(ctx: SecretReadContext, scope: SecretScope, name: string): Promise<{ spaceId: string; meta: SecretMeta } | null> {
+    if (!(await mayRead(ctx, scope))) throw new SecretStoreError(readRefusal(scope), "forbidden");
+    const spaceId = await spaceFor(ctx, scope, false);
+    if (!spaceId) return null;
+    const fullName = `${scopePrefix(scope, ctx.orgId)}${name}`;
+    const meta = versionsOf(await guarded("find the secret", () => provider.list(spaceId, fullName)), fullName)[0];
+    return meta ? { spaceId, meta } : null;
   }
 
   /** Validate, authorize, and refuse a name already in use. A value never
@@ -359,7 +484,7 @@ export function createSecretStoreService(deps: {
         const seen = newest.get(base);
         if (!seen || meta.createdAt > seen.createdAt) newest.set(base, meta);
       }
-      return [...newest.entries()].map(([base, meta]) => row(scope, base.slice(prefix.length), meta.createdAt));
+      return [...newest.entries()].map(([base, meta]) => row(scope, base.slice(prefix.length), meta.createdAt, meta.labels));
     },
 
     async beginSave(actor, scope, name, opts) {
@@ -372,9 +497,10 @@ export function createSecretStoreService(deps: {
       // Import first, under a new version name, then delete the old ones:
       // a failed import leaves the old value in place.
       const storedName = versions.length > 0 ? `${fullName}${VERSION_SEPARATOR}${now()}` : fullName;
-      await guarded("save the secret", () => provider.finishImport(spaceId, { name: storedName, sealed, labels: labelsFor(actor, scope) }));
+      const labels = opts?.use ? { ...labelsFor(actor, scope), ...useLabels(scope, opts.use) } : labelsFor(actor, scope);
+      await guarded("save the secret", () => provider.finishImport(spaceId, { name: storedName, sealed, labels }));
       await removeOldVersions(spaceId, versions);
-      return row(scope, name, now());
+      return row(scope, name, now(), labels);
     },
 
     async saveValue(actor, scope, name, value) {
@@ -405,25 +531,43 @@ export function createSecretStoreService(deps: {
     mayRead,
 
     async read(ctx, scope, name) {
-      if (!(await mayRead(ctx, scope))) throw new SecretStoreError(readRefusal(scope), "forbidden");
-      const spaceId = await spaceFor(ctx, scope, false);
-      if (!spaceId) return null;
-      const fullName = `${scopePrefix(scope, ctx.orgId)}${name}`;
-      const newest = versionsOf(await guarded("find the secret", () => provider.list(spaceId, fullName)), fullName)[0];
-      if (!newest) return null;
-      const context = {
-        valet_company_org_id: ctx.orgId,
-        valet_user_id: ctx.userId,
-        valet_session_id: ctx.sessionId,
-        valet_session_owner_type: ctx.sessionOwnerType,
-        valet_session_owner_id: ctx.sessionOwnerId,
-        ...(scope.kind === "team" ? { valet_owner_team_id: scope.teamId } : {}),
-      };
+      const found = await newestReadable(ctx, scope, name);
+      if (!found) return null;
+      const { spaceId, meta: newest } = found;
+      const use = useOf(newest.labels);
+      if (use) {
+        throw new SecretStoreError(
+          `${name} is use-only: no command can receive its value. Call ${use.hosts.join(" or ")} with valet-secrets http, ` +
+            `with {{${secretReference(scope, name)}}} in the ${use.header} header.`,
+          "forbidden",
+        );
+      }
+      const context = exportContext(ctx, scope);
       // The listing found the secret; reading by its id saves a second lookup.
       const { readById } = provider;
       return guarded("read the secret", () =>
         newest.id && readById ? readById.call(provider, spaceId, newest.id, context) : provider.read(spaceId, newest.name, context),
       );
+    },
+
+    async findForUse(ctx, scope, name) {
+      const found = await newestReadable(ctx, scope, name);
+      if (!found) return null;
+      const use = useOf(found.meta.labels);
+      if (!use) {
+        throw new SecretStoreError(
+          `${name} is not saved for use through the use service. Use valet-secrets run --env, or save it again with a host.`,
+          "invalid_value",
+        );
+      }
+      if (!found.meta.id) throw new SecretStoreError(`${provider.label} returned no id for ${name}. Save it again.`, "provider");
+      return {
+        spaceId: found.spaceId,
+        secretId: found.meta.id,
+        owner: useOwner(ctx.orgId, ctx.userId, scope),
+        context: exportContext(ctx, scope),
+        use,
+      };
     },
   };
 }
