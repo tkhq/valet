@@ -58,7 +58,7 @@ Every decision gate carries an assurance:
 
 ### The passkey endpoint
 
-`GET /api/sessions/:id/decisions/:gateId/presence` returns the next step: the unsigned Turnkey request body, and a label for the card ("Commit 2 of 3: fix the parser"). `POST` to the same path takes the body and the passkey stamp header. The api then:
+`GET /api/sessions/:id/decisions/:gateId/passkey` returns the next step: the unsigned Turnkey request body, and a label for the card ("Commit 2 of 3: fix the parser"). `POST` to the same path takes the body and the passkey stamp header. The api then:
 
 1. Checks that the caller is the gate's approver and that the body is the step it issued: activity type, the approver's sub-organization, their signing key, the expected payload, and a timestamp less than five minutes old.
 2. Forwards the body and stamp to Turnkey unchanged. A changed body breaks the stamp.
