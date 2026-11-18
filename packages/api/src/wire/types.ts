@@ -4299,6 +4299,9 @@ export interface SecretSummary {
   /** Set for a use-only secret: the hosts it may be sent to and the header
    * it goes in. Agents use it with `valet-secrets http`. */
   use?: { hosts: string[]; header: string; format: string };
+  /** Set with `use`: how often the secret was used, from its receipts.
+   * `lastUsedAt` is null before the first use. */
+  uses?: { count: number; lastUsedAt: number | null };
 }
 
 export interface SecretsListResponse {

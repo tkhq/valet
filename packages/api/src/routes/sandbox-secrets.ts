@@ -32,6 +32,7 @@ import {
   type SecretScope,
   type SecretStoreService,
 } from "../services/secret-store/service.js";
+import { recordSecretUse } from "../services/secret-use-log.js";
 import { workflowSessionOwner } from "../workflows/session-owner.js";
 import type { AppQueryable } from "../lib/drizzle.js";
 import type { ResolveSandboxSecretsResponse } from "../wire/types.js";
@@ -503,12 +504,26 @@ sandboxSecretsRouter.post("/use", async (c) => {
     const status = (result.httpStatus >= 400 && result.httpStatus < 600 ? result.httpStatus : 502) as ContentfulStatusCode;
     return c.json({ error: result.message, code: result.error }, status);
   }
-  // The receipt is the audit record: the enclave signed which secret went to
-  // which host and path, under which provider export activity.
+  // The receipt is the audit record: the use service signed which secret went
+  // to which host and path, under which provider export activity.
   console.info(
     JSON.stringify({ event: "secret_use", sessionId: sandbox.sessionId, reference: body.reference, status: result.status, receipt: result.receipt.payload }),
   );
-  return c.json({ status: result.status, headers: result.headers, body: result.body, receipt: result.receipt });
+  const target = new URL(r.url as string);
+  const signer = secretUse.attested ? "enclave" : "use service";
+  await recordSecretUse(db, {
+    orgId: sandbox.orgId,
+    owner: lookup.owner,
+    secretName: parsed.name,
+    sessionId: sandbox.sessionId,
+    method: r.method as string,
+    host: target.hostname,
+    path: target.pathname,
+    status: result.status,
+    signer,
+    receipt: result.receipt,
+  });
+  return c.json({ status: result.status, headers: result.headers, body: result.body, receipt: result.receipt, secret: parsed.name, signer });
 });
 
 /**

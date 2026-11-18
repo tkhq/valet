@@ -48,7 +48,7 @@ describe("valet-secrets http", () => {
   it("removes the placeholder header, sends the reference, and prints the body and status", async () => {
     const b = await broker({
       status: 200,
-      body: { status: 200, headers: [["content-type", "application/json"]], body: Buffer.from('{"ok":true}').toString("base64"), receipt: {} },
+      body: { status: 200, headers: [["content-type", "application/json"]], body: Buffer.from('{"ok":true}').toString("base64"), receipt: {}, secret: "EXAMPLE_KEY", signer: "use service" },
     });
     const out = await run(b.url, [
       "post",
@@ -62,7 +62,7 @@ describe("valet-secrets http", () => {
     ]);
     expect(out.code).toBe(0);
     expect(out.stdout).toBe('{"ok":true}');
-    expect(out.stderr).toBe("HTTP 200\n");
+    expect(out.stderr).toBe("HTTP 200: EXAMPLE_KEY POST api.example.com/v1/x, signed by use service\n");
     expect(b.seen[0]!.headers["x-valet-sandbox"]).toBe("tok-1");
     expect(b.seen[0]!.body).toEqual({
       reference: "secret://personal/EXAMPLE_KEY",

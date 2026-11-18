@@ -388,13 +388,16 @@ valet-secrets http POST https://api.example.com/v1/x \
 ```
 
 - One header holds a `{{secret://…}}` placeholder. The script removes that header and sends the reference with the rest of the request to `POST /api/sandbox-secrets/use`. The header name must match the secret's rule.
-- The route applies the same session rule as `/resolve` (`mayRead`), finds the secret, and forwards the request to the use service, stamped with the deployment's use-service key. The response body goes to stdout and `HTTP <status>` to stderr.
+- The route applies the same session rule as `/resolve` (`mayRead`), finds the secret, and forwards the request to the use service, stamped with the deployment's use-service key. The response body goes to stdout.
+- Each use prints one line on stderr, which the thread shows with the command: `HTTP 200: EXAMPLE_KEY POST api.example.com/v1/x, signed by use service`. It reads "signed by enclave" only when Valet verified the use service's attestation (`SecretUseService.attested`). Valet does not verify attestation yet. A sandbox command does not know its thread, so the api cannot write this line into the right thread itself.
+- The route stores each successful use in `secret_uses`: owner, secret name, session, method, host, path, upstream status, signer, and the receipt. It holds no value.
 - A refusal names the fix: the allowed host and header, or that the secret is not use-only.
 
 ### The person
 
 - `request_secret` takes `use_host` and `use_header`. The card shows "Used with HOST in header HEADER" and saves a use-only secret. The agent names the host because it knows which API it will call; the person confirms it by saving. Valet never learns the host from a first use.
-- Settings, Secrets offers "Only for HOST" with a header picker (`Authorization: Bearer`, `x-api-key`, custom). The list shows each use-only secret's host and header.
+- Settings, Secrets has a "Use only with one host" box. Checked, the host is required and the header picker (`Authorization: Bearer`, `x-api-key`, custom) shows. A value in a known provider key format pre-fills the host and header until the person edits them; the person still confirms by saving.
+- The list shows each use-only secret's host and header, its use count and its last use, from `secret_uses`. A delete removes the secret's uses, so a new secret with the same name starts at zero. A replace keeps them.
 
 ### Configuration
 

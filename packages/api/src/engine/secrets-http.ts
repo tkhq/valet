@@ -7,8 +7,11 @@
  *
  * One header holds a `{{secret://...}}` placeholder. This program removes that
  * header, sends the reference, the header name and the rest of the request to
- * `POST /api/sandbox-secrets/use`, prints the response body on stdout and
- * `HTTP <status>` on stderr. The value never reaches the sandbox.
+ * `POST /api/sandbox-secrets/use`, prints the response body on stdout and one
+ * line on stderr, for example
+ * `HTTP 200: EXAMPLE_KEY POST api.example.com/v1/x, signed by use service`.
+ * The thread shows that line with the command. The value never reaches the
+ * sandbox.
  *
  * Input: argv after `--`, and `VALET_HTTP_API` / `VALET_HTTP_TOKEN` in the
  * environment, which it deletes before anything else.
@@ -73,7 +76,10 @@ for (const k of Object.keys(headers)) {
   let json = {};
   try { json = JSON.parse(text); } catch (e) { /* reported below */ }
   if (!res.ok) fail(json.error || ("the broker answered HTTP " + res.status + ". Check the api logs, then run again."), 4);
-  process.stderr.write("HTTP " + json.status + "\n");
+  // One line per use: what went where, the answer, and who signed the receipt.
+  let where = url;
+  try { const u = new URL(url); where = u.host + u.pathname; } catch (e) { /* keep the URL as given */ }
+  process.stderr.write("HTTP " + json.status + ": " + (json.secret || reference) + " " + method + " " + where + ", signed by " + (json.signer || "use service") + "\n");
   const loc = (json.headers || []).find((h) => h[0] === "location");
   if (loc) process.stderr.write("location: " + loc[1] + " (not followed: run again with that URL if the secret may go there)\n");
   process.stdout.write(Buffer.from(json.body || "", "base64"));

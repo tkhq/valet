@@ -624,6 +624,7 @@ describe("use-only secrets through the use service", () => {
     const calls: { target: SecretUseTarget; request: SecretUseRequest }[] = [];
     const service: SecretUseService = {
       clientPublicKey: "02".padEnd(66, "a"),
+      attested: false,
       async use(target, request) {
         calls.push({ target, request });
         return result ?? { ok: true, status: 200, headers: [["content-type", "application/json"]], body: Buffer.from('{"ok":true}').toString("base64"), receipt: { payload: "{}", publicKey: "04", signature: "30" } };
@@ -690,15 +691,35 @@ describe("use-only secrets through the use service", () => {
     const token = await userSession("sess-use", "local-user");
     const res = await useCall(token, call("secret://personal/HETZNER"));
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { status: number; body: string; receipt: unknown };
+    const body = (await res.json()) as { status: number; body: string; receipt: unknown; secret: string; signer: string };
     expect(body.status).toBe(200);
     expect(Buffer.from(body.body, "base64").toString()).toBe('{"ok":true}');
+    // Not attested: the line the agent prints says who signed.
+    expect(body).toMatchObject({ secret: "HETZNER", signer: "use service" });
     expect(use.calls).toHaveLength(1);
     const { target, request } = use.calls[0]!;
     expect(target.owner).toBe("valet:local-org:user:local-user");
     expect(target.secretId).toBe(`${target.spaceId}:personal/HETZNER`);
     expect(target.context).toMatchObject({ valet_session_id: "sess-use", valet_session_owner_type: "user", valet_user_id: "local-user" });
     expect(request).toEqual({ method: "GET", url: "https://api.example.com/v1/me", headers: { accept: "application/json" }, body: "" });
+  });
+
+  it("counts each use in the list, and a delete starts the count again", async () => {
+    await bootWithUse();
+    await post("/import/finish", { scope: "personal", name: "HETZNER", sealed: seal("sealed-json"), use: RULE });
+    const listed = async () =>
+      ((await (await fetch(`${api!.baseUrl}/api/secrets?scope=personal`)).json()) as { secrets: { name: string; uses?: { count: number; lastUsedAt: number | null } }[] })
+        .secrets.find((s) => s.name === "HETZNER")?.uses;
+    expect(await listed()).toEqual({ count: 0, lastUsedAt: null });
+    const token = await userSession("sess-count", "local-user");
+    expect((await useCall(token, call("secret://personal/HETZNER"))).status).toBe(200);
+    expect((await useCall(token, call("secret://personal/HETZNER"))).status).toBe(200);
+    const uses = await listed();
+    expect(uses?.count).toBe(2);
+    expect(uses?.lastUsedAt).toBeGreaterThan(0);
+    await fetch(`${api!.baseUrl}/api/secrets?scope=personal&name=HETZNER`, { method: "DELETE" });
+    await post("/import/finish", { scope: "personal", name: "HETZNER", sealed: seal("sealed-json"), use: RULE });
+    expect(await listed()).toEqual({ count: 0, lastUsedAt: null });
   });
 
   it("names the right header when the placeholder sits in another one", async () => {

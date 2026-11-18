@@ -17,6 +17,7 @@ import type { AppEnv } from "../env.js";
 import { SecretStoreError } from "../services/secret-store/provider.js";
 import { normalizeUseRule, useOwner, type SecretActor, type SecretScope, type UseRule } from "../services/secret-store/service.js";
 import { isOrgAdmin } from "../services/org.js";
+import { forgetSecretUses, secretUseStats } from "../services/secret-use-log.js";
 import { isTeamMember } from "../services/teams.js";
 import type {
   BeginSecretSaveResponse,
@@ -75,12 +76,15 @@ secretsRouter.get("/", async (c) => {
     return c.json(resp);
   }
   try {
-    const rows = await secretStore.list(actorOf(c), scope);
+    const actor = actorOf(c);
+    const rows = await secretStore.list(actor, scope);
+    const useNames = rows.filter((r) => r.use).map((r) => r.name);
+    const stats = await secretUseStats(c.var.providers.db, actor.orgId, useOwner(actor.orgId, actor.userId, scope), useNames);
     const secrets: SecretSummary[] = rows.map((r) => ({
       name: r.name,
       reference: r.reference,
       createdAt: r.createdAt,
-      ...(r.use ? { use: r.use } : {}),
+      ...(r.use ? { use: r.use, uses: stats.get(r.name) ?? { count: 0, lastUsedAt: null } } : {}),
     }));
     const resp: SecretsListResponse = {
       enabled: true,
@@ -173,7 +177,9 @@ secretsRouter.delete("/", async (c) => {
   const scope = parseScope(c.req.query("scope"), c.req.query("teamId"));
   if (typeof scope === "string") return c.json({ error: scope }, 400);
   try {
-    await secretStore.remove(actorOf(c), scope, name);
+    const actor = actorOf(c);
+    await secretStore.remove(actor, scope, name);
+    await forgetSecretUses(c.var.providers.db, actor.orgId, useOwner(actor.orgId, actor.userId, scope), name);
     return c.json({ ok: true });
   } catch (err) {
     return mapError(c, err);

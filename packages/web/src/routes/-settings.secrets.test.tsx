@@ -80,13 +80,17 @@ describe("SecretsPage", () => {
     expect(saveMutate).toHaveBeenCalledWith({ name: "k", value: " v\n" }, expect.anything());
   });
 
-  it("saves a use-only secret when a host is entered, with the picked header", () => {
+  it("saves a use-only secret only with a host, with the picked header", () => {
     data = { enabled: true, provider: "Turnkey", canWrite: true, useAvailable: true, secrets: [] };
     render(<SecretsPage />);
-    expect(screen.getByText(/Set a host to make this secret use-only/)).toBeTruthy();
+    expect(screen.getByText(/Commands in a session can read this value/)).toBeTruthy();
     fireEvent.change(screen.getByLabelText("Secret name"), { target: { value: "HETZNER" } });
     fireEvent.change(screen.getByLabelText("Secret value"), { target: { value: "tok" } });
-    fireEvent.change(screen.getByLabelText("Only for host"), { target: { value: "https://api.hetzner.cloud/v1" } });
+    fireEvent.click(screen.getByRole("checkbox", { name: "Use only with one host" }));
+    // The host is required and the header picker shows before any host.
+    expect(screen.getByLabelText("Header the secret goes in")).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Save" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.change(screen.getByLabelText("Host"), { target: { value: "https://api.hetzner.cloud/v1" } });
     expect(screen.getByText(/The agent never gets this value/)).toBeTruthy();
     fireEvent.change(screen.getByLabelText("Header the secret goes in"), { target: { value: "apiKey" } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
@@ -96,6 +100,15 @@ describe("SecretsPage", () => {
     );
   });
 
+  it("pre-fills the host and header from a known key format", () => {
+    data = { enabled: true, provider: "Turnkey", canWrite: true, useAvailable: true, secrets: [] };
+    render(<SecretsPage />);
+    fireEvent.change(screen.getByLabelText("Secret value"), { target: { value: "sk-ant-" + "a".repeat(40) } });
+    fireEvent.click(screen.getByRole("checkbox", { name: "Use only with one host" }));
+    expect((screen.getByLabelText("Host") as HTMLInputElement).value).toBe("api.anthropic.com");
+    expect((screen.getByLabelText("Header the secret goes in") as HTMLSelectElement).value).toBe("apiKey");
+  });
+
   it("shows where a use-only secret goes and keeps its rule on replace", () => {
     const use = { hosts: ["api.hetzner.cloud"], header: "authorization", format: "Bearer {secret}" };
     data = {
@@ -103,11 +116,16 @@ describe("SecretsPage", () => {
       provider: "Turnkey",
       canWrite: true,
       useAvailable: true,
-      secrets: [{ name: "H", reference: "secret://personal/H", createdAt: 0, use }],
+      secrets: [
+        { name: "H", reference: "secret://personal/H", createdAt: 0, use, uses: { count: 2, lastUsedAt: Date.UTC(2026, 10, 18, 12) } },
+        { name: "N", reference: "secret://personal/N", createdAt: 0, use, uses: { count: 0, lastUsedAt: null } },
+      ],
     };
     render(<SecretsPage />);
-    expect(screen.getByText("Only for api.hetzner.cloud, in the authorization header as Bearer")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Replace" }));
+    expect(screen.getAllByText("Only for api.hetzner.cloud, in the authorization header as Bearer")).toHaveLength(2);
+    expect(screen.getByText(/^Used 2 times, last /)).toBeTruthy();
+    expect(screen.getByText("Not used yet")).toBeTruthy();
+    fireEvent.click(screen.getAllByRole("button", { name: "Replace" })[0]!);
     fireEvent.change(screen.getByLabelText("New value for H"), { target: { value: "v2" } });
     const saves = screen.getAllByRole("button", { name: "Save" });
     fireEvent.click(saves[saves.length - 1]!);

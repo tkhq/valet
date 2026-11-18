@@ -45,6 +45,10 @@ export type SecretUseResult =
 export interface SecretUseService {
   /** Compressed P-256 public key, hex: the `client` a use-only secret names. */
   readonly clientPublicKey: string;
+  /** True only when Valet verified the use service's attestation, so its
+   * receipts are signed by an enclave. Valet does not verify attestation
+   * yet, so receipts read "signed by use service". */
+  readonly attested: boolean;
   use(target: SecretUseTarget, request: SecretUseRequest): Promise<SecretUseResult>;
 }
 
@@ -88,6 +92,7 @@ export function createSecretUseService(opts: {
   const base = opts.url.replace(/\/+$/, "");
   return {
     clientPublicKey: compressedPublicHex,
+    attested: false,
     async use(target, request) {
       const body = JSON.stringify({
         organizationId: target.spaceId,

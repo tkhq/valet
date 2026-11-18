@@ -1,9 +1,9 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useId, useState, type FormEvent } from "react";
 import type { SecretSummary } from "@valet/api/wire";
-import { Button, EmptyRow, ErrorRow, Input, LoadingRow, TabBar, Textarea, tabPanelId, type TabDef } from "~/components/primitives";
+import { Button, Checkbox, EmptyRow, ErrorRow, Input, LoadingRow, TabBar, Textarea, tabPanelId, type TabDef } from "~/components/primitives";
 import { Section } from "~/components/settings/section";
-import { useRuleText } from "~/lib/secret-use";
+import { useDefaultsFor, useRuleText, usesText } from "~/lib/secret-use";
 import { useDeleteSecret, useSaveSecret, useSecrets, type SecretTarget } from "~/api/secrets";
 import { useMe, useTeams } from "~/api/settings";
 import { errorText } from "~/lib/error-text";
@@ -103,26 +103,47 @@ type HeaderChoice = keyof typeof HEADER_CHOICES;
 function SaveSecretForm({ target, useAvailable }: { target: SecretTarget; useAvailable: boolean }) {
   const [name, setName] = useState("");
   const [value, setValue] = useState("");
+  const [useOnly, setUseOnly] = useState(false);
   const [host, setHost] = useState("");
   const [choice, setChoice] = useState<HeaderChoice>("bearer");
   const [customHeader, setCustomHeader] = useState("");
+  // Set once the person edits the host or header: a pasted key then no longer
+  // pre-fills them.
+  const [ruleTouched, setRuleTouched] = useState(false);
+  const useOnlyId = useId();
   const save = useSaveSecret(target);
   const trimmed = name.trim();
   const hostTrimmed = host.trim().replace(/^https?:\/\//, "").replace(/\/.*$/, "");
   const header = choice === "custom" ? customHeader.trim() : HEADER_CHOICES[choice].header;
-  const canSave = trimmed.length > 0 && value.length > 0 && !save.isPending && (!hostTrimmed || header.length > 0);
+  // A use-only secret needs a host: Valet never learns it from the first use.
+  const ruleReady = !useOnly || (hostTrimmed.length > 0 && header.length > 0);
+  const canSave = trimmed.length > 0 && value.length > 0 && !save.isPending && ruleReady;
+
+  function changeValue(next: string) {
+    setValue(next);
+    if (ruleTouched) return;
+    const known = useDefaultsFor(next);
+    if (known) {
+      setHost(known.host);
+      setChoice(known.header);
+    }
+  }
 
   function submit(e: FormEvent) {
     e.preventDefault();
     if (!canSave) return;
-    const use = hostTrimmed ? { hosts: [hostTrimmed], header, format: HEADER_CHOICES[choice].format } : undefined;
+    const use = useOnly ? { hosts: [hostTrimmed], header, format: HEADER_CHOICES[choice].format } : undefined;
     save.mutate(
       { name: trimmed, value, ...(use ? { use } : {}) },
       {
         onSuccess: () => {
           setName("");
           setValue("");
+          setUseOnly(false);
           setHost("");
+          setChoice("bearer");
+          setCustomHeader("");
+          setRuleTouched(false);
         },
       },
     );
@@ -140,7 +161,7 @@ function SaveSecretForm({ target, useAvailable }: { target: SecretTarget; useAva
       />
       <Textarea
         value={value}
-        onChange={(e) => setValue(e.target.value)}
+        onChange={(e) => changeValue(e.target.value)}
         placeholder="Value"
         aria-label="Secret value"
         autoComplete="off"
@@ -149,31 +170,43 @@ function SaveSecretForm({ target, useAvailable }: { target: SecretTarget; useAva
         className="font-mono"
       />
       {useAvailable && (
+        <div className="flex items-center gap-2">
+          <Checkbox id={useOnlyId} checked={useOnly} onCheckedChange={setUseOnly} aria-label="Use only with one host" />
+          <label htmlFor={useOnlyId} className="select-none text-sm text-ink">
+            Use only with one host
+          </label>
+        </div>
+      )}
+      {useAvailable && useOnly && (
         <div className="flex flex-col gap-2 sm:flex-row">
           <Input
             value={host}
-            onChange={(e) => setHost(e.target.value)}
-            placeholder="Only for host, for example api.hetzner.cloud"
-            aria-label="Only for host"
+            onChange={(e) => {
+              setHost(e.target.value);
+              setRuleTouched(true);
+            }}
+            placeholder="Host, for example api.hetzner.cloud"
+            aria-label="Host"
             autoComplete="off"
             spellCheck={false}
             className="min-w-0 flex-1"
           />
-          {hostTrimmed && (
-            <select
-              value={choice}
-              onChange={(e) => setChoice(e.target.value as HeaderChoice)}
-              aria-label="Header the secret goes in"
-              className="rounded-md border border-line bg-surface px-2 text-sm text-ink"
-            >
-              {Object.entries(HEADER_CHOICES).map(([id, c]) => (
-                <option key={id} value={id}>
-                  {c.label}
-                </option>
-              ))}
-            </select>
-          )}
-          {hostTrimmed && choice === "custom" && (
+          <select
+            value={choice}
+            onChange={(e) => {
+              setChoice(e.target.value as HeaderChoice);
+              setRuleTouched(true);
+            }}
+            aria-label="Header the secret goes in"
+            className="rounded-md border border-line bg-surface px-2 text-sm text-ink"
+          >
+            {Object.entries(HEADER_CHOICES).map(([id, c]) => (
+              <option key={id} value={id}>
+                {c.label}
+              </option>
+            ))}
+          </select>
+          {choice === "custom" && (
             <Input
               value={customHeader}
               onChange={(e) => setCustomHeader(e.target.value)}
@@ -188,9 +221,11 @@ function SaveSecretForm({ target, useAvailable }: { target: SecretTarget; useAva
       )}
       {useAvailable && (
         <p className="text-xs text-muted">
-          {hostTrimmed
-            ? `The agent never gets this value. Valet sends it only to ${hostTrimmed}, and only the response comes back.`
-            : "Optional. Set a host to make this secret use-only: the agent can call that host with it but can never read it. Leave it empty and commands can read the value."}
+          {!useOnly
+            ? "Commands in a session can read this value. Check Use only with one host to keep it from commands."
+            : hostTrimmed
+              ? `The agent never gets this value. Valet sends it only to ${hostTrimmed}, and only the response comes back.`
+              : "Type the host the agent will call. The agent can call that host with this secret but can never read it."}
         </p>
       )}
       <div className="flex items-center justify-end gap-2">
@@ -234,6 +269,7 @@ function SecretRow({ secret, target, canWrite }: { secret: SecretSummary; target
           <div className="truncate text-sm font-medium text-ink">{secret.name}</div>
           <div className="truncate font-mono text-xs text-muted">{secret.reference}</div>
           {secret.use && <div className="truncate text-xs text-muted">{useRuleText(secret.use)}</div>}
+          {secret.uses && <div className="truncate text-xs text-muted">{usesText(secret.uses, (ms) => formatDateOr(ms, "—"))}</div>}
         </div>
         <div className="hidden shrink-0 text-xs text-muted sm:block">Saved {formatDateOr(secret.createdAt, "—")}</div>
         <Button type="button" variant="ghost" size="sm" className="shrink-0" onClick={() => void copy(secret.reference)}>
