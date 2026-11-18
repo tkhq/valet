@@ -20,27 +20,27 @@ export interface ModelOption {
 
 export const MODEL_CATALOG: readonly ModelOption[] = [
   {
-    id: "claude-haiku-4-5",
-    label: "Haiku 4.5",
+    id: "claude-haiku-5-5",
+    label: "Haiku 5.5",
     description: "Fastest. Cheap. Good for everyday tasks and tool loops.",
     speedClass: "fast",
   },
   {
-    id: "claude-sonnet-4-5",
-    label: "Sonnet 4.5",
+    id: "claude-sonnet-5-5",
+    label: "Sonnet 5.5",
     description: "Balanced quality and speed. Good default for most work.",
     speedClass: "balanced",
   },
   {
-    id: "claude-sonnet-4-6",
-    label: "Sonnet 4.6",
-    description: "Higher quality than 4.5; same shape, slightly slower.",
-    speedClass: "balanced",
+    id: "claude-opus-5-5",
+    label: "Opus 5.5",
+    description: "Strong reasoning for hard everyday work. Slower and pricier than Sonnet.",
+    speedClass: "powerful",
   },
   {
-    id: "claude-opus-4-7",
-    label: "Opus 4.7",
-    description: "Strongest reasoning. Slower and pricier; pick for hard work.",
+    id: "claude-fable-5-2",
+    label: "Fable 5.2",
+    description: "Most capable. Twice the price of Opus; pick for the hardest technical work.",
     speedClass: "powerful",
   },
 ];

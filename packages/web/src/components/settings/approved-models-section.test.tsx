@@ -32,11 +32,11 @@ vi.mock("~/api/settings", async (importOriginal) => {
 
 import { ApprovedModelsSection } from "./approved-models-section";
 
-// "claude-haiku-4-5" and "claude-sonnet-4-5" are curated (MODEL_CATALOG);
+// "claude-haiku-5-5" and "claude-sonnet-5-5" are curated (MODEL_CATALOG);
 // "custom_1/llama-3" is not.
 const HAIKU: ModelInfo = {
-  id: "claude-haiku-4-5",
-  name: "Haiku 4.5",
+  id: "claude-haiku-5-5",
+  name: "Haiku 5.5",
   providerId: "anthropic",
   providerKind: "anthropic",
   providerName: "Anthropic",
@@ -45,8 +45,8 @@ const HAIKU: ModelInfo = {
 };
 
 const SONNET: ModelInfo = {
-  id: "claude-sonnet-4-5",
-  name: "Sonnet 4.5",
+  id: "claude-sonnet-5-5",
+  name: "Sonnet 5.5",
   providerId: "anthropic",
   providerKind: "anthropic",
   providerName: "Anthropic",
@@ -118,15 +118,15 @@ describe("ApprovedModelsSection — switch", () => {
     // same normalization `isApproved` (server-side) uses, not exact `id`
     // equality, or this tier target would fail its own tier-map's
     // approval check right after being seeded.
-    modelsData = { models: [{ ...HAIKU, id: "anthropic/claude-haiku-4-5" }, SONNET, LLAMA] };
-    tiersData = { xs: [], s: ["claude-haiku-4-5"], m: [], l: [], xl: [] };
+    modelsData = { models: [{ ...HAIKU, id: "anthropic/claude-haiku-5-5" }, SONNET, LLAMA] };
+    tiersData = { xs: [], s: ["claude-haiku-5-5"], m: [], l: [], xl: [] };
     const user = userEvent.setup();
     render(<ApprovedModelsSection />);
 
     await user.click(screen.getByRole("switch", { name: "Restrict members to approved models" }));
 
     expect(putMutate).toHaveBeenCalledWith(
-      { approved: expect.arrayContaining(["claude-haiku-4-5", "anthropic/claude-haiku-4-5", SONNET.id]) },
+      { approved: expect.arrayContaining(["claude-haiku-5-5", "anthropic/claude-haiku-5-5", SONNET.id]) },
       expect.anything(),
     );
   });
@@ -162,8 +162,8 @@ describe("ApprovedModelsSection — checkbox list", () => {
 
     expect(screen.getByText("Anthropic")).toBeTruthy();
     expect(screen.getByText("My Router")).toBeTruthy();
-    expect(screen.getByRole("checkbox", { name: "Haiku 4.5" }).getAttribute("aria-checked")).toBe("true");
-    expect(screen.getByRole("checkbox", { name: "Sonnet 4.5" }).getAttribute("aria-checked")).toBe("false");
+    expect(screen.getByRole("checkbox", { name: "Haiku 5.5" }).getAttribute("aria-checked")).toBe("true");
+    expect(screen.getByRole("checkbox", { name: "Sonnet 5.5" }).getAttribute("aria-checked")).toBe("false");
   });
 
   it("checking an unapproved model adds it to the list", async () => {
@@ -171,7 +171,7 @@ describe("ApprovedModelsSection — checkbox list", () => {
     const user = userEvent.setup();
     render(<ApprovedModelsSection />);
 
-    await user.click(screen.getByRole("checkbox", { name: "Sonnet 4.5" }));
+    await user.click(screen.getByRole("checkbox", { name: "Sonnet 5.5" }));
 
     expect(putMutate).toHaveBeenCalledWith(
       { approved: [HAIKU.id, SONNET.id] },
@@ -184,7 +184,7 @@ describe("ApprovedModelsSection — checkbox list", () => {
     const user = userEvent.setup();
     render(<ApprovedModelsSection />);
 
-    await user.click(screen.getByRole("checkbox", { name: "Haiku 4.5" }));
+    await user.click(screen.getByRole("checkbox", { name: "Haiku 5.5" }));
 
     expect(putMutate).not.toHaveBeenCalled();
     expect(
@@ -204,7 +204,7 @@ describe("ApprovedModelsSection — checkbox list", () => {
     const user = userEvent.setup();
     render(<ApprovedModelsSection />);
 
-    await user.click(screen.getByRole("checkbox", { name: "Sonnet 4.5" }));
+    await user.click(screen.getByRole("checkbox", { name: "Sonnet 5.5" }));
 
     expect(await screen.findByText("approved list cannot be empty")).toBeTruthy();
   });

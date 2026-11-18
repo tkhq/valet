@@ -129,8 +129,8 @@ vi.mock("~/api/settings", () => ({
     data: {
       models: [
         {
-          id: "anthropic/claude-sonnet-4-5",
-          name: "Claude Sonnet 4.5",
+          id: "anthropic/claude-sonnet-5-5",
+          name: "Claude Sonnet 5.5",
           providerId: "anthropic",
           providerKind: "anthropic",
           providerName: "Anthropic",
@@ -278,21 +278,21 @@ describe("TeamsPanel — team default model (TKAI-255)", () => {
     openTeam();
     const combobox = screen.getByRole("combobox", { name: "Default model" });
     fireEvent.focus(combobox);
-    fireEvent.click(screen.getByText("Sonnet 4.5"));
+    fireEvent.click(screen.getByText("Sonnet 5.5"));
     expect(patchTeamMutate).toHaveBeenCalledWith({
       id: "team_1",
-      body: { defaultModel: "anthropic/claude-sonnet-4-5" },
+      body: { defaultModel: "anthropic/claude-sonnet-5-5" },
     });
   });
 
   it("plain member sees the value read-only, no combobox", () => {
     callerRole = "member";
     orgRole = "member";
-    teamDefaultModel = "anthropic/claude-sonnet-4-5";
+    teamDefaultModel = "anthropic/claude-sonnet-5-5";
     openTeam();
     expect(screen.queryByRole("combobox", { name: "Default model" })).toBeNull();
     // Curated catalog entry → friendly label, not the raw id.
-    expect(screen.getByText("Sonnet 4.5")).toBeTruthy();
+    expect(screen.getByText("Sonnet 5.5")).toBeTruthy();
     // The hint reaches members too — they are the ones whose sessions the
     // setting shapes, and whose personal default wins.
     expect(screen.getByText(/personal default/)).toBeTruthy();
@@ -899,8 +899,8 @@ describe("TeamsPanel selected workspace", () => {
     expect(screen.queryByText("Platform")).toBeNull();
     expect(screen.queryByLabelText("New team name")).toBeNull();
     fireEvent.focus(screen.getByRole("combobox", { name: "Default model" }));
-    fireEvent.click(screen.getByText("Sonnet 4.5"));
-    expect(patchTeamMutate).toHaveBeenCalledExactlyOnceWith({ id: "team_2", body: { defaultModel: "anthropic/claude-sonnet-4-5" } });
+    fireEvent.click(screen.getByText("Sonnet 5.5"));
+    expect(patchTeamMutate).toHaveBeenCalledExactlyOnceWith({ id: "team_2", body: { defaultModel: "anthropic/claude-sonnet-5-5" } });
   });
 
   it("does not borrow admin permissions from another team", () => {

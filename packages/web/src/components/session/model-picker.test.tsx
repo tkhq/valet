@@ -74,8 +74,8 @@ beforeEach(() => {
         approved: true,
       },
       {
-        id: "anthropic/claude-sonnet-4-5",
-        name: "Claude Sonnet 4.5",
+        id: "anthropic/claude-sonnet-5-5",
+        name: "Claude Sonnet 5.5",
         providerId: "anthropic",
         providerKind: "anthropic",
         providerName: "Anthropic",
@@ -92,8 +92,8 @@ beforeEach(() => {
 
 describe("visibleModels", () => {
   const approved: ModelInfo = {
-    id: "anthropic/claude-sonnet-4-5",
-    name: "Claude Sonnet 4.5",
+    id: "anthropic/claude-sonnet-5-5",
+    name: "Claude Sonnet 5.5",
     providerId: "anthropic",
     providerKind: "anthropic",
     providerName: "Anthropic",
@@ -122,18 +122,18 @@ describe("visibleModels", () => {
 describe("ModelPicker — catalog-driven", () => {
   it("lists catalog entries in response order, curated label overlaid for the matching one", async () => {
     const user = userEvent.setup();
-    renderPicker({ currentId: "anthropic/claude-sonnet-4-5" });
+    renderPicker({ currentId: "anthropic/claude-sonnet-5-5" });
 
     await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
 
     // Model rows carry a stable data attribute — order = ModelInfo response
-    // order (non-curated Llama 3 first, then curated Sonnet 4.5). Provider
+    // order (non-curated Llama 3 first, then curated Sonnet 5.5). Provider
     // name renders as a sticky group header above the row, not inline. The
     // Size group renders first (data-row-kind="tier"), so model rows are
     // queried by their own kind rather than by absolute index.
     const rows = document.querySelectorAll<HTMLElement>('[data-row-kind="model"]');
     expect(rows[0].textContent).toContain("Llama 3");
-    expect(rows[1].textContent).toContain("Sonnet 4.5");
+    expect(rows[1].textContent).toContain("Sonnet 5.5");
     // The provider group headers surface the provider names.
     expect(document.body.textContent).toContain("My Router");
     expect(document.body.textContent).toContain("Anthropic");
@@ -155,8 +155,8 @@ describe("ModelPicker — catalog-driven", () => {
   });
 
   it("labels a bare persisted currentId via the curated fallback without crashing", () => {
-    renderPicker({ currentId: "claude-haiku-4-5" });
-    expect(screen.getByRole("button", { name: /^Choose model:/ }).textContent).toContain("Haiku 4.5");
+    renderPicker({ currentId: "claude-haiku-5-5" });
+    expect(screen.getByRole("button", { name: /^Choose model:/ }).textContent).toContain("Haiku 5.5");
   });
 
   it("labels a currentId that has fallen out of the catalog with the raw id, not a crash", () => {
@@ -170,7 +170,7 @@ describe("ModelPicker — catalog-driven", () => {
     isLoading = true;
     modelsData = undefined;
     const user = userEvent.setup();
-    renderPicker({ currentId: "anthropic/claude-sonnet-4-5" });
+    renderPicker({ currentId: "anthropic/claude-sonnet-5-5" });
 
     await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
     expect(screen.getByText("Loading models…")).toBeTruthy();
@@ -182,8 +182,8 @@ describe("ModelPicker — Size tier group", () => {
     modelsData = {
       models: [
         {
-          id: "anthropic/claude-sonnet-4-5",
-          name: "Claude Sonnet 4.5",
+          id: "anthropic/claude-sonnet-5-5",
+          name: "Claude Sonnet 5.5",
           providerId: "anthropic",
           providerKind: "anthropic",
           providerName: "Anthropic",
@@ -192,8 +192,8 @@ describe("ModelPicker — Size tier group", () => {
           thinkingLevels: ["low"],
         },
         {
-          id: "anthropic/claude-opus-4-7",
-          name: "Claude Opus 4.7",
+          id: "anthropic/claude-fable-5-2",
+          name: "Claude Fable 5.2",
           providerId: "anthropic",
           providerKind: "anthropic",
           providerName: "Anthropic",
@@ -207,19 +207,19 @@ describe("ModelPicker — Size tier group", () => {
       xs: [],
       s: [],
       m: [],
-      l: ["anthropic/claude-sonnet-4-5"],
+      l: ["anthropic/claude-sonnet-5-5"],
       xl: [],
     };
     orgReasoningData = { max: "high" };
     const user = userEvent.setup();
     renderPicker({
       currentId: "l",
-      displayId: "anthropic/claude-opus-4-7",
+      displayId: "anthropic/claude-fable-5-2",
       onSelectReasoning: vi.fn(),
     });
 
-    const trigger = screen.getByRole("button", { name: /Choose model:.*Opus 4\.7/ });
-    expect(trigger.textContent).toContain("Opus 4.7");
+    const trigger = screen.getByRole("button", { name: /Choose model:.*Fable 5\.2/ });
+    expect(trigger.textContent).toContain("Fable 5.2");
 
     await user.click(trigger);
     const largeRow = screen.getByText("Large").closest("button");
@@ -239,7 +239,7 @@ describe("ModelPicker — Size tier group", () => {
   });
 
   it("renders a tier row per SIZE_TIERS entry before the provider groups, with a resolved subtitle", async () => {
-    tierMapData = { xs: [], s: [], m: [], l: [], xl: ["anthropic/claude-sonnet-4-5"] };
+    tierMapData = { xs: [], s: [], m: [], l: [], xl: ["anthropic/claude-sonnet-5-5"] };
     const user = userEvent.setup();
     renderPicker();
 
@@ -249,7 +249,7 @@ describe("ModelPicker — Size tier group", () => {
     expect(tierRows).toHaveLength(5);
     expect(tierRows[0].textContent).toContain("Extra Small");
     expect(tierRows[4].textContent).toContain("X-Large");
-    expect(tierRows[4].textContent).toContain("Sonnet 4.5");
+    expect(tierRows[4].textContent).toContain("Sonnet 5.5");
     // Tier rows precede every model row in keyboard-nav order.
     const allRows = document.querySelectorAll<HTMLElement>("[data-model-index]");
     expect(allRows[0].dataset.rowKind).toBe("tier");
@@ -317,8 +317,8 @@ describe("ModelPicker — approved-models filter", () => {
           approved: false,
         },
         {
-          id: "anthropic/claude-sonnet-4-5",
-          name: "Claude Sonnet 4.5",
+          id: "anthropic/claude-sonnet-5-5",
+          name: "Claude Sonnet 5.5",
           providerId: "anthropic",
           providerKind: "anthropic",
           providerName: "Anthropic",
@@ -365,7 +365,7 @@ describe("ModelPicker — approved-models filter", () => {
 
     await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
     // Nothing more to reveal for this fixture: the one approved entry
-    // (Sonnet 4.5) is already shown, so the affordance itself must not
+    // (Sonnet 5.5) is already shown, so the affordance itself must not
     // render — a member's reveal scope is the same as the baseline.
     expect(screen.queryByText(/show \d+ more/)).toBeNull();
     expect(document.body.textContent).not.toContain("Llama 3");
@@ -386,21 +386,21 @@ describe("ModelPicker — approved-models filter", () => {
   it.each(["member", "admin"] as const)(
     "shows only approved options and no catalog reveal for a restricted %s",
     async (orgRole) => {
-      approvedModelsData = { approved: ["anthropic/claude-sonnet-4-5"] };
+      approvedModelsData = { approved: ["anthropic/claude-sonnet-5-5"] };
       meData = makeMe({ orgRole });
       const user = userEvent.setup();
       renderPicker();
 
       await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
       expect(document.querySelectorAll('[data-row-kind="model"]')).toHaveLength(1);
-      expect(document.body.textContent).toContain("Sonnet 4.5");
+      expect(document.body.textContent).toContain("Sonnet 5.5");
       expect(document.body.textContent).not.toContain("Llama 3");
       expect(screen.queryByText(/show \d+ more/)).toBeNull();
     },
   );
 
   it("keeps an unapproved current model display-only when restricted", async () => {
-    approvedModelsData = { approved: ["anthropic/claude-sonnet-4-5"] };
+    approvedModelsData = { approved: ["anthropic/claude-sonnet-5-5"] };
     const user = userEvent.setup();
     renderPicker({ currentId: "custom_1/llama-3" });
     expect(screen.getByRole("button", { name: /^Choose model:/ }).textContent).toContain("Llama 3");
@@ -442,7 +442,7 @@ describe("ModelPicker — reasoning row", () => {
   it("renders Default plus levels up to the org max, and calls onSelectReasoning", async () => {
     const user = userEvent.setup();
     const onSelectReasoning = vi.fn();
-    renderPicker({ onSelectReasoning, currentId: "anthropic/claude-sonnet-4-5" });
+    renderPicker({ onSelectReasoning, currentId: "anthropic/claude-sonnet-5-5" });
 
     await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
     expect(screen.getByRole("button", { name: "Default reasoning" })).toBeTruthy();
@@ -459,7 +459,7 @@ describe("ModelPicker — reasoning row", () => {
 
   it("labels a new thread's level and presses its chip instead of Default", async () => {
     const user = userEvent.setup();
-    renderPicker({ onSelectReasoning: vi.fn(), currentId: "anthropic/claude-sonnet-4-5", currentReasoning: "medium" });
+    renderPicker({ onSelectReasoning: vi.fn(), currentId: "anthropic/claude-sonnet-5-5", currentReasoning: "medium" });
 
     const trigger = screen.getByRole("button", { name: /^Choose model:/ });
     expect(trigger.textContent).toContain("· Medium");
@@ -472,8 +472,8 @@ describe("ModelPicker — reasoning row", () => {
     modelsData = {
       models: [
         {
-          id: "anthropic/claude-sonnet-4-5",
-          name: "Claude Sonnet 4.5",
+          id: "anthropic/claude-sonnet-5-5",
+          name: "Claude Sonnet 5.5",
           providerId: "anthropic",
           providerKind: "anthropic",
           providerName: "Anthropic",
@@ -484,7 +484,7 @@ describe("ModelPicker — reasoning row", () => {
       ],
     };
     const user = userEvent.setup();
-    renderPicker({ onSelectReasoning: vi.fn(), currentId: "anthropic/claude-sonnet-4-5" });
+    renderPicker({ onSelectReasoning: vi.fn(), currentId: "anthropic/claude-sonnet-5-5" });
 
     await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
     expect((screen.getByRole("button", { name: "Medium reasoning" }) as HTMLButtonElement).disabled).toBe(
@@ -497,7 +497,7 @@ describe("ModelPicker — reasoning row", () => {
 
   it("disables nothing when thinkingLevels is undefined (unknown support, not no support)", async () => {
     const user = userEvent.setup();
-    renderPicker({ onSelectReasoning: vi.fn(), currentId: "anthropic/claude-sonnet-4-5" });
+    renderPicker({ onSelectReasoning: vi.fn(), currentId: "anthropic/claude-sonnet-5-5" });
 
     await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
     expect((screen.getByRole("button", { name: "High reasoning" }) as HTMLButtonElement).disabled).toBe(
@@ -509,8 +509,8 @@ describe("ModelPicker — reasoning row", () => {
     modelsData = {
       models: [
         {
-          id: "anthropic/claude-sonnet-4-5",
-          name: "Claude Sonnet 4.5",
+          id: "anthropic/claude-sonnet-5-5",
+          name: "Claude Sonnet 5.5",
           providerId: "anthropic",
           providerKind: "anthropic",
           providerName: "Anthropic",
@@ -520,7 +520,7 @@ describe("ModelPicker — reasoning row", () => {
         },
       ],
     };
-    tierMapData = { xs: [], s: [], m: [], l: ["anthropic/claude-sonnet-4-5"], xl: [] };
+    tierMapData = { xs: [], s: [], m: [], l: ["anthropic/claude-sonnet-5-5"], xl: [] };
     const user = userEvent.setup();
     renderPicker({ onSelectReasoning: vi.fn(), currentId: "l" });
 
@@ -534,7 +534,7 @@ describe("ModelPicker — reasoning row", () => {
   });
 
   it("appends the reasoning level to the trigger label", () => {
-    renderPicker({ currentId: "anthropic/claude-sonnet-4-5", currentReasoning: "high" });
+    renderPicker({ currentId: "anthropic/claude-sonnet-5-5", currentReasoning: "high" });
     expect(screen.getByRole("button", { name: /^Choose model:/ }).textContent).toContain("· High");
   });
 });
@@ -629,8 +629,8 @@ describe("ModelPicker — phone settings panel", () => {
     meData = makeMe({ orgRole: "admin" });
     if (!modelsData) throw new Error("Missing models fixture");
     modelsData.models[0].approved = false;
-    approvedModelsData = { approved: ["anthropic/claude-sonnet-4-5"] };
-    tierMapData = { xs: [], s: ["custom_1/llama-3"], m: [], l: ["anthropic/claude-sonnet-4-5"], xl: [] };
+    approvedModelsData = { approved: ["anthropic/claude-sonnet-5-5"] };
+    tierMapData = { xs: [], s: ["custom_1/llama-3"], m: [], l: ["anthropic/claude-sonnet-5-5"], xl: [] };
     renderPicker({ presentation: "panel" });
     expect(screen.getByRole("button", { name: /Small Llama/ })).toHaveProperty("disabled", true);
     expect(screen.getByRole("button", { name: /Large Claude Sonnet/ })).toHaveProperty("disabled", false);
@@ -655,7 +655,7 @@ it("only offers supported thinking levels on a phone, within the organization li
 describe("ModelPicker composer trigger", () => {
   it("opens the supplied settings panel and shows the model and thinking", async () => {
     const open = vi.fn();
-    render(<TooltipProvider><ModelPicker presentation="trigger" currentId="anthropic/claude-opus-4-7" currentReasoning="medium" onSelect={vi.fn()} onOpenPanel={open} /></TooltipProvider>);
+    render(<TooltipProvider><ModelPicker presentation="trigger" currentId="anthropic/claude-fable-5-2" currentReasoning="medium" onSelect={vi.fn()} onOpenPanel={open} /></TooltipProvider>);
     const trigger = screen.getByRole("button", { name: /Choose model:.*Medium/ });
     await userEvent.click(trigger);
     expect(open).toHaveBeenCalledOnce();
@@ -667,11 +667,11 @@ describe("ModelPicker compact composer trigger", () => {
   const renderTrigger = (currentId: string) => render(<TooltipProvider><ModelPicker presentation="trigger" currentId={currentId} currentReasoning="medium" onSelect={vi.fn()} onOpenPanel={vi.fn()} /></TooltipProvider>);
 
   it("keeps the full accessible name and title; narrow widths get the short name, tiny ones an icon", () => {
-    renderTrigger("anthropic/claude-opus-4-7");
-    const trigger = screen.getByRole("button", { name: /Choose model:.*Opus 4\.7.*Medium/ });
-    expect(trigger.getAttribute("title")).toMatch(/Opus 4\.7.*Medium/);
+    renderTrigger("anthropic/claude-fable-5-2");
+    const trigger = screen.getByRole("button", { name: /Choose model:.*Fable 5\.2.*Medium/ });
+    expect(trigger.getAttribute("title")).toMatch(/Fable 5\.2.*Medium/);
     const compact = trigger.querySelector<HTMLElement>("[data-compact-picker]");
-    expect(compact?.textContent).toBe("Opus 4.7");
+    expect(compact?.textContent).toBe("Fable 5.2");
     expect(compact?.className).toContain("[@container(18.75rem<=width<34rem)]:inline");
     const icon = trigger.querySelector<HTMLElement>("[data-icon-picker]");
     expect(icon?.className).toContain("[@container(width<18.75rem)]:inline");
@@ -679,10 +679,10 @@ describe("ModelPicker compact composer trigger", () => {
   });
 
   it("shows the full label by default, so a trigger outside a size container names the model", () => {
-    renderTrigger("anthropic/claude-opus-4-7");
-    const trigger = screen.getByRole("button", { name: /Choose model:.*Opus 4\.7.*Medium/ });
+    renderTrigger("anthropic/claude-fable-5-2");
+    const trigger = screen.getByRole("button", { name: /Choose model:.*Fable 5\.2.*Medium/ });
     const full = trigger.querySelector<HTMLElement>("[data-full-picker]");
-    expect(full?.textContent).toMatch(/Opus 4\.7.*Medium/);
+    expect(full?.textContent).toMatch(/Fable 5\.2.*Medium/);
     // Only width-below queries hide the full label; none match without a container.
     expect(full?.className.split(" ")).not.toContain("hidden");
     expect(full?.className).toContain("[@container(width<34rem)]:hidden");
@@ -704,7 +704,7 @@ describe("ModelPicker — new-thread default", () => {
   it("shows the default and saves the current choice as the default when they differ", async () => {
     const user = userEvent.setup();
     const onMakeDefault = vi.fn();
-    renderPicker({ currentId: "anthropic/claude-sonnet-4-5", currentReasoning: "high", newThreadDefault: { model: "custom_1/llama-3", reasoning: "medium", onMakeDefault } });
+    renderPicker({ currentId: "anthropic/claude-sonnet-5-5", currentReasoning: "high", newThreadDefault: { model: "custom_1/llama-3", reasoning: "medium", onMakeDefault } });
 
     await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
     expect(screen.getByText(/New threads: Llama 3 · Medium/)).toBeTruthy();
@@ -715,7 +715,7 @@ describe("ModelPicker — new-thread default", () => {
   it("names a team default, and closes the menu so the confirmation can open", async () => {
     const user = userEvent.setup();
     const onMakeDefault = vi.fn();
-    renderPicker({ currentId: "anthropic/claude-sonnet-4-5", newThreadDefault: { model: "custom_1/llama-3", scope: "team", onMakeDefault } });
+    renderPicker({ currentId: "anthropic/claude-sonnet-5-5", newThreadDefault: { model: "custom_1/llama-3", scope: "team", onMakeDefault } });
     await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
     await user.click(screen.getByRole("button", { name: "Make team default" }));
     expect(onMakeDefault).toHaveBeenCalledOnce();
@@ -724,7 +724,7 @@ describe("ModelPicker — new-thread default", () => {
 
   it("says why no save is offered when the assistant's own setting outranks defaults", async () => {
     const user = userEvent.setup();
-    renderPicker({ currentId: "anthropic/claude-sonnet-4-5", newThreadDefault: { model: "custom_1/llama-3", blockedReason: "The assistant's own model setting outranks defaults, so new threads keep it." } });
+    renderPicker({ currentId: "anthropic/claude-sonnet-5-5", newThreadDefault: { model: "custom_1/llama-3", blockedReason: "The assistant's own model setting outranks defaults, so new threads keep it." } });
     await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
     expect(screen.getByText(/own model setting outranks defaults/)).toBeTruthy();
     expect(screen.queryByRole("button", { name: /^Make .*default$/ })).toBeNull();
@@ -732,7 +732,7 @@ describe("ModelPicker — new-thread default", () => {
 
   it("offers no save without a save handler", async () => {
     const user = userEvent.setup();
-    renderPicker({ currentId: "anthropic/claude-sonnet-4-5", newThreadDefault: { model: "custom_1/llama-3", reasoning: "medium" } });
+    renderPicker({ currentId: "anthropic/claude-sonnet-5-5", newThreadDefault: { model: "custom_1/llama-3", reasoning: "medium" } });
     await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
     expect(screen.getByText(/New threads: Llama 3/)).toBeTruthy();
     expect(screen.queryByRole("button", { name: /^Make .*default$/ })).toBeNull();
@@ -742,7 +742,7 @@ describe("ModelPicker — new-thread default", () => {
     const user = userEvent.setup();
     const onSelect = vi.fn();
     const onMakeDefault = vi.fn();
-    renderPicker({ onSelect, currentId: "anthropic/claude-sonnet-4-5", newThreadDefault: { model: "custom_1/llama-3", onMakeDefault } });
+    renderPicker({ onSelect, currentId: "anthropic/claude-sonnet-5-5", newThreadDefault: { model: "custom_1/llama-3", onMakeDefault } });
     await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
     // The menu focuses its search box on the next frame; move focus after that.
     await waitFor(() => expect(document.activeElement?.tagName).toBe("INPUT"));

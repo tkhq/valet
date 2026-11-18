@@ -65,10 +65,10 @@ let apiKeysData: Array<{
 
 const modelsData = {
   models: [
-    { id: "claude-haiku-4-5", name: "Claude Haiku 4.5", contextWindow: 200000, reasoning: false, approved: true },
-    { id: "claude-sonnet-4-5", name: "Claude Sonnet 4.5", contextWindow: 200000, reasoning: true, approved: true },
-    { id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6", contextWindow: 200000, reasoning: true, approved: true },
-    { id: "claude-opus-4-7", name: "Claude Opus 4.7", contextWindow: 200000, reasoning: true, approved: true },
+    { id: "claude-haiku-5-5", name: "Claude Haiku 5.5", contextWindow: 200000, reasoning: false, approved: true },
+    { id: "claude-sonnet-5-5", name: "Claude Sonnet 5.5", contextWindow: 200000, reasoning: true, approved: true },
+    { id: "claude-opus-5-5", name: "Claude Opus 5.5", contextWindow: 200000, reasoning: true, approved: true },
+    { id: "claude-fable-5-2", name: "Claude Fable 5.2", contextWindow: 200000, reasoning: true, approved: true },
     { id: "some-exotic-model", name: "Exotic", contextWindow: 100000, reasoning: false, approved: true },
   ],
 };
@@ -246,16 +246,16 @@ describe("ThreadDefaultsPage", () => {
     ).toBeTruthy();
   });
 
-  it("the model combobox filters to curated sonnet entries on 'sonnet'", () => {
+  it("the model combobox filters to the curated sonnet entry on 'sonnet'", () => {
     render(<ThreadDefaultsPage />);
     const input = screen.getByLabelText("Default model");
     fireEvent.focus(input);
     fireEvent.change(input, { target: { value: "sonnet" } });
 
-    expect(screen.getByText("Sonnet 4.5")).toBeTruthy();
-    expect(screen.getByText("Sonnet 4.6")).toBeTruthy();
-    expect(screen.queryByText("Haiku 4.5")).toBeNull();
-    expect(screen.queryByText("Opus 4.7")).toBeNull();
+    expect(screen.getByText("Sonnet 5.5")).toBeTruthy();
+    expect(screen.queryByText("Opus 5.5")).toBeNull();
+    expect(screen.queryByText("Haiku 5.5")).toBeNull();
+    expect(screen.queryByText("Fable 5.2")).toBeNull();
   });
 
   it("selecting a model fires PATCH /api/me with its id", () => {
@@ -263,13 +263,13 @@ describe("ThreadDefaultsPage", () => {
     const input = screen.getByLabelText("Default model");
     fireEvent.focus(input);
     fireEvent.change(input, { target: { value: "sonnet" } });
-    fireEvent.click(screen.getByText("Sonnet 4.5"));
+    fireEvent.click(screen.getByText("Sonnet 5.5"));
 
-    expect(patchMeMutate).toHaveBeenCalledWith({ defaultModel: "claude-sonnet-4-5" });
+    expect(patchMeMutate).toHaveBeenCalledWith({ defaultModel: "claude-sonnet-5-5" });
   });
 
   it("shows a clear row naming the fallback tiers and clears with defaultModel: null", () => {
-    meData = { ...meData!, defaultModel: "claude-sonnet-4-5" };
+    meData = { ...meData!, defaultModel: "claude-sonnet-5-5" };
     render(<ThreadDefaultsPage />);
     const input = screen.getByLabelText("Default model");
     fireEvent.focus(input);
