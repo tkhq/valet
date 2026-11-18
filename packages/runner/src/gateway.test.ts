@@ -223,6 +223,36 @@ describe("listener handlers serve their full route set", () => {
 });
 
 /**
+ * A tunnel publishes a port to the internet with no authentication, so it
+ * must never target the control plane or a service the gateway fronts.
+ */
+describe("tunnel registration refuses sandbox service ports", () => {
+  async function register(port: number): Promise<Response> {
+    return internalApp.fetch(
+      new Request("http://127.0.0.1:9001/api/tunnels", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: `t${port}`, port }),
+      }),
+    );
+  }
+
+  it.each([9000, 9001, 4096, 8765, 6080, 5900, 7681])("rejects port %i", async (port) => {
+    const res = await register(port);
+    expect(res.status).toBe(400);
+    const listed = (await (await internalApp.fetch(new Request("http://127.0.0.1:9001/api/tunnels"))).json()) as {
+      tunnels: Array<{ port: number }>;
+    };
+    expect(listed.tunnels.some((t) => t.port === port)).toBe(false);
+  });
+
+  it("still registers an ordinary dev-server port", async () => {
+    const res = await register(3000);
+    expect(res.status).toBe(200);
+  });
+});
+
+/**
  * Bearer parsing is anchored: only a header that actually starts with the
  * scheme yields a token. An unanchored `replace("Bearer ", "")` would also
  * accept a scheme-less header verbatim, silently widening what counts as a

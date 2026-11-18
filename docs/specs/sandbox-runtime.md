@@ -295,7 +295,7 @@ These are called by OpenCode custom tools at `http://127.0.0.1:9001/api/*`. Each
 
 Dynamic tunnels allow tools inside the sandbox to expose arbitrary ports:
 
-1. `POST /api/tunnels` — Register tunnel (`name`, `port`, `protocol`).
+1. `POST /api/tunnels` — Register tunnel (`name`, `port`, `protocol`). Rejects the gateway ports (9000, 9001) and the sandbox service ports (4096, 8765, 6080, 5900, 7681).
 2. `DELETE /api/tunnels/:name` — Unregister.
 3. `GET /api/tunnels` — List registered tunnels.
 4. Accessible at `/t/:name/*` with auth.
