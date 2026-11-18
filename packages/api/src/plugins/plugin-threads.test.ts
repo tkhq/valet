@@ -3,6 +3,7 @@ import { eq } from "drizzle-orm";
 import { Type } from "typebox";
 import {
   Engine,
+  RECORD_ONLY_KEY,
   InMemoryBlobStore,
   InMemoryCredentialStore,
   InMemoryEventStream,
@@ -247,6 +248,50 @@ describe("PluginThreads child stopping", () => {
     await expect(threads.awaitChild({ childSessionId: "child_plg_a", queueItemId: "q-1" })).rejects.toThrow("was not started by plugin reviewer");
     await expect(threads.awaitReply({ sessionId: thread.sessionId, threadId: thread.threadId, queueItemId: "q-x" }))
       .rejects.toThrow("is not in a thread of plugin reviewer");
+  });
+});
+
+describe("PluginThreads.release", () => {
+  /** Threads whose keys resolve to one session each: `sess-<key>`. */
+  async function setup() {
+    const tdb = await freshTestPgDb();
+    const engineStore = new InMemorySessionStore();
+    const deps: PluginThreadsDeps = {
+      db: tdb.appDb,
+      engineStore,
+      childSpawner: vi.fn<ChildSpawner>(async (req) => ({ childSessionId: req.sessionId ?? "x", queueItemId: "q-1" })),
+      childStopper: vi.fn<ChildStopper>(async () => ({ stopped: 0 })),
+      resolveThread: async (key) => ({ sessionId: `sess-${key.split("#")[1]}`, threadId: "thr" }),
+    };
+    const threads = buildPluginThreads(deps, { plugin: reviewer, orgId: "org-1", owner, actorUserId: "user-1", deliveryId: "del-1" });
+    const ids = ["sess-1", "sess-2", "sess-3", "sess-4", "sess-unused"];
+    await tdb.appDb.insert(agentSessions).values(ids.map((id) => ({
+      id, userId: "user-1", orgId: "org-1", workspace: `/tmp/${id}`, status: "active" as const,
+      ownerType: "team" as const, ownerId: owner.id, createdAt: Date.now(), updatedAt: Date.now(),
+    })));
+    const status = async (id: string) =>
+      (await tdb.appDb.select({ s: agentSessions.status }).from(agentSessions).where(eq(agentSessions.id, id)))[0]?.s;
+    return { engineStore, threads, status };
+  }
+
+  const ref = (n: string) => ({ ...thread, key: pluginThreadKey("reviewer", `acme/site#${n}`) });
+
+  it("marks the thread sessions this run used hibernated when nothing runs in them, and leaves the rest", async () => {
+    const { engineStore, threads, status } = await setup();
+    for (const n of ["1", "2", "3", "4"]) await threads.spawnChild(ref(n), { prompt: "p" }, { dispatchId: `d-${n}` });
+    // 1 has only a record still settling. 2 has a turn queued, 3 holds a lease, 4 has a sandbox: the idle sweeps own those.
+    vi.spyOn(engineStore, "listUnsettledSubmissions").mockImplementation(async (id) =>
+      id === "sess-1" ? [{ id: "q-record", metadata: { [RECORD_ONLY_KEY]: true } } as never]
+        : id === "sess-2" ? [{ id: "q-turn" } as never] : []);
+    vi.spyOn(engineStore, "countActiveLeases").mockImplementation(async (id) => (id === "sess-3" ? 1 : 0));
+    vi.spyOn(engineStore, "getSession").mockImplementation(async (id) => (id === "sess-4" ? { sandboxId: "sbx-4" } as never : null));
+    await threads.release();
+    expect(await status("sess-1")).toBe("hibernated");
+    expect(await status("sess-2")).toBe("active");
+    expect(await status("sess-3")).toBe("active");
+    expect(await status("sess-4")).toBe("active");
+    // A session this run never opened is not this run's to release.
+    expect(await status("sess-unused")).toBe("active");
   });
 });
 

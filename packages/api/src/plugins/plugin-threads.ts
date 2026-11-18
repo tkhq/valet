@@ -11,6 +11,7 @@ import { createHash } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import { UNATTENDED_DELIVERY_KEY } from "@valet/shared";
 import {
+  RECORD_ONLY_KEY,
   settledSubmissionResult,
   TimeoutError,
   type ChildSpawner,
@@ -27,6 +28,7 @@ import {
 import type { TSchema } from "typebox";
 import { and, eq, inArray, like, or, sql } from "drizzle-orm";
 import { ensureAssistantExecution } from "../assistants/service.js";
+import { writeHibernated } from "../engine/hibernation-hooks.js";
 import type { EngineHost } from "../engine/host.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { agentSessions, childWatches, eventDeliveries } from "../schema/index.js";
@@ -92,10 +94,28 @@ export function pluginChildSessionId(plugin: string, owner: Principal, threadKey
   return `${PLUGIN_CHILD_SESSION_PREFIX}${digest}`;
 }
 
-export function buildPluginThreads(deps: PluginThreadsDeps, scope: PluginThreadsScope): PluginThreads {
+/** `PluginThreads` for one handler run, with the step the dispatcher takes when the run ends. */
+export interface RunPluginThreads extends PluginThreads {
+  /**
+   * Mark the thread sessions this run used `hibernated` when nothing runs
+   * in them: no unsettled submission other than a record (`record` queues
+   * one that settles without a model call), no active lease and no
+   * sandbox. A
+   * plugin thread session is an execution session with no sandbox, so
+   * neither idle sweep moves it out of `active` on a backend without
+   * hibernation, and every one counts toward the org session ceiling. The
+   * next use wakes it (`ensureAssistantExecution` marks it used). A
+   * session with a sandbox stays with the idle sweeps.
+   */
+  release(): Promise<void>;
+}
+
+export function buildPluginThreads(deps: PluginThreadsDeps, scope: PluginThreadsScope): RunPluginThreads {
   const { plugin, orgId, owner, actorUserId } = scope;
   const prefix = pluginThreadKey(plugin.name, "");
   const meta = { actorUserId, orgId };
+  /** The thread sessions this run opened, for `release`. */
+  const used = new Set<string>();
 
   /** A child whose spawn landed after the run was cancelled: stop it too. */
   const stopIfCancelled = (child: PluginChild, parent: { sessionId: string; threadId: string }): PluginChild => {
@@ -118,10 +138,15 @@ export function buildPluginThreads(deps: PluginThreadsDeps, scope: PluginThreads
       { isolated: true, ...(title !== undefined ? { title } : {}) },
     );
     const thread = await session.createThread(key, title !== undefined ? { title } : undefined);
+    used.add(session.id);
     return { session, thread };
   };
   const resolveThread = async (key: string): Promise<{ sessionId: string; threadId: string }> => {
-    if (deps.resolveThread) return deps.resolveThread(key);
+    if (deps.resolveThread) {
+      const resolved = await deps.resolveThread(key);
+      used.add(resolved.sessionId);
+      return resolved;
+    }
     const { session, thread } = await openThread(key);
     return { sessionId: session.id, threadId: thread.id };
   };
@@ -276,6 +301,16 @@ export function buildPluginThreads(deps: PluginThreadsDeps, scope: PluginThreads
       const result = await deps.childStopper({ childSessionId: child.childSessionId }, watch);
       if (!result) throw new Error(`Child ${child.childSessionId} was not started by plugin ${plugin.name} for this workspace. Use only children from threads.spawnChild.`);
       return result;
+    },
+
+    async release() {
+      for (const sessionId of used) {
+        const unsettled = await deps.engineStore.listUnsettledSubmissions(sessionId);
+        if (unsettled.some((item) => item.metadata?.[RECORD_ONLY_KEY] !== true)) continue;
+        if ((await deps.engineStore.countActiveLeases(sessionId)) > 0) continue;
+        if ((await deps.engineStore.getSession(sessionId))?.sandboxId) continue;
+        await writeHibernated(deps.db, sessionId);
+      }
     },
   };
 }
