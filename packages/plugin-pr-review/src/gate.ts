@@ -52,7 +52,7 @@ export interface GateDecision {
   suppress: boolean;
   /** Distinct merged pull requests with a similar finding the author left unaddressed. */
   unaddressed: number;
-  /** Similar findings the author addressed. */
+  /** Distinct merged pull requests with a similar finding the author addressed. */
   addressed: number;
 }
 
@@ -60,14 +60,13 @@ export interface GateDecision {
 export function gateFinding(f: Pick<Finding, "title" | "body" | "path" | "category" | "severity">, history: readonly FindingRecord[], opts: GateOptions = DEFAULT_GATE, currentPull?: number): GateDecision {
   if (f.severity === "high" || f.severity === "critical" || f.category === "security") return { suppress: false, unaddressed: 0, addressed: 0 };
   const unaddressedPulls = new Set<number>();
-  let addressed = 0;
+  const addressedPulls = new Set<number>();
   for (const r of history) {
     if (!r.outcome?.merged || r.shadow || !SEEN.has(r.placement) || r.number === currentPull) continue;
     if (similarity(f, r) < opts.similarity) continue;
-    if (r.outcome.result === "addressed") addressed++;
-    else unaddressedPulls.add(r.number);
+    (r.outcome.result === "addressed" ? addressedPulls : unaddressedPulls).add(r.number);
   }
-  return { suppress: unaddressedPulls.size >= opts.minNeighbors && addressed < opts.minNeighbors, unaddressed: unaddressedPulls.size, addressed };
+  return { suppress: unaddressedPulls.size >= opts.minNeighbors && addressedPulls.size < opts.minNeighbors, unaddressed: unaddressedPulls.size, addressed: addressedPulls.size };
 }
 
 /** The repository's newest `MAX_HISTORY` finding records with an outcome, by close time. */

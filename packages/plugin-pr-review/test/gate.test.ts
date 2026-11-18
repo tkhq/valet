@@ -49,6 +49,11 @@ describe("outcome gate", () => {
     expect(gateFinding(finding, [rec(1, "ignored"), rec(1, "ignored", { id: "f2" }), rec(1, "ignored", { id: "f3" })]).suppress).toBe(false);
   });
 
+  it("counts addressed neighbors per distinct pull request, like unaddressed ones", () => {
+    const onePull = [rec(4, "addressed"), rec(4, "addressed", { id: "f2" }), rec(4, "addressed", { id: "f3" })];
+    expect(gateFinding(finding, [rec(1, "ignored"), rec(2, "ignored"), rec(3, "ignored"), ...onePull])).toEqual({ suppress: true, unaddressed: 3, addressed: 1 });
+  });
+
   it("ignores unmerged, shadow and same-pull-request records", () => {
     const unmerged = (n: number) => rec(n, "ignored", { outcome: { result: "ignored", merged: false, closedHead: "x", at: "y" } });
     expect(gateFinding(finding, [unmerged(1), unmerged(2), unmerged(3)]).suppress).toBe(false);
