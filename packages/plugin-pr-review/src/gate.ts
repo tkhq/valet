@@ -50,7 +50,7 @@ export function similarity(a: Pick<Finding, "title" | "body" | "path" | "categor
 
 export interface GateDecision {
   suppress: boolean;
-  /** Distinct merged pull requests with a similar finding the author left unaddressed. */
+  /** Distinct merged pull requests with a similar finding the author left unaddressed and none addressed. */
   unaddressed: number;
   /** Distinct merged pull requests with a similar finding the author addressed. */
   addressed: number;
@@ -66,6 +66,8 @@ export function gateFinding(f: Pick<Finding, "title" | "body" | "path" | "catego
     if (similarity(f, r) < opts.similarity) continue;
     (r.outcome.result === "addressed" ? addressedPulls : unaddressedPulls).add(r.number);
   }
+  // A pull request where the author addressed a similar finding counts as addressed only.
+  for (const n of addressedPulls) unaddressedPulls.delete(n);
   return { suppress: unaddressedPulls.size >= opts.minNeighbors && addressedPulls.size < opts.minNeighbors, unaddressed: unaddressedPulls.size, addressed: addressedPulls.size };
 }
 

@@ -296,7 +296,8 @@ for the same category. Valet has no embeddings, so the match is lexical.
 - A finding with neighbors left unaddressed (ignored or rejected) on three or
   more distinct pull requests goes to the summary under "Findings like ones
   this repository left unaddressed", unless neighbors were addressed on
-  three or more distinct pull requests. The pointer keeps `suppressed`.
+  three or more distinct pull requests. A pull request with both kinds of
+  neighbor counts as addressed only. The pointer keeps `suppressed`.
 - The gate never moves a high, critical or security finding, and it never
   drops one.
 - It skips shadow records and records of the pull request under review.
