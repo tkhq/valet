@@ -45,6 +45,20 @@ export const internalApp = new Hono();
 /** Default port for the loopback-only control-plane listener. */
 export const DEFAULT_GATEWAY_INTERNAL_PORT = 9001;
 
+/**
+ * Sandbox services that must never get their own tunnel. The control-plane
+ * API is unauthenticated and loopback-only, and OpenCode, code-server, ttyd
+ * and VNC run without auth because only the JWT gateway reaches them; a
+ * tunnel straight to any of these would publish it with no authentication.
+ * Mirrors the ports in docker/start.sh.
+ */
+const SANDBOX_SERVICE_PORTS: readonly number[] = [4096, 8765, 6080, 5900, 7681];
+
+/** Ports a tunnel may not target: the gateway's own listeners plus the sandbox services. */
+export function reservedTunnelPorts(gatewayPort: number, internalPort: number): ReadonlySet<number> {
+  return new Set([gatewayPort, internalPort, ...SANDBOX_SERVICE_PORTS]);
+}
+
 type TunnelProtocol = "http" | "ws" | "auto";
 
 interface TunnelEntry {
@@ -727,6 +741,7 @@ export function startGateway(
     killCloudflared(name);
   }
   tunnelRegistry.clear();
+  const reservedPorts = reservedTunnelPorts(port, internalPort);
 
   function serializeTunnels(): TunnelDescriptor[] {
     return Array.from(tunnelRegistry.values()).map((entry) => ({
@@ -778,6 +793,9 @@ export function startGateway(
       }
       if (!port || Number.isNaN(port) || port < 1 || port > 65535) {
         return c.json({ error: "Invalid port (1-65535)" }, 400);
+      }
+      if (reservedPorts.has(port)) {
+        return c.json({ error: `Port ${port} is used by a sandbox service and cannot be tunnelled` }, 400);
       }
       if (!["http", "ws", "auto"].includes(protocol)) {
         return c.json({ error: "Invalid protocol (http | ws | auto)" }, 400);
