@@ -47,6 +47,18 @@ export function useGitHubLink() {
   });
 }
 
+/** Finishes linking with the claim the OAuth callback put in the URL. */
+export function useClaimGitHubLink() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (claim: string) =>
+      api.post<{ linked: boolean; githubUsername: string }>('/me/github/link/claim', { claim }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: githubKeys.status });
+    },
+  });
+}
+
 export function useGitHubDisconnect() {
   const qc = useQueryClient();
   return useMutation({

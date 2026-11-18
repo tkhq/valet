@@ -1,5 +1,9 @@
 import { Hono } from 'hono';
+import { Octokit } from 'octokit';
 import type { Env, Variables } from '../env.js';
+import { storeCredential } from '../services/credentials.js';
+import { reconcileUserInstallations } from '../services/github-installations.js';
+import { openGitHubLinkClaim } from '../services/github-link-claim.js';
 import { signJWT } from '../lib/jwt.js';
 import { getGitHubConfig, getGitHubMetadata } from '../services/github-config.js';
 import { loadGitHubApp } from '../services/github-app.js';
@@ -74,6 +78,75 @@ githubMeRouter.post('/link', async (c) => {
   });
 
   return c.json({ redirectUrl: url });
+});
+
+/**
+ * POST /link/claim — Finish linking with the claim the OAuth callback issued.
+ * The claim names the user who started the flow; only that user can redeem it.
+ */
+githubMeRouter.post('/link/claim', async (c) => {
+  const user = c.get('user');
+  const appDb = c.get('db');
+
+  const body = await c.req.json<{ claim?: unknown }>().catch(() => ({ claim: undefined }));
+  if (typeof body.claim !== 'string' || !body.claim) {
+    return c.json({ error: 'Missing claim', code: 'missing_params' }, 400);
+  }
+  const opened = await openGitHubLinkClaim(body.claim, c.env.ENCRYPTION_KEY, user.id);
+  if (!opened.ok) {
+    return c.json({ error: 'Cannot complete GitHub linking', code: opened.code }, opened.status);
+  }
+  const { claim } = opened;
+
+  // Remove any existing link for this GitHub account, then any other GitHub
+  // link this user holds (re-link).
+  await db.deleteIdentityLinkByExternalId(appDb, 'github', claim.githubId);
+  const existingLinks = await db.getUserIdentityLinks(appDb, user.id);
+  const existingGithubLink = existingLinks.find((l) => l.provider === 'github');
+  if (existingGithubLink) {
+    await db.deleteIdentityLink(appDb, existingGithubLink.id, user.id);
+  }
+
+  await db.createIdentityLink(appDb, {
+    id: crypto.randomUUID(),
+    userId: user.id,
+    provider: 'github',
+    externalId: claim.githubId,
+    externalName: claim.login,
+  });
+
+  const credentialData: Record<string, string> = { access_token: claim.accessToken };
+  if (claim.refreshToken) credentialData.refresh_token = claim.refreshToken;
+  await storeCredential(c.env, 'user', user.id, 'github', credentialData, {
+    credentialType: 'oauth2',
+    expiresAt: claim.expiresAt ?? undefined,
+  });
+
+  // Provision the integration so GitHub tools are discoverable.
+  await db.ensureIntegration(appDb, user.id, 'github');
+
+  try {
+    await db.updateUserGitHub(appDb, user.id, {
+      githubId: claim.githubId,
+      githubUsername: claim.login,
+      name: claim.name ?? undefined,
+      avatarUrl: claim.avatarUrl ?? undefined,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : '';
+    if (message.includes('UNIQUE constraint failed') || message.includes('idx_users_github_id')) {
+      return c.json({ error: 'GitHub account already linked', code: 'account_already_linked' }, 409);
+    }
+    throw err;
+  }
+
+  try {
+    await reconcileUserInstallations(new Octokit({ auth: claim.accessToken }), appDb, user.id, claim.githubId);
+  } catch (err) {
+    console.warn('[github-me] Installation reconciliation failed:', err);
+  }
+
+  return c.json({ linked: true, githubUsername: claim.login });
 });
 
 /**
