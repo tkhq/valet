@@ -126,8 +126,8 @@ export interface AttentionChannelDeliverer {
   deliver(userId: string, event: AttentionEvent, attempt?: AttentionDeliveryAttempt): Promise<AttentionDeliveryRef[] | void>;
   /** A stale send may have reached the provider. Undefined means resend. */
   reconcile?(userId: string, event: AttentionEvent, attempt: AttentionDeliveryAttempt): Promise<AttentionDeliveryRef[] | undefined>;
-  /** One shared destination per event, separate from personal DM copies. */
-  deliverTeam?(event: AttentionEvent): Promise<void>;
+  /** A team-channel notice for the event's asker, separate from personal DM copies. */
+  deliverTeam?(event: AttentionEvent, audience: readonly string[]): Promise<void>;
 }
 
 export interface AttentionDeps {
@@ -295,7 +295,7 @@ export async function routeAttention(deps: AttentionDeps, event: AttentionEvent)
 
   for (const ch of deps.channels ?? []) {
     if (event.owner.type === "team" && ch.deliverTeam && !restricted) {
-      await ch.deliverTeam(event).catch(err => console.error("attention router: team delivery failed:", err));
+      await ch.deliverTeam(event, audience).catch(err => console.error("attention router: team delivery failed:", err));
     }
   }
   const now = Date.now();

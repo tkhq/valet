@@ -249,12 +249,12 @@ export class SlackApi {
    * The transport answers a rejected approval click with it when the click's
    * own `response_url` is gone.
    */
-  async postEphemeral(opts: { channel: string; user: string; text: string }): Promise<void> {
+  async postEphemeral(opts: { channel: string; user: string; text: string; mrkdwn?: boolean }): Promise<void> {
     await this.call("chat.postEphemeral", {
       channel: opts.channel,
       user: opts.user,
       text: opts.text,
-      mrkdwn: false,
+      mrkdwn: opts.mrkdwn === true,
     });
   }
 

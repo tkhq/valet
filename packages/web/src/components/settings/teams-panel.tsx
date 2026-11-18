@@ -726,7 +726,7 @@ function TeamSlack({ team, canMutate }: { team: TeamSummary; canMutate: boolean 
   return (
     <SubSection
       title="Slack"
-      description="Valet posts new team notifications in the home channel. Add the Valet bot to that channel first."
+      description="When a team thread needs attention, Valet shows a private notice in the home channel to the person who asked. Add the Valet bot to that channel first."
       actions={<Button variant="secondary" size="sm" onClick={() => setReplySetup(true)}>Set up Slack replies</Button>}
     >
       <FieldRow label="Home channel" error={patch.error ? errorText(patch.error) : undefined}>

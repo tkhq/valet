@@ -2490,25 +2490,29 @@ export class ChannelHost {
         signal?.throwIfAborted();
         return links.some(link => link && link.notifyAttention !== false);
       },
-      deliverTeam: async (event): Promise<void> => {
+      deliverTeam: async (event, audience): Promise<void> => {
         if (event.owner.type !== "team" || (channelTypeFilter && channelTypeFilter !== "slack")) return;
         const transport = this.transports.get("slack");
-        if (!transport?.sendToChannel) return;
+        if (!transport?.sendPrivateNotice) return;
         const orgId = this.orgId ?? await this.deps.resolveOrgId();
         const [team] = await this.deps.db.select().from(teams)
           .where(and(eq(teams.id, event.owner.id), eq(teams.orgId, orgId))).limit(1);
         if (!team?.slackHomeChannelId) return;
+        let asker = event.actorUserId;
         if (event.sessionId && event.threadId) {
           const thread = await this.deps.engineStore.getThread(event.sessionId, event.threadId);
           // Existing Slack conversations keep their origin. This is only a new-message default.
           if (thread?.key.startsWith("slack:")) return;
+          asker = await this.latestAsker(event.sessionId, event.threadId) ?? asker;
         }
-        // Channel membership can differ from team membership. Keep sensitive details and
-        // approval controls behind the authorized web route.
+        // Channel membership can differ from team membership, so only the asker sees
+        // this notice. An event with no asker reaches members through inbox and DMs.
+        if (!asker || !audience.includes(asker)) return;
+        const link = await identityForUser(this.deps.db, "slack", asker);
+        if (!link || link.notifyAttention === false) return;
         const href = event.href ?? `/chat?workspace=${encodeURIComponent(team.id)}`;
-        await transport.sendToChannel(team.slackHomeChannelId, {
-          markdown: ["A team notification is ready in Valet.", this.openInValetLink(href)].filter(Boolean).join("\n\n"),
-        });
+        await transport.sendPrivateNotice(team.slackHomeChannelId, link.externalId,
+          [`**${event.title}**`, this.openInValetLink(href)].filter(Boolean).join("\n\n"));
       },
       reconcile: async (userId, event, attempt) => {
         attempt.signal?.throwIfAborted();
@@ -2681,6 +2685,17 @@ export class ChannelHost {
       reportError({ area: "channels", reason: "gate_dm_auth" }, "[channels] gate DM authorization failed", err);
       return false;
     }
+  }
+
+  /** The person who last wrote in a thread. Agent, workflow and event prompts do not count. */
+  private async latestAsker(sessionId: string, threadId: string): Promise<string | undefined> {
+    const entries = await this.deps.engineStore.getEntries(sessionId, threadId, { entryTypes: ["message"], limit: 50 });
+    for (const entry of entries.reverse()) {
+      if (entry.type === "message" && entry.role === "user" && entry.author?.interactive === true && entry.author.externalSender !== true) {
+        return entry.author.id;
+      }
+    }
+    return undefined;
   }
 
   /** The one composer of the web deep link, shared by every outbound path. */

@@ -755,8 +755,10 @@ describe("parseUpdate — gate callbacks", () => {
 describe("sendPrivateNotice", () => {
   it("sends only an ephemeral message and propagates provider failures", async () => {
     const transport = makeTransport();
-    await transport.sendPrivateNotice(CHANNEL, "U1", "Link your account.");
-    expect(fake.calls.find(c => c.method === "chat.postEphemeral")?.body).toMatchObject({ channel: CHANNEL, user: "U1", text: "Link your account." });
+    await transport.sendPrivateNotice(CHANNEL, "U1", "**Link** your account in [Valet](https://valet.example/settings).");
+    expect(fake.calls.find(c => c.method === "chat.postEphemeral")?.body).toMatchObject({
+      channel: CHANNEL, user: "U1", mrkdwn: true, text: "*Link* your account in <https://valet.example/settings|Valet>.",
+    });
     expect(fake.calls.some(c => c.method === "chat.postMessage")).toBe(false);
     fake.failNext("chat.postEphemeral", "channel_not_found");
     await expect(transport.sendPrivateNotice(CHANNEL, "U1", "Link your account.")).rejects.toThrow("channel_not_found");
