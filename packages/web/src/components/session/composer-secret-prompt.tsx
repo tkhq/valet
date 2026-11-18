@@ -1,9 +1,10 @@
 import { useMemo, useState } from "react";
-import { findSecretCandidates, maskSecret, replaceSecrets, suggestSecretName, type SecretTokenCandidate } from "@valet/shared";
+import { findSecretCandidates, maskSecret, replaceSecrets, secretUseDefaultFor, suggestSecretName, type SecretTokenCandidate } from "@valet/shared";
 import { Button, Input, Spinner } from "~/components/primitives";
 import { saveSecretValue, type SecretTarget } from "~/api/secrets";
 import { ApiError } from "~/api/api-error";
 import { errorText } from "~/lib/error-text";
+import { SecretUseFields, draftFromDefault, draftHost, draftIncomplete, ruleFromDraft } from "~/components/settings/secret-use-fields";
 
 /**
  * Keeps a pasted key out of a message (secret intake, stage 1:
@@ -35,6 +36,8 @@ export interface ComposerSecretCandidate {
   /** For example "OpenAI key" or "Hetzner key"; "key" when the provider is unknown. */
   label: string;
   suggestedName: string;
+  /** The provider word or known-format label, for the host and header defaults. */
+  provider?: string;
 }
 
 function labelFor(c: SecretTokenCandidate): string {
@@ -59,6 +62,7 @@ export function composerCandidates(text: string, opts: { credentialRequested?: b
       value: c.value,
       label: labelFor(c),
       suggestedName: c.reason === "password" ? suggestSecretName({ suggestedName: "PASSWORD" }) : suggestSecretName(c),
+      ...(c.provider ? { provider: c.provider } : {}),
     }));
 }
 
@@ -109,6 +113,7 @@ export function ComposerSecretPrompt({
   onReplace,
   onKeep,
   position,
+  useAvailable = false,
 }: {
   candidate: ComposerSecretCandidate;
   text: string;
@@ -118,8 +123,13 @@ export function ComposerSecretPrompt({
   onKeep: () => void;
   /** "1 of 2" when the draft holds more than one candidate. */
   position?: { index: number; total: number };
+  /** The deployment has a use service, so the key can be saved use-only for one host. */
+  useAvailable?: boolean;
 }) {
   const [name, setName] = useState(candidate.suggestedName);
+  // The parent keys this prompt by the candidate's value, so mount-time state follows the candidate.
+  const [useDraft, setUseDraft] = useState(() => draftFromDefault(secretUseDefaultFor(candidate.provider)));
+  const host = useAvailable ? draftHost(useDraft) : "";
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const where = target.scope === "team" ? "this team's secrets" : "your personal secrets";
@@ -127,11 +137,12 @@ export function ComposerSecretPrompt({
   const nameOk = NAME_PATTERN.test(trimmed);
 
   async function save() {
-    if (!nameOk || saving) return;
+    if (!nameOk || saving || (useAvailable && draftIncomplete(useDraft))) return;
     setSaving(true);
     setError(null);
     try {
-      await saveSecretValue(target, trimmed, candidate.value);
+      const use = useAvailable ? ruleFromDraft(useDraft) : undefined;
+      await saveSecretValue(target, trimmed, candidate.value, use ? { use } : {});
     } catch (err) {
       const taken = err instanceof ApiError && err.status === 409;
       setError(taken ? `A secret named ${trimmed} already exists. Pick another name.` : errorText(err, "Could not save it. Try again."));
@@ -149,6 +160,16 @@ export function ComposerSecretPrompt({
         This looks like {withArticle(candidate.label)} (<span className="font-mono">{maskSecret(candidate.value)}</span>). Save it to {where} and
         send a reference instead? The agent can use the reference, and the key stays out of the thread.
       </p>
+      {useAvailable && (
+        <div className="mt-2 flex flex-col gap-1">
+          <SecretUseFields draft={useDraft} onChange={setUseDraft} disabled={saving} size="sm" />
+          <p className="text-muted">
+            {host
+              ? `The agent never gets this key. Valet sends it only to ${host}, and only the response comes back. Check the host before you save.`
+              : "Set a host to make this key use-only. Without a host, commands can read the value."}
+          </p>
+        </div>
+      )}
       <div className="mt-2 flex flex-wrap items-center gap-2">
         <Input
           value={name}
@@ -160,7 +181,7 @@ export function ComposerSecretPrompt({
           autoComplete="off"
           disabled={saving}
         />
-        <Button type="button" size="sm" onClick={() => void save()} disabled={saving || !nameOk}>
+        <Button type="button" size="sm" onClick={() => void save()} disabled={saving || !nameOk || (useAvailable && draftIncomplete(useDraft))}>
           {saving ? <Spinner size={14} /> : "Save as secret"}
         </Button>
         <Button type="button" variant="ghost" size="sm" onClick={onKeep} disabled={saving}>

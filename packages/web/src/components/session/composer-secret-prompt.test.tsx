@@ -48,7 +48,7 @@ describe("ComposerSecretPrompt", () => {
     expect(screen.queryByText(KEY)).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Save as secret" }));
     await waitFor(() => expect(onReplace).toHaveBeenCalledWith("run with secret://personal/OPENAI_API_KEY now"));
-    expect(saveSecretValue).toHaveBeenCalledWith({ scope: "personal" }, "OPENAI_API_KEY", KEY);
+    expect(saveSecretValue).toHaveBeenCalledWith({ scope: "personal" }, "OPENAI_API_KEY", KEY, {});
   });
 });
 
@@ -82,5 +82,41 @@ describe("composerCandidates", () => {
 
   it("asks about a password after a password word", () => {
     expect(composerCandidates("my password is Blue&72!")[0]).toMatchObject({ label: "password", suggestedName: "PASSWORD" });
+  });
+});
+
+describe("ComposerSecretPrompt with a use service", () => {
+  it("pre-fills the provider's host and header and saves the key use-only", async () => {
+    saveSecretValue.mockReset().mockResolvedValueOnce({});
+    const text = `here's my hetzner api key ${HETZNER} can you deploy`;
+    const onReplace = vi.fn();
+    const [candidate] = composerCandidates(text);
+    render(<ComposerSecretPrompt candidate={candidate!} text={text} target={{ scope: "personal" }} onReplace={onReplace} onKeep={vi.fn()} useAvailable />);
+    const host = screen.getByRole("textbox", { name: "Only for host" }) as HTMLInputElement;
+    expect(host.value).toBe("api.hetzner.cloud");
+    expect(screen.getByText(/sends it only to api\.hetzner\.cloud/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Save as secret" }));
+    await waitFor(() => expect(onReplace).toHaveBeenCalled());
+    expect(saveSecretValue).toHaveBeenCalledWith({ scope: "personal" }, "HETZNER_API_KEY", HETZNER, {
+      use: { hosts: ["api.hetzner.cloud"], header: "authorization", format: "Bearer {secret}" },
+    });
+  });
+
+  it("saves a plain secret when the person clears the host", async () => {
+    saveSecretValue.mockReset().mockResolvedValueOnce({});
+    const text = `here's my hetzner api key ${HETZNER} can you deploy`;
+    const [candidate] = composerCandidates(text);
+    render(<ComposerSecretPrompt candidate={candidate!} text={text} target={{ scope: "personal" }} onReplace={vi.fn()} onKeep={vi.fn()} useAvailable />);
+    fireEvent.change(screen.getByRole("textbox", { name: "Only for host" }), { target: { value: "" } });
+    expect(screen.getByText(/Without a host, commands can read the value/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Save as secret" }));
+    await waitFor(() => expect(saveSecretValue).toHaveBeenCalledWith({ scope: "personal" }, "HETZNER_API_KEY", HETZNER, {}));
+  });
+
+  it("starts with an empty host for an unknown provider", () => {
+    const text = `the new token is ${HETZNER}`;
+    const [candidate] = composerCandidates(text);
+    render(<ComposerSecretPrompt candidate={candidate!} text={text} target={{ scope: "personal" }} onReplace={vi.fn()} onKeep={vi.fn()} useAvailable />);
+    expect((screen.getByRole("textbox", { name: "Only for host" }) as HTMLInputElement).value).toBe("");
   });
 });

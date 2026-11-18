@@ -1208,6 +1208,7 @@ export function Composer({
             onReplace={setText}
             onKeep={() => secretGuard.keep(secretGuard.pending[0]!.value)}
             position={{ index: 0, total: secretGuard.pending.length }}
+            useAvailable={secretStoreQ.data?.useAvailable === true}
           />
         )}
         <ComposerImageErrors

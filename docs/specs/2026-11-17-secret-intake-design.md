@@ -54,7 +54,7 @@ Candidates in a known format, and candidates scored 0.5 or higher, are caught wi
 
 ### Composer (web)
 
-Stage 1 only, before sending, at a score of 0.5 or higher (`composer-secret-prompt.tsx`). Built (2026-11-17): the prompt names the provider ("This looks like a Hetzner key"), suggests `PROVIDER_API_KEY`, numbers several candidates ("1 of 2"), and offers "Save as secret" and "It's not a key". The host and header fields below wait for use rules. The target design:
+Stage 1 only, before sending, at a score of 0.5 or higher (`composer-secret-prompt.tsx`). Built (2026-11-17): the prompt names the provider ("This looks like a Hetzner key"), suggests `PROVIDER_API_KEY`, numbers several candidates ("1 of 2"), and offers "Save as secret" and "It's not a key". With a use service (`useAvailable`), the prompt also shows "Only for host" and a header picker (`components/settings/secret-use-fields.tsx`), pre-filled from `secretUseDefaultFor` when the provider is known. With a host, the key is saved use-only; with the host cleared, it is saved as a plain secret. The prompt replaces the key in the draft and the person sends the message. The target design:
 
 ```
 This looks like a key. Save it as a secret instead of sending it?
@@ -126,5 +126,5 @@ Run with `pnpm --filter @valet/eval secret-intake [--held-out] [--model]`. Stage
 1. The eval and stage 1. Done.
 2. The composer prompt on stage 1. Done.
 3. Stage 2 in the backstop. Done.
-4. Use rules (host and header per secret), then the hold and card flow and the host fields in the composer.
+4. Use rules (host and header per secret) and the host fields in the composer. Done. Next: the hold and card flow on the server.
 5. The agent backstop tool.
