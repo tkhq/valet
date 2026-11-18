@@ -9,7 +9,7 @@
  * lives in the review comments on GitHub and is read back from them.
  */
 import { Type, type Static, type TSchema } from "typebox";
-import type { PluginChild, PluginEvent, PluginEventContext, PluginEventHandler, PluginThreadRef } from "@valet/engine";
+import type { PluginAcceptContext, PluginChild, PluginEvent, PluginEventContext, PluginEventHandler, PluginThreadRef } from "@valet/engine";
 import { cutPatch, type PullRequestDiff } from "./git.js";
 import { githubClient, GitHubError, type GitHubClient, type PullFile, type PullRequest, type ReviewComment, type ReviewThread } from "./github.js";
 import { matchesGlob } from "./context/glob.js";
@@ -37,6 +37,7 @@ import { buildVerifierPrompt, claimDiff, decideFinding, refutationCitesRules, re
 import { packRules } from "./context/pack.js";
 import type { ReviewRound } from "./state.js";
 import { buildLearnerPrompt, collectFeedback, existingLessons, runLearner, writeLessons, type LearnOutcome } from "./learn.js";
+import { isMentionEvent, mentionHandle, MENTION_EVENTS, reviewRequest, type ReviewRequest } from "./mention.js";
 
 export const REVIEWER_ROLE = "pr-reviewer";
 
@@ -64,7 +65,7 @@ export const ReviewSettingsSchema = Type.Object(
       default: "low",
       description: "Post only findings at this severity or above.",
     }),
-    reviewDrafts: Type.Boolean({ default: false, description: "Review draft pull requests on every push too. A review a person asks for reviews a draft either way." }),
+    reviewDrafts: Type.Boolean({ default: false, description: "Review draft pull requests on every push too. A review a person asks for, in Valet or with `@<app> review` in a comment, reviews a draft either way." }),
     shadow: Type.Boolean({
       default: false,
       description: "Record each review in the plugin thread only. Nothing is posted on GitHub.",
@@ -203,11 +204,42 @@ export function createReviewHandler(opts: ReviewHandlerOptions = {}): PluginEven
   return {
     id: "review-pull-request",
     description: "Review each push to a pull request and keep one review per pull request, edited in place.",
-    events: ["github.pull_request.opened", "github.pull_request.synchronize", "github.pull_request.ready_for_review", "github.pull_request.reopened", "github.pull_request.closed"],
+    events: ["github.pull_request.opened", "github.pull_request.synchronize", "github.pull_request.ready_for_review", "github.pull_request.reopened", "github.pull_request.closed", ...MENTION_EVENTS],
     configSchema: ReviewSettingsSchema,
     concurrency: "supersede",
+    accepts: acceptsEvent,
     handle: (event, ctx) => reviewPullRequestEvent(event, ctx, opts),
   };
+}
+
+/** Push events: each one reviews the new head, unless the pull request is a draft the line does not review. */
+const PUSH_EVENTS = new Set(["github.pull_request.opened", "github.pull_request.synchronize", "github.pull_request.reopened"]);
+
+/**
+ * Whether the handler acts on an event, decided before the run starts and
+ * before it supersedes a run in flight on the same pull request. Without it,
+ * any comment on the pull request, or a push to a draft the line does not
+ * review, would cancel a review in flight and then do nothing.
+ * - A comment counts only when it asks for a review (`reviewRequest`). A
+ *   shadow line posts nothing on GitHub, so it takes no requests there.
+ * - A push to a draft counts only when the line reviews drafts or is a shadow line.
+ */
+export async function acceptsEvent(event: PluginEvent, ctx: PluginAcceptContext): Promise<boolean> {
+  const settings = ctx.config as ReviewSettings; // the host checked it against ReviewSettingsSchema and filled defaults
+  if (isMentionEvent(event.key)) {
+    if (settings.shadow) return false;
+    const login = await ctx.appLogin("github");
+    return login !== null && reviewRequest(event, login) !== undefined;
+  }
+  if (PUSH_EVENTS.has(event.key) && payloadDraft(event.payload) && !settings.reviewDrafts && !settings.shadow) return false;
+  return true;
+}
+
+/** Whether the event payload says the pull request is a draft. The handler still reads the current state. */
+function payloadDraft(payload: unknown): boolean {
+  if (typeof payload !== "object" || payload === null || !("pull_request" in payload)) return false;
+  const pr = payload.pull_request;
+  return typeof pr === "object" && pr !== null && "draft" in pr && pr.draft === true;
 }
 
 interface PullTarget {
@@ -216,13 +248,18 @@ interface PullTarget {
   number: number;
 }
 
-/** The pull request an event is about, from its repo ref and payload. */
+/**
+ * The pull request an event is about, from its repo ref and payload. A
+ * conversation comment names it as an issue that has `pull_request`.
+ */
 export function pullTarget(event: Pick<PluginEvent, "refs" | "payload">): PullTarget | null {
   const [owner, repo, ...rest] = (event.refs.repo ?? "").split("/");
   if (!owner || !repo || rest.length > 0) return null;
   const payload = event.payload;
-  if (typeof payload !== "object" || payload === null || !("pull_request" in payload)) return null;
-  const pr = payload.pull_request;
+  if (typeof payload !== "object" || payload === null) return null;
+  const pr = "pull_request" in payload ? payload.pull_request
+    : "issue" in payload && typeof payload.issue === "object" && payload.issue !== null && "pull_request" in payload.issue ? payload.issue
+    : undefined;
   if (typeof pr !== "object" || pr === null || !("number" in pr) || typeof pr.number !== "number") return null;
   return { owner, repo, number: pr.number };
 }
@@ -244,9 +281,23 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
 
   // The event's head can be stale: GitHub timestamps have one-second
   // resolution, so read the PR's current state.
+  // A comment that asks for a review: only a person with push access gets one.
+  let request: ReviewRequest | undefined;
+  let handle: string | undefined;
+  if (isMentionEvent(event.key)) {
+    const login = await ctx.appLogin("github");
+    request = login !== null ? reviewRequest(event, login) : undefined;
+    if (!login || !request) return log(slug, "skipped: the comment asks for no review");
+    if (settings.shadow) return log(slug, "skipped: a shadow line takes no review requests on GitHub");
+    const role = await gh.permission(request.author);
+    if (role === undefined || !PUSH_ROLES.has(role)) return log(slug, `skipped: ${request.author} asked for a review without push access (role ${role ?? "none"})`);
+    handle = mentionHandle(login);
+  }
+
   const pr = await gh.pull();
   const head = pr.head.sha;
   const manual = manualReviewOptions(event);
+  const requested = manual !== undefined || request !== undefined;
   if (event.key === "github.pull_request.closed") {
     await recordOutcomes(ctx, gh, pr, { slug, repoName });
     if (settings.shadow) return log(slug, "skipped learning: a shadow line does not learn");
@@ -256,7 +307,7 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
   if (settings.shadow || manual?.shadow) return shadowReview(event, ctx, gh, pr, settings, { slug, repoName, number: target.number, commit: manual?.commit });
   if (pr.state !== "open") return log(slug, `skipped: the pull request is ${pr.state}`);
   // A person who asks for a review gets one on a draft too; only push events wait for ready_for_review.
-  if (pr.draft && !settings.reviewDrafts && !manual) return log(slug, "skipped: draft pull request");
+  if (pr.draft && !settings.reviewDrafts && !requested) return log(slug, "skipped: draft pull request");
 
   let stored = await ctx.store.get<PullPointers>(POINTERS_COLLECTION, slug);
   let prior = stored?.doc;
@@ -265,8 +316,15 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
     stored = await ctx.store.put(POINTERS_COLLECTION, slug, next, stored ? { ifRevision: stored.revision } : undefined);
   };
   if (prior?.pending) prior = await finishPendingUpdates(gh, prior, save, ctx.signal);
-  // A person who asks for a review gets one, even of a head already reviewed.
-  if (manual === undefined && prior?.lastReviewedHead === head) return log(slug, `skipped: ${head.slice(0, 7)} is already reviewed`);
+  // A person who asks in Valet gets a review even of a head already reviewed.
+  // A comment asks for the commits since the last review, so it gets an answer instead.
+  if (!requested && prior?.lastReviewedHead === head) return log(slug, `skipped: ${head.slice(0, 7)} is already reviewed`);
+  if (request && !request.full && prior?.lastReviewedHead === head) {
+    await answerRequest(gh, request, slug, (r) => r.replyToComment(request.surface, request.commentId, renderAlreadyReviewed(head, handle ?? "")));
+    return log(slug, `skipped: ${head.slice(0, 7)} is already reviewed, and ${request.author} did not ask for a full review`);
+  }
+  // Show the person that the review started. A failed reaction does not stop it.
+  if (request) await answerRequest(gh, request, slug, (r) => r.reactToComment(request.surface, request.commentId, "eyes"));
 
   if (await untrustedFork(gh, pr)) {
     ctx.signal.throwIfAborted();
@@ -288,7 +346,8 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
   // A force-push or rebase drops it, and the review covers the whole PR again.
   let from: string | undefined;
   let changedSince: Set<string> | undefined;
-  if (prior?.lastReviewedHead) {
+  // `full review` in a comment reviews the whole PR again.
+  if (prior?.lastReviewedHead && !request?.full) {
     const increment = await gh.compare(prior.lastReviewedHead, head);
     if (increment?.status === "ahead") {
       from = prior.lastReviewedHead;
@@ -548,7 +607,7 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
   });
   await writeRecords(ctx.store, slug, records).catch((err: unknown) => console.warn(`pr-review ${slug}: could not record ${records.length} finding(s) for outcome measurement`, err));
   await finishPendingUpdates(gh, next, save, ctx.signal);
-  log(slug, `reviewed ${head.slice(0, 7)} (${from ? "follow-up" : "full"}): ${posted.length} new, ${fixed.filter((r) => !r.withdrawn).length} fixed, ${fixed.filter((r) => r.withdrawn).length} withdrawn, ${reopened.length} reopened, ${stillOpen.length} still open`);
+  log(slug, `reviewed ${head.slice(0, 7)} (${from ? "follow-up" : "full"}${request ? `, asked for by ${request.author}` : ""}): ${posted.length} new, ${fixed.filter((r) => !r.withdrawn).length} fixed, ${fixed.filter((r) => r.withdrawn).length} withdrawn, ${reopened.length} reopened, ${stillOpen.length} still open`);
 }
 
 async function finishPendingUpdates(
@@ -1096,6 +1155,20 @@ async function untrustedFork(gh: GitHubClient, pr: PullRequest): Promise<boolean
   if (TRUSTED_FORK_AUTHORS.has(pr.author_association ?? "")) return false;
   const role = pr.user ? await gh.permission(pr.user.login) : undefined;
   return role === undefined || !PUSH_ROLES.has(role);
+}
+
+/** One call that answers a review request on GitHub. A failure is logged: the review goes on without it. */
+async function answerRequest(gh: GitHubClient, request: ReviewRequest, slug: string, call: (gh: GitHubClient) => Promise<void>): Promise<void> {
+  try {
+    await call(gh);
+  } catch (err) {
+    console.warn(`pr-review ${slug}: could not answer the review request in comment ${request.commentId}`, err instanceof Error ? err.message : err);
+  }
+}
+
+/** The reply to `@<app> review` when the head has no commits since the last review. */
+export function renderAlreadyReviewed(head: string, handle: string): string {
+  return `Valet already reviewed ${head.slice(0, 7)}, the head of this pull request. Push new commits and comment again, or comment \`@${handle} full review\` to review the whole pull request again.`;
 }
 
 /** Whether `path` matches one of the exclude globs (see `matchesGlob`). */

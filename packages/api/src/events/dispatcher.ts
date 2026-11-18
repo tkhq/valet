@@ -109,12 +109,52 @@ function pluginServices(plugin: ValetPlugin): Set<string> {
   return new Set([plugin.name, ...(plugin.credentials ?? []).map((c) => c.service ?? plugin.name)]);
 }
 
+/** The skip reason of a delivery the handler declined (`PluginEventHandler.accepts`). */
+const PLUGIN_DECLINED = "The handler does not act on this event.";
+
+/**
+ * The line's settings for its handler, checked against the handler's schema
+ * with the defaults filled in. Checked at each delivery: the plugin's schema
+ * may have changed since the line was saved.
+ */
+function lineConfig(plugin: ValetPlugin, handler: PluginEventHandler, target: SubscriptionTarget): Record<string, unknown> {
+  if (handler.configSchema) {
+    const checked = pluginHandlerConfig(handler.configSchema, target.config);
+    if (!checked.ok) {
+      throw new Error(`This line's settings do not match ${plugin.name}/${handler.id}: ${checked.error}. Edit the line's settings.`);
+    }
+    return checked.args;
+  }
+  if (target.config !== undefined) {
+    throw new Error(`Handler ${plugin.name}/${handler.id} no longer takes settings. Remove the settings from this line.`);
+  }
+  return {};
+}
+
+/** A stored event as a plugin handler receives it. */
+function pluginEventOf(event: typeof events.$inferSelect): PluginEvent {
+  return {
+    id: event.id,
+    key: event.eventKey,
+    dedupeKey: event.dedupeKey,
+    occurredAt: new Date(event.occurredAt).toISOString(),
+    // Written by ingest from NormalizedEvent; the jsonb columns hold its shapes.
+    ...(event.actor ? { actor: event.actor as NonNullable<PluginEvent["actor"]> } : {}),
+    refs: event.refs as Record<string, string>,
+    summary: event.summary,
+    payload: event.payload,
+    ...(event.subjects ? { subjects: event.subjects } : {}),
+  };
+}
+
 /** What the dispatcher needs to run plugin event handlers. */
 export interface PluginHandlerHost {
   /** `PluginThreads` for one handler run (`buildPluginThreads` in production). */
   threads(scope: PluginThreadsScope): PluginThreads;
   /** The org's app credential for `service`, or null when it is not connected. */
   appToken(orgId: string, service: string, scope?: { owner?: string }): Promise<string | null>;
+  /** The login of the org's app account for `service` (GitHub: `<app-slug>[bot]`), or null when it is not connected. */
+  appLogin(orgId: string, service: string): Promise<string | null>;
   /**
    * Stop the children recorded against these deliveries
    * (`stopPluginDeliveryChildren` in production). Called when deliveries
@@ -975,6 +1015,24 @@ export class EventDispatcher {
       // Take the claim this poll made. A miss means another process
       // re-claimed the row between the claim and here.
       if (!(await takeLease({ attempts }))) return;
+      // A handler may decline the event. It is asked before the supersede
+      // step, so an event it ignores never cancels a run in flight.
+      let accepted: boolean;
+      try {
+        accepted = await this.pluginAccepts(sub, target, event);
+      } catch (err) {
+        clearInterval(renew);
+        await leaseWrites;
+        const status = await this.recordDeliveryFailure(delivery, event, err, attempts, owned());
+        if (status) this.recordPluginOutcome(target, status);
+        return;
+      }
+      if (!accepted) {
+        await countIfWritten("skipped", serialLeaseWrite(() => db.update(eventDeliveries)
+          .set({ status: "skipped", lastError: PLUGIN_DECLINED }).where(owned())
+          .returning({ id: eventDeliveries.id })));
+        return;
+      }
       // `concurrency: "supersede"`: only the newest event per subject runs.
       const superseding = this.supersedeSubject(target, event);
       if (superseding) {
@@ -1037,6 +1095,26 @@ export class EventDispatcher {
     const plugin = (this.deps.plugins ?? []).find((p) => p.name === target.plugin);
     const handler = plugin?.eventHandlers?.find((h) => h.id === target.handler);
     return plugin && handler ? { plugin, handler } : undefined;
+  }
+
+  /** Whether the line's handler acts on this event (`PluginEventHandler.accepts`). True when the handler does not say. */
+  private async pluginAccepts(sub: typeof eventSubscriptions.$inferSelect, target: SubscriptionTarget, event: typeof events.$inferSelect): Promise<boolean> {
+    const loaded = this.pluginHandler(target);
+    const accepts = loaded?.handler.accepts;
+    if (!loaded || !accepts) return true;
+    const { plugin, handler } = loaded;
+    return accepts.call(handler, pluginEventOf(event), { config: lineConfig(plugin, handler, target), appLogin: this.appLoginFor(plugin, sub.orgId) });
+  }
+
+  /** `appLogin` for a plugin's handler: only the services the plugin may ask app tokens for. */
+  private appLoginFor(plugin: ValetPlugin, orgId: string): (service: string) => Promise<string | null> {
+    const services = pluginServices(plugin);
+    return async (service) => {
+      if (!services.has(service)) {
+        throw new Error(`Plugin ${plugin.name} did not declare service ${service}. Declare a credential for it in the plugin manifest.`);
+      }
+      return this.deps.pluginHandlers?.appLogin(orgId, service) ?? null;
+    };
   }
 
   /** The subject this run supersedes on, or null when the handler runs in parallel or the event has none. */
@@ -1109,17 +1187,7 @@ export class EventDispatcher {
       throw new Error(`Plugin handler ${target.plugin}/${target.handler} is not loaded. Enable the plugin or delete this line.`);
     }
     const { plugin, handler } = loaded;
-    let config: Record<string, unknown> = {};
-    if (handler.configSchema) {
-      // Checked again here: the plugin's schema may have changed since the line was saved.
-      const checked = pluginHandlerConfig(handler.configSchema, target.config);
-      if (!checked.ok) {
-        throw new Error(`This line's settings do not match ${plugin.name}/${handler.id}: ${checked.error}. Edit the line's settings.`);
-      }
-      config = checked.args;
-    } else if (target.config !== undefined) {
-      throw new Error(`Handler ${plugin.name}/${handler.id} no longer takes settings. Remove the settings from this line.`);
-    }
+    const config = lineConfig(plugin, handler, target);
     if (sub.ownerType !== "user" && sub.ownerType !== "team") {
       throw new Error("A plugin handler acts for a person or a team. Arm it from a personal or team workspace.");
     }
@@ -1133,18 +1201,7 @@ export class EventDispatcher {
     const services = pluginServices(plugin);
     const store = pluginStore(this.deps.db, plugin.name);
     await handler.handle(
-      {
-        id: event.id,
-        key: event.eventKey,
-        dedupeKey: event.dedupeKey,
-        occurredAt: new Date(event.occurredAt).toISOString(),
-        // Written by ingest from NormalizedEvent; same narrowing as `refs` above.
-        ...(event.actor ? { actor: event.actor as NonNullable<PluginEvent["actor"]> } : {}),
-        refs: event.refs as Record<string, string>,
-        summary: event.summary,
-        payload: event.payload,
-        ...(event.subjects ? { subjects: event.subjects } : {}),
-      },
+      pluginEventOf(event),
       {
         orgId: sub.orgId,
         owner,
@@ -1159,6 +1216,7 @@ export class EventDispatcher {
           }
           return host.appToken(sub.orgId, service, scope);
         },
+        appLogin: this.appLoginFor(plugin, sub.orgId),
         signal,
         ...(valetBuildSha() ? { build: valetBuildSha() } : {}),
       },

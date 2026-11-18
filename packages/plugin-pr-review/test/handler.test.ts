@@ -21,7 +21,11 @@ import type {
   SubmissionResult,
 } from "@valet/engine";
 import {
+  acceptsEvent,
   commentableLines,
+  mentionCommand,
+  pullTarget,
+  reviewRequest,
   nearestCommentableLine,
   createReviewHandler,
   excluded,
@@ -106,6 +110,9 @@ class FakeGitHub {
   contentsAt: Record<string, Record<string, string>> = {};
   /** An HTTP status to answer for a file at a ref, e.g. a 429 rate limit. */
   contentsStatusAt: Record<string, Record<string, number>> = {};
+  /** Replies the handler posted to a comment, by API path. */
+  replies: { path: string; body: string }[] = [];
+  failReactions = false;
   private nextId = 100;
 
   fetch: typeof fetch = async (input, init) => {
@@ -219,6 +226,15 @@ class FakeGitHub {
       this.reviews.set(id, { id, body: String(body.body ?? ""), commit_id: String(body.commit_id) });
       for (const c of comments) this.comments.push({ id: this.nextId++, path: c.path, line: c.line, side: c.side, body: c.body, pull_request_review_id: id });
       return ok({ id, body: body.body, html_url: "https://github.com/r" });
+    }
+    // Answers to a review request: reactions and replies.
+    if (method === "POST" && /^\/(issues|pulls)\/comments\/\d+\/reactions$/.test(path)) {
+      if (this.failReactions) return new Response(JSON.stringify({ message: "Resource not accessible by integration" }), { status: 403 });
+      return ok({ content: body.content });
+    }
+    if (method === "POST" && (path === "/issues/7/comments" || /^\/pulls\/7\/comments\/\d+\/replies$/.test(path))) {
+      this.replies.push({ path, body: String(body.body) });
+      return ok({ id: this.nextId++ });
     }
     const commentMatch = /^\/pulls\/comments\/(\d+)$/.exec(path);
     if (method === "PATCH" && commentMatch) {
@@ -365,11 +381,34 @@ function context(threads: PluginThreads, store: ScopedPluginStore, config: Recor
     store,
     memory: { search: async () => [], read: async () => null, list: async () => [], write: async () => {} },
     appToken: async (service) => (service === "github" ? "ghs_test" : null),
+    appLogin: async (service) => (service === "github" ? "valet[bot]" : null),
     signal: new AbortController().signal,
   };
 }
 
 const reviewOf = (findings: Finding[]): Review => ({ summary: "Adds a.ts.", confidence: 3, findings });
+
+/** A comment on pull request 7: in the conversation (`issue`) or inline (`review`). */
+function commentEvent(id: string, body: string, opts: { surface?: "issue" | "review"; author?: string; type?: string; commentId?: number } = {}): PluginEvent {
+  const comment = { id: opts.commentId ?? 501, body, user: { login: opts.author ?? "maintainer", type: opts.type ?? "User" } };
+  const review = opts.surface === "review";
+  return {
+    id,
+    key: review ? "github.pull_request_review_comment.created" : "github.issue_comment.created",
+    dedupeKey: `d-${id}`,
+    occurredAt: new Date().toISOString(),
+    refs: { repo: "acme/site" },
+    summary: "Comment on PR #7",
+    payload: review
+      ? { action: "created", pull_request: { number: 7 }, comment }
+      : { action: "created", issue: { number: 7, pull_request: { url: "https://api.github.com/repos/acme/site/pulls/7" } }, comment },
+  };
+}
+
+/** What `accepts` receives: the line's settings with defaults filled in, and the App's login. */
+function acceptContext(config: Record<string, unknown> = {}, login: string | null = "valet[bot]") {
+  return { config: Value.Default(ReviewSettingsSchema, structuredClone(config)) as Record<string, unknown>, appLogin: async () => login };
+}
 
 describe("review-pull-request handler", () => {
   it("still posts the review when GitHub cannot serve a changed file for the line count and verifier checks", async () => {
@@ -1299,6 +1338,134 @@ describe("review-pull-request handler", () => {
   it("fails the delivery when the GitHub App is not installed", async () => {
     const ctx = { ...context(new FakeThreads(scripted(reviewOf([]), {})), new FakeStore()), appToken: async () => null };
     await expect(createReviewHandler().handle(event("ev1"), ctx)).rejects.toThrow(/Install it on acme/);
+  });
+});
+
+describe("review on request by mention", () => {
+  it.each([
+    ["@valet review", "review"],
+    ["@Valet  REVIEW please", "review"],
+    ["Thanks! @valet[bot] review", "review"],
+    ["ok, @valet: review", "review"],
+    ["@valet full review", "full"],
+    ["first line\n@valet full   review", "full"],
+  ])("reads the command in %j", (body, command) => {
+    expect(mentionCommand(body, "valet[bot]")).toBe(command);
+  });
+
+  it.each([
+    "@valet please review",
+    "@valet-other review",
+    "@valetx review",
+    "mail@valet review",
+    "> @valet review",
+    "`@valet review`",
+    "```\n@valet review\n```",
+    "@valet looks good",
+  ])("reads no command in %j", (body) => {
+    expect(mentionCommand(body, "valet[bot]")).toBeUndefined();
+  });
+
+  it("asks for nothing in a bot's comment, the App's own comment, or a comment on a plain issue", () => {
+    expect(reviewRequest(commentEvent("e1", "@valet review"), "valet[bot]")).toEqual({ commentId: 501, surface: "issue", author: "maintainer", full: false });
+    expect(reviewRequest(commentEvent("e1", "@valet full review", { surface: "review" }), "valet[bot]")).toEqual({ commentId: 501, surface: "review", author: "maintainer", full: true });
+    expect(reviewRequest(commentEvent("e1", "@valet review", { author: "ci[bot]", type: "Bot" }), "valet[bot]")).toBeUndefined();
+    expect(reviewRequest(commentEvent("e1", "@valet review", { author: "valet[bot]" }), "valet[bot]")).toBeUndefined();
+    const onIssue = commentEvent("e1", "@valet review");
+    onIssue.payload = { action: "created", issue: { number: 7 }, comment: { id: 1, body: "@valet review", user: { login: "maintainer", type: "User" } } };
+    expect(reviewRequest(onIssue, "valet[bot]")).toBeUndefined();
+    expect(reviewRequest({ ...commentEvent("e1", "@valet review"), key: "github.issue_comment.edited" }, "valet[bot]")).toBeUndefined();
+  });
+
+  it("names the pull request of a conversation comment", () => {
+    expect(pullTarget(commentEvent("e1", "@valet review"))).toEqual({ owner: OWNER, repo: REPO, number: 7 });
+  });
+
+  it("accepts only comments that ask for a review, and declines draft pushes the line does not review", async () => {
+    expect(await acceptsEvent(commentEvent("e1", "@valet review"), acceptContext())).toBe(true);
+    expect(await acceptsEvent(commentEvent("e1", "nice work @valet"), acceptContext())).toBe(false);
+    expect(await acceptsEvent(commentEvent("e1", "@valet review"), acceptContext({}, null))).toBe(false);
+    // A shadow line posts nothing on GitHub, so a request there would go unanswered.
+    expect(await acceptsEvent(commentEvent("e1", "@valet review"), acceptContext({ shadow: true }))).toBe(false);
+    const draftPush = { ...event("e2"), payload: { action: "synchronize", pull_request: { number: 7, draft: true } } };
+    expect(await acceptsEvent(draftPush, acceptContext())).toBe(false);
+    expect(await acceptsEvent(draftPush, acceptContext({ reviewDrafts: true }))).toBe(true);
+    expect(await acceptsEvent(draftPush, acceptContext({ shadow: true }))).toBe(true);
+    expect(await acceptsEvent({ ...draftPush, key: "github.pull_request.ready_for_review" }, acceptContext())).toBe(true);
+    expect(await acceptsEvent(event("e3"), acceptContext())).toBe(true);
+    expect(await acceptsEvent(event("e4", MANUAL_REVIEW_EVENT, { requestedBy: "user-1" }), acceptContext())).toBe(true);
+  });
+
+  it("reviews a draft for a commenter with push access and reacts to the comment", async () => {
+    const gh = new FakeGitHub();
+    gh.draft = true;
+    gh.roles = { maintainer: "write" };
+    const threads = new FakeThreads(scripted(reviewOf([finding({})]), {}));
+    await createReviewHandler({ fetch: gh.fetch }).handle(commentEvent("ev1", "@valet review"), context(threads, new FakeStore(), { contextBudget: 0 }));
+    expect(threads.spawned).toHaveLength(1);
+    expect(gh.reviews.size).toBe(1);
+    expect(gh.writes).toContain("POST /issues/comments/501/reactions");
+  });
+
+  it("reacts to an inline review comment on its own path", async () => {
+    const gh = new FakeGitHub();
+    gh.roles = { maintainer: "maintain" };
+    const threads = new FakeThreads(scripted(reviewOf([]), {}));
+    await createReviewHandler({ fetch: gh.fetch }).handle(commentEvent("ev1", "@valet review", { surface: "review", commentId: 77 }), context(threads, new FakeStore(), { contextBudget: 0 }));
+    expect(threads.spawned).toHaveLength(1);
+    expect(gh.writes).toContain("POST /pulls/comments/77/reactions");
+  });
+
+  it.each([["read"], ["triage"], [undefined]])("starts no review for a commenter with role %s", async (role) => {
+    const gh = new FakeGitHub();
+    if (role !== undefined) gh.roles = { maintainer: role };
+    const threads = new FakeThreads(scripted(reviewOf([]), {}));
+    await createReviewHandler({ fetch: gh.fetch }).handle(commentEvent("ev1", "@valet review"), context(threads, new FakeStore()));
+    expect(threads.spawned).toHaveLength(0);
+    expect(gh.writes).toEqual([]);
+  });
+
+  it("still reviews when GitHub refuses the reaction", async () => {
+    const gh = new FakeGitHub();
+    gh.roles = { maintainer: "admin" };
+    gh.failReactions = true;
+    const threads = new FakeThreads(scripted(reviewOf([]), {}));
+    await createReviewHandler({ fetch: gh.fetch }).handle(commentEvent("ev1", "@valet review"), context(threads, new FakeStore(), { contextBudget: 0 }));
+    expect(gh.reviews.size).toBe(1);
+  });
+
+  it("reviews only new commits on `review`, the whole pull request on `full review`, and answers when nothing is new", async () => {
+    const gh = new FakeGitHub();
+    gh.roles = { maintainer: "write" };
+    const store = new FakeStore();
+    const handler = createReviewHandler({ fetch: gh.fetch });
+    await handler.handle(event("ev1", "github.pull_request.opened"), context(new FakeThreads(scripted(reviewOf([]), {})), store, { contextBudget: 0 }));
+    expect(store.pointers()?.lastReviewedHead).toBe(H1);
+
+    // Nothing new since the last review: a reply, no child.
+    const same = new FakeThreads(scripted(reviewOf([]), {}));
+    await handler.handle(commentEvent("ev2", "@valet review"), context(same, store, { contextBudget: 0 }));
+    expect(same.spawned).toHaveLength(0);
+    expect(gh.replies).toEqual([{ path: "/issues/7/comments", body: expect.stringContaining("`@valet full review`") }]);
+
+    // A new commit: `review` covers only the commits since H1.
+    gh.head = H2;
+    gh.compared = [];
+    const follow = new FakeThreads(scripted(reviewOf([]), {}));
+    await handler.handle(commentEvent("ev3", "@valet review"), context(follow, store, { contextBudget: 0 }));
+    expect(follow.spawned).toHaveLength(1);
+    expect(gh.compared).toContain(`${H1}...${H2}`);
+    expect(store.pointers()?.lastReviewedHead).toBe(H2);
+
+    // `full review` on a reviewed head: the whole pull request again.
+    gh.compared = [];
+    const full = new FakeThreads(scripted(reviewOf([]), {}));
+    await handler.handle(commentEvent("ev4", "@valet full review", { surface: "review", commentId: 88 }), context(full, store, { contextBudget: 0 }));
+    expect(full.spawned).toHaveLength(1);
+    expect(gh.compared).not.toContain(`${H2}...${H2}`);
+    expect(gh.compared.every((c) => c.startsWith(`${BASE}...`))).toBe(true);
+    expect(gh.writes).toContain("POST /pulls/comments/88/reactions");
+    expect(gh.replies).toHaveLength(1);
   });
 });
 

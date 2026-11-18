@@ -108,6 +108,7 @@ export {
   type PluginChild,
   type PluginChildRequest,
   type PluginEvent,
+  type PluginAcceptContext,
   type PluginEventContext,
   type PluginEventHandler,
   type PluginMemory,

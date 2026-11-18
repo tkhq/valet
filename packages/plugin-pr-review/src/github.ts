@@ -3,6 +3,7 @@
  * token. Only what the handler needs: read the pull request, compare
  * commits, list files, and post or edit the one review.
  */
+import type { CommentSurface } from "./mention.js";
 
 export interface PullRequest {
   state: "open" | "closed";
@@ -115,6 +116,10 @@ export interface GitHubClient {
   reviewThreads(): Promise<ReviewThread[]>;
   /** Resolve or unresolve a review thread. Needs the App's pull requests write permission. */
   setThreadResolved(threadId: string, resolved: boolean): Promise<void>;
+  /** Add an emoji reaction to a conversation comment (`issue`) or an inline review comment (`review`). */
+  reactToComment(surface: CommentSurface, commentId: number, content: "eyes"): Promise<void>;
+  /** Answer a comment: a new conversation comment, or a reply in the inline comment's thread. */
+  replyToComment(surface: CommentSurface, commentId: number, body: string): Promise<void>;
 }
 
 /**
@@ -293,6 +298,14 @@ export function githubClient(opts: { token: string; owner: string; repo: string;
         ? "mutation($id: ID!) { resolveReviewThread(input: { threadId: $id }) { thread { id } } }"
         : "mutation($id: ID!) { unresolveReviewThread(input: { threadId: $id }) { thread { id } } }";
       await graphql<unknown>(mutation, { id: threadId }, resolved ? "resolve review thread" : "unresolve review thread");
+    },
+    async reactToComment(surface, commentId, content) {
+      const path = surface === "issue" ? `${repoPath}/issues/comments/${commentId}/reactions` : `${repoPath}/pulls/comments/${commentId}/reactions`;
+      await json<unknown>("POST", path, "add a reaction", { content });
+    },
+    async replyToComment(surface, commentId, body) {
+      const path = surface === "issue" ? `${repoPath}/issues/${opts.number}/comments` : `${pullPath}/comments/${commentId}/replies`;
+      await json<unknown>("POST", path, "reply to a comment", { body });
     },
   };
 }

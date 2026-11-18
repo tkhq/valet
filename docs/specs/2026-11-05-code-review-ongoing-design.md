@@ -38,6 +38,61 @@ The change does not move existing configurations between workspaces or create a
 second review subscription. Turnkey's monorepo pilot still requires the PR
 review plugin to be deployed there before its repository can be configured.
 
+## Review on request by mention
+
+A person can ask for a review on GitHub by mentioning the GitHub App in a
+pull request comment. This is the only way to get a review of a draft on
+GitHub when the line does not set `reviewDrafts`.
+
+- `@<app> review` reviews the commits since the last reviewed head, as a push
+  does, with rechecks of open findings in the files those commits changed.
+  The first review of a pull request covers the whole pull request.
+- `@<app> full review` reviews the whole pull request again and rechecks every
+  open finding, as a force-push does.
+- `<app>` is the App's bot login without `[bot]`, such as `tkhq-valet-dev`.
+  The command is case-insensitive and can follow other text on its line.
+  Quoted lines (`>`) and code do not count, so a reply that quotes a request
+  asks for nothing.
+
+The handler takes `github.issue_comment.created` (a conversation comment) and
+`github.pull_request_review_comment.created` (an inline comment). An edited
+comment asks for nothing, so one comment gives at most one review. A comment
+by a bot, or by the App itself, asks for nothing.
+
+Only a commenter with push access gets a review: repository role write,
+maintain or admin, read from the collaborator permission endpoint. Other
+commenters get no review and no answer, so a stranger on a public repository
+cannot spend review budget or make the App post. A fork pull request from an
+author without push access still gets the fork notice, even when a person with
+push access asks: the review child runs tools with a token for the base
+repository.
+
+The handler adds an `eyes` reaction to the comment when the review starts. If
+the head has no commits since the last review, `@<app> review` gets a reply that
+names the reviewed head and the `full review` command, and no child starts.
+A failed reaction or reply is logged, and the review goes on. A shadow line
+posts nothing on GitHub, so it declines requests.
+
+The review handler supersedes runs per pull request, and every comment on a
+pull request has that pull request as its subject. The handler's `accepts`
+check (see `2026-10-07-plugin-http-interfaces-design.md`) declines a comment
+that asks for no review before the supersede step, so ordinary discussion
+never cancels a review in flight. It also declines a push to a draft that the
+line does not review. Without this, a push to the draft would cancel the
+review that a person asked for, and then skip the draft. A request supersedes a
+push review in flight; the request then reviews from the last reviewed head, so
+no commits go unreviewed.
+
+The Code review page adds the comment keys to a new line, because it copies the
+handler's event keys. A line created before this change keeps its old keys.
+Add the two comment keys to its `eventKeys` to turn requests on for it.
+
+Prior art (2026-11-18): CodeRabbit (`@coderabbitai review` for new commits,
+`full review` for everything), Greptile (a mention reviews a draft; `eyes`
+reaction), Cursor Bugbot (ignores bots and apps), Devin Review and the Claude
+Code GitHub Action (both require write access; the action blocks bots by
+default). Copilot code review has no comment trigger.
+
 ## Context pack trust boundary
 
 Before a review, the PR review plugin builds a context pack and puts it in the

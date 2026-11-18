@@ -52,7 +52,7 @@ const noThreads: PluginThreads = {
 };
 
 function handlerHost(appToken: PluginHandlerHost["appToken"] = async () => null): PluginHandlerHost {
-  return { threads: () => noThreads, appToken, stopDeliveryChildren: vi.fn(async () => {}), leaseRenewMs: 20 };
+  return { threads: () => noThreads, appToken, appLogin: async () => null, stopDeliveryChildren: vi.fn(async () => {}), leaseRenewMs: 20 };
 }
 
 describe("EventDispatcher plugin target", () => {
@@ -495,6 +495,51 @@ describe("EventDispatcher plugin target", () => {
       // Children stop for both, including the queued delivery no run holds.
       const stopped = vi.mocked(host.stopDeliveryChildren).mock.calls.flatMap(([ids]) => ids);
       expect(new Set(stopped)).toEqual(new Set([first.deliveryId, queued.deliveryId]));
+      await d.stop();
+    });
+
+    it("skips an event the handler declines before it supersedes a run in flight", async () => {
+      const now = Date.now();
+      const first = await seed({ occurredAt: now - 30_000, config: { mention: "reviewer[bot]" } });
+      const { runs, host, handle, release } = gatedHandler();
+      const appLogin = vi.fn(async () => "reviewer[bot]");
+      const seen: { eventId: string; config: Record<string, unknown>; login: string | null }[] = [];
+      const accepts: NonNullable<PluginEventHandler["accepts"]> = async (event, ctx) => {
+        const login = await ctx.appLogin("github");
+        seen.push({ eventId: event.id, config: ctx.config, login });
+        return event.id === first.eventId;
+      };
+      const schema = Type.Object({ mention: Type.String(), extra: Type.String({ default: "x" }) });
+      const d = dispatcher(pluginWith(handle, { concurrency: "supersede", accepts, configSchema: schema }), { ...host, appLogin });
+      await d.pollOnce();
+      await vi.waitFor(() => expect(runs).toHaveLength(1));
+      // A newer event on the same pull request that the handler ignores, such as a plain comment.
+      const declined = await seed({ subscriptionId: first.subscriptionId, occurredAt: now - 10_000 });
+      await d.pollOnce();
+      const row = await settled(declined.deliveryId);
+      expect(row.status).toBe("skipped");
+      expect(row.lastError).toBe("The handler does not act on this event.");
+      // The run in flight keeps going, and its delivery is not superseded.
+      expect(runs).toHaveLength(1);
+      expect(runs[0]?.signal.aborted).toBe(false);
+      expect(vi.mocked(host.stopDeliveryChildren)).not.toHaveBeenCalled();
+      expect(seen.map((s) => s.eventId)).toEqual([first.eventId, declined.eventId]);
+      expect(seen[0]).toMatchObject({ config: { mention: "reviewer[bot]", extra: "x" }, login: "reviewer[bot]" });
+      expect(appLogin).toHaveBeenCalledWith(ORG, "github");
+      release();
+      expect((await settled(first.deliveryId)).status).toBe("delivered");
+      await d.stop();
+    });
+
+    it("fails the delivery when accepts throws, and refuses an app login for an undeclared service", async () => {
+      const { deliveryId } = await seed();
+      const handle = vi.fn(async () => {});
+      const d = dispatcher(pluginWith(handle, { accepts: async (_event, ctx) => (await ctx.appLogin("slack")) !== null }));
+      await d.pollOnce();
+      const row = await settled(deliveryId);
+      expect(row.status).toBe("failed");
+      expect(row.lastError).toContain("did not declare service slack");
+      expect(handle).not.toHaveBeenCalled();
       await d.stop();
     });
 
