@@ -49,6 +49,36 @@ describe("idle transcript release", () => {
     }
   });
 
+  it("builds a restored thread's agent on first use and drops it with the transcript", async () => {
+    const { faux, store, providers, options } = setup("idle-release-lazy-agent");
+    const built: string[] = [];
+    const withContext = { ...options, threadSystemContext: (t: { key: string }) => { built.push(t.key); return undefined; } };
+    const first = await new Engine({ providers }).createSession(withContext);
+    for (const key of ["a", "b", "c"]) await first.createThread(key);
+    first.suspendTimers();
+    built.length = 0;
+    faux.setResponses([() => fauxAssistantMessage("one"), () => fauxAssistantMessage("two")]);
+    const session = await new Engine({ providers: { ...providers, stream: new InMemoryEventStream() } })
+      .restoreSession({ sessionId: first.id, options: withContext });
+    try {
+      // A restored session's idle threads hold no agent or system prompt.
+      expect(built).toEqual([]);
+      const thread = session.listThreads().find((t) => t.key === "b")!;
+      const receipt = await thread.submitPrompt("hello", {});
+      await thread.awaitResult(receipt.queueItemId);
+      expect(built).toEqual(["b"]);
+      // Released with its transcript; the next turn builds a fresh one.
+      await vi.waitFor(() => expect(session.releaseIdleTranscripts(Date.now() + 1)).toBe(1));
+      const again = await thread.submitPrompt("again", {});
+      await thread.awaitResult(again.queueItemId);
+      expect(built).toEqual(["b", "b"]);
+      expect((await store.getQueueItem(session.id, again.queueItemId))?.status).toBe("settled");
+    } finally {
+      session.suspendTimers();
+      faux.unregister();
+    }
+  });
+
   it("keeps the transcript of a thread with a running turn", async () => {
     const { faux, providers, options } = setup("idle-release-running");
     const session = await new Engine({ providers }).createSession(options);

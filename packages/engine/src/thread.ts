@@ -506,7 +506,15 @@ export class Thread {
   readonly id: string;
   readonly key: string;
   private readonly session: Session;
-  private agent: Agent;
+  /**
+   * Built on first use and dropped by the idle release. A restored session
+   * restores every thread it has, thousands for a busy assistant, and each
+   * agent carries its own copy of the full system prompt.
+   */
+  private agentInstance: Agent | undefined;
+  private get agent(): Agent {
+    return this.agentInstance ??= this.buildAgent();
+  }
   /** Persisted pause flag — the only stored piece of queue state. */
   private paused = false;
   private blockedGateId: string | undefined;
@@ -820,7 +828,6 @@ export class Thread {
     const persistedTimezone = data.metadata?.[THREAD_USER_TIMEZONE_KEY];
     this.threadUserTimezone = typeof persistedTimezone === "string" ? persistedTimezone : undefined;
     this.activeLeafEntryId = data.activeLeafEntryId;
-    this.agent = this.buildAgent();
   }
 
   /** Currently configured model id for this thread (or undefined to use session default). */
@@ -1706,9 +1713,9 @@ export class Thread {
     }
     // Interrupt the in-flight turn (if any) and let the claim loop drain — its
     // settlement path records the running item `aborted`.
-    if (this.agent.state.isStreaming) {
-      this.agent.abort();
-      await this.agent.waitForIdle();
+    if (this.agentInstance?.state.isStreaming) {
+      this.agentInstance.abort();
+      await this.agentInstance.waitForIdle();
     }
     await this.kickTail;
     // Join background drives (resume-after-restart, gate replays) the same
@@ -3240,7 +3247,12 @@ export class Thread {
     if (this.transcriptPending || this.transcriptLoad || this.runningItem || this.kicking
       || this.backgroundDrives > 0 || this.collectTimer || this.idleCompactionTimer
       || this.transcriptUsedAt > idleSince) return false;
-    this.replaceAgentMessages([]);
+    // The agent goes with the transcript: the next use builds it again, as
+    // after a restart. The last request holds that request's whole context.
+    this.agentInstance = undefined;
+    this.retainedTaskSourceQueueItemId = undefined;
+    this.lastModelRequest = undefined;
+    this.lastModelResponse = undefined;
     this.transcriptPending = true;
     // Mid-turn ids only matter while their turn runs.
     this.midTurnAppended.clear();
@@ -5997,7 +6009,8 @@ export class Thread {
     const model = await this.budgetModel();
     const limit = compactionBudget(model, cfg);
     if (limit === 0) return undefined;
-    let messages: readonly AgentMessage[] = this.agent.state.messages;
+    // Read without building: a meter on a thread nobody runs keeps no agent.
+    let messages: readonly AgentMessage[] = this.agentInstance?.state.messages ?? [];
     if (this.transcriptPending) {
       // The transcript read, as a turn hydrates it: covered entries come back
       // as stubs, which `entriesToAgentMessages` skips anyway.
@@ -6014,7 +6027,7 @@ export class Thread {
         : [];
     }
     const tokens = estimateLiveContextTokens(
-      this.modelSystemPrompt(this.agent.state.systemPrompt, model),
+      this.modelSystemPrompt(this.agentInstance?.state.systemPrompt ?? this.buildBaseSystemPrompt(), model),
       messages.filter(isLlmMessage),
     );
     return { tokens, limit, contextWindow: model.contextWindow, model: model.id, autoCompact: cfg?.enabled !== false };
@@ -7653,7 +7666,8 @@ export class Thread {
     // Write before publishing the change. A failed save cannot expand live access.
     await this.patchThreadMetadata((current) => ({ ...current, [TOOL_SCOPE_KEY]: scope ?? {} }), "after-save");
     this.nativeImages.invalidatePermission();
-    this.agent.state.tools = this.buildTools();
+    // Every turn rebuilds the tools, so a thread without an agent has nothing to update.
+    if (this.agentInstance) this.agentInstance.state.tools = this.buildTools();
   }
 
   private buildToolContext(args: {
