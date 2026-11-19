@@ -7268,6 +7268,9 @@ export interface SessionOutcomeUsage {
 // ── Commit signing (agent commit signing design) ────────────────────────
 
 /** `GET /api/me/commit-signing` */
+/** The `code` on a commit signing setup refusal that needs a fresh sign-in. The web then offers sign-out instead of showing the error. */
+export const FRESH_SIGN_IN_REQUIRED = "fresh_sign_in_required";
+
 export interface GetCommitSigningResponse {
   /** The deployment has VALET_TURNKEY_* set. */
   configured: boolean;
@@ -7288,6 +7291,11 @@ export interface GetCommitSigningResponse {
   keys: CommitSigningKeySummary[];
   /** Passkey-signed commits, newest first, at most 50. */
   history: CommitSigningHistoryEntry[];
+  /**
+   * Epoch ms when this sign-in becomes too old to start setup. Setup needs a
+   * sign-in from the last 15 minutes. Absent when the api cannot tell.
+   */
+  freshSignInUntil?: number;
 }
 
 /** One passkey approval: the commits it signed and the Turnkey activity behind each signature. */
@@ -7357,4 +7365,6 @@ export interface PostCommitSigningGithubCheckResponse {
   login?: string;
   /** GitHub lists the Valet signing key as one of the account's SSH signing keys. */
   listed: boolean;
+  /** GitHub lists the key as an authentication key, its form's default type. The person deletes it and adds it again as a Signing Key. */
+  listedAsAuthentication?: true;
 }

@@ -2,9 +2,15 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
-import type { SigningKeyIndexDoc } from "@valet/plugin-turnkey/store";
-import { ENROLL_FRESH_SIGN_IN_MS, freshSignInRefusal, parseEnrollBody, recentHistory, renderAllowedSigners } from "./commit-signing.js";
+import { afterEach, describe, expect, it } from "vitest";
+import { Hono } from "hono";
+import { COLLECTIONS, DEFAULT_KEY, PLUGIN_NAME, type EnrollmentDoc, type SigningKeyIndexDoc } from "@valet/plugin-turnkey/store";
+import type { GithubKeyType } from "@valet/plugin-turnkey/github-keys";
+import { bootTestApi, type TestApi } from "../integration/_setup.js";
+import { pluginStore } from "../services/plugin-store.js";
+import type { AppEnv } from "../env.js";
+import { FRESH_SIGN_IN_REQUIRED, type GetCommitSigningResponse, type PostCommitSigningGithubCheckResponse } from "../wire/types.js";
+import { buildCommitSigningRouter, ENROLL_FRESH_SIGN_IN_MS, freshSignInRefusal, parseEnrollBody, recentHistory, renderAllowedSigners } from "./commit-signing.js";
 
 const attestation = {
   credentialId: "cred",
@@ -107,5 +113,69 @@ describe("recentHistory", () => {
     expect(rows).toHaveLength(50);
     expect(rows[0]?.signedAt).toBe(59);
     expect(rows[49]?.signedAt).toBe(10);
+  });
+});
+
+describe("commit signing routes", () => {
+  let api: TestApi | undefined;
+  afterEach(async () => {
+    await api?.cleanup();
+    api = undefined;
+  });
+
+  const CONFIG = { organizationId: "parent", apiPublicKey: "02aa", apiPrivateKey: "bb", apiBaseUrl: "https://turnkey.test", assurance: "presence" as const };
+  const ENROLLMENT: EnrollmentDoc = {
+    subOrgId: "sub-1",
+    passkeyUserId: "passkey-user",
+    mode: "presence",
+    signingKey: { privateKeyId: "pk-1", publicKeyHex: "00", publicKey: "ssh-ed25519 AAAA", fingerprint: "SHA256:x", activityId: "a0" },
+    signingTagId: "ktag",
+    createdAt: 1,
+  };
+
+  async function mount(opts: { sessionCreatedAt?: number; keyType?: GithubKeyType; enrolled?: boolean }) {
+    api = await bootTestApi();
+    const providers = api.providers;
+    if (opts.enrolled) await pluginStore(providers.db, PLUGIN_NAME).user("local-user").put(COLLECTIONS.enrollment, DEFAULT_KEY, ENROLLMENT);
+    const app = new Hono<AppEnv>();
+    app.use("*", async (c, next) => {
+      c.set("providers", providers);
+      c.set("user", {
+        id: "local-user", email: "local@dev", role: "admin", orgId: "local-org",
+        ...(opts.sessionCreatedAt !== undefined ? { sessionCreatedAt: opts.sessionCreatedAt } : {}),
+      });
+      await next();
+    });
+    app.route("/", buildCommitSigningRouter({
+      config: () => CONFIG,
+      githubLogin: async () => "octo",
+      keyType: async () => opts.keyType ?? null,
+    }));
+    return app;
+  }
+
+  it("reports when the sign-in becomes too old to start setup", async () => {
+    const app = await mount({ sessionCreatedAt: 1_000 });
+    const body = (await (await app.request("/")).json()) as GetCommitSigningResponse;
+    expect(body.freshSignInUntil).toBe(1_000 + ENROLL_FRESH_SIGN_IN_MS);
+  });
+
+  it("refuses setup on an old sign-in with a code the web can act on", async () => {
+    const app = await mount({ sessionCreatedAt: Date.now() - ENROLL_FRESH_SIGN_IN_MS - 1 });
+    const res = await app.request("/enroll", { method: "POST", body: "{}", headers: { "content-type": "application/json" } });
+    expect(res.status).toBe(403);
+    expect(await res.json()).toMatchObject({ code: FRESH_SIGN_IN_REQUIRED, error: expect.stringContaining("sign in again") });
+  });
+
+  it("names an authentication key on GitHub so the person can add it again as a signing key", async () => {
+    const app = await mount({ enrolled: true, keyType: "authentication" });
+    const body = (await (await app.request("/github-check", { method: "POST" })).json()) as PostCommitSigningGithubCheckResponse;
+    expect(body).toEqual({ connected: true, login: "octo", listed: false, listedAsAuthentication: true });
+  });
+
+  it("reports a signing key as listed", async () => {
+    const app = await mount({ enrolled: true, keyType: "signing" });
+    const body = (await (await app.request("/github-check", { method: "POST" })).json()) as PostCommitSigningGithubCheckResponse;
+    expect(body).toEqual({ connected: true, login: "octo", listed: true });
   });
 });

@@ -28,6 +28,9 @@ vi.mock("~/api/commit-signing", () => ({
   useFinishCommitSigningKey: () => ({ mutateAsync: (b: unknown) => finishCommitSigningKey(b), isPending: false }),
 }));
 
+const signOutAndReturn = vi.fn(async (_returnTo?: string) => undefined);
+vi.mock("~/lib/auth-navigation", () => ({ signOutAndReturn: (to?: string) => signOutAndReturn(to) }));
+
 vi.mock("~/api/settings", () => ({
   useMe: () => ({ data: { email: "dev@example.com" }, isLoading: false, error: null }),
 }));
@@ -62,6 +65,8 @@ vi.mock("@turnkey/sdk-browser", () => ({
   },
 }));
 
+import { ApiError } from "~/api/client";
+import { FRESH_SIGN_IN_REQUIRED } from "@valet/api/wire";
 import { CommitSigningSection } from "./commit-signing-section";
 
 const configured: GetCommitSigningResponse = {
@@ -77,6 +82,8 @@ beforeEach(() => {
   signingLoading = false;
   signingError = false;
   enrollMutateAsync.mockReset();
+  signOutAndReturn.mockClear();
+  window.history.replaceState(null, "", "/settings/integrations");
   createUserPasskey.mockReset();
 });
 
@@ -196,9 +203,58 @@ describe("CommitSigningSection", () => {
     expect(screen.getByText("SHA256:person")).toBeTruthy();
     expect(screen.getByText("Your passkey signs each commit.")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Add to GitHub" }));
+    // GitHub's form defaults to Authentication Key: the key stays hidden until the type is confirmed.
+    expect(screen.queryByText("ssh-ed25519 AAAAkey")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Copy key" })).toBeNull();
+    fireEvent.click(screen.getByRole("checkbox", { name: "I set Key type to Signing Key" }));
     expect(screen.getByText("ssh-ed25519 AAAAkey")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Copy key" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Check GitHub" }));
     await waitFor(() => expect(screen.getByText(/Not on github.com\/octo yet/)).toBeTruthy());
+  });
+
+  it("tells the person to add the key again when GitHub has it as an Authentication Key", async () => {
+    signingData = {
+      ...configured,
+      enrolled: true,
+      mode: "presence",
+      subOrgId: "sub-1",
+      signingKey: { publicKey: "ssh-ed25519 AAAAkey", fingerprint: "SHA256:person" },
+    };
+    checkCommitSigningGithub.mockResolvedValue({ connected: true, login: "octo", listed: false, listedAsAuthentication: true });
+    render(<CommitSigningSection />);
+    fireEvent.click(screen.getByRole("button", { name: "Add to GitHub" }));
+    fireEvent.click(screen.getByRole("button", { name: "Check GitHub" }));
+    await waitFor(() => expect(screen.getByText(/as an Authentication Key/)).toBeTruthy());
+    expect(screen.getByText(/Delete it on GitHub. Then add it again with Key type: Signing Key/)).toBeTruthy();
+  });
+
+  it("offers sign-out at once when the sign-in is too old to set up", async () => {
+    signingData = { ...configured, freshSignInUntil: Date.now() - 1 };
+    render(<CommitSigningSection />);
+    fireEvent.click(screen.getByRole("button", { name: "Set up commit signing" }));
+    expect(screen.getByRole("dialog", { name: "Sign in again to set up commit signing" })).toBeTruthy();
+    expect(createUserPasskey).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Sign out and sign in again" }));
+    await waitFor(() => expect(signOutAndReturn).toHaveBeenCalledWith("/settings/integrations#commit-signing"));
+  });
+
+  it("offers sign-out when the api refuses setup for an old sign-in", async () => {
+    createUserPasskey.mockResolvedValue({
+      encodedChallenge: "chal",
+      attestation: { credentialId: "cred", clientDataJson: "cd", attestationObject: "ao", transports: [] },
+    });
+    enrollMutateAsync.mockRejectedValue(new ApiError(403, "POST → 403", { error: "Sign out of Valet and sign in again", code: FRESH_SIGN_IN_REQUIRED }));
+    render(<CommitSigningSection />);
+    fireEvent.click(screen.getByRole("button", { name: "Set up commit signing" }));
+    await waitFor(() => expect(screen.getByRole("dialog", { name: "Sign in again to set up commit signing" })).toBeTruthy());
+    expect(screen.queryByText("Sign out of Valet and sign in again")).toBeNull();
+  });
+
+  it("focuses setup when sign-in returns to the section anchor", () => {
+    window.history.replaceState(null, "", "/settings/integrations#commit-signing");
+    render(<CommitSigningSection />);
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Set up commit signing" }));
   });
 
   it("has the new passkey create the signing key right after setup", async () => {

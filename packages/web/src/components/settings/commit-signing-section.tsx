@@ -1,15 +1,25 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { Turnkey, WebauthnStamper } from "@turnkey/sdk-browser";
-import { api } from "~/api/client";
-import type { CommitSigningHistoryEntry, CommitSigningKeySummary, GetCommitSigningResponse } from "@valet/api/wire";
-import { Badge, Button, Spinner } from "~/components/primitives";
+import { api, ApiError } from "~/api/client";
+import { FRESH_SIGN_IN_REQUIRED, type CommitSigningHistoryEntry, type CommitSigningKeySummary, type GetCommitSigningResponse } from "@valet/api/wire";
+import { Badge, Button, ConfirmDialog, Spinner } from "~/components/primitives";
 import { FieldRow } from "~/components/settings/field-row";
+import { signOutAndReturn } from "~/lib/auth-navigation";
 import { errorText } from "~/lib/error-text";
 import { formatDateOr, formatDateTime } from "~/lib/format-when";
 import { useCommitSigning, useEnrollCommitSigning, useFinishCommitSigningKey } from "~/api/commit-signing";
 import { useMe } from "~/api/settings";
 import { SigningKeyModal } from "~/components/settings/signing-key-modal";
+
+/** The section's anchor on Integrations. Sign-in comes back to it after the fresh sign-in dialog. */
+export const COMMIT_SIGNING_ANCHOR = "commit-signing";
+
+/** True when the api refused setup because the sign-in is too old. */
+function isFreshSignInRefusal(err: unknown): boolean {
+  return err instanceof ApiError && err.status === 403 && typeof err.payload === "object" && err.payload !== null &&
+    "code" in err.payload && err.payload.code === FRESH_SIGN_IN_REQUIRED;
+}
 
 /**
  * Personal · Integrations · Commit signing (agent commit signing design).
@@ -30,6 +40,23 @@ export function CommitSigningSection() {
   const [creating, setCreating] = useState(false);
   const [keyOpen, setKeyOpen] = useState(false);
   const finish = useFinishCommitSigningKey();
+  const [signInAgain, setSignInAgain] = useState(false);
+  const [signingOut, setSigningOut] = useState(false);
+  const [signOutError, setSignOutError] = useState<string | null>(null);
+  const setupButton = useRef<HTMLButtonElement>(null);
+  const returned = useRef(false);
+
+  // After the fresh sign-in, `/login?next=` opens this page at the section's
+  // anchor. The section renders after its data loads, so the browser's own
+  // jump to the anchor misses it. Scroll here once, and focus the setup
+  // button: the passkey prompt needs a click or key press from the person.
+  const loaded = signingQ.data !== undefined;
+  useEffect(() => {
+    if (!loaded || returned.current || window.location.hash !== `#${COMMIT_SIGNING_ANCHOR}`) return;
+    returned.current = true;
+    document.getElementById(COMMIT_SIGNING_ANCHOR)?.scrollIntoView({ block: "start" });
+    setupButton.current?.focus({ preventScroll: true });
+  }, [loaded]);
 
   if (signingQ.isLoading) {
     return (
@@ -69,10 +96,27 @@ export function CommitSigningSection() {
     await finish.mutateAsync({ body, ...signed });
   };
 
+  const onSignOut = async () => {
+    setSigningOut(true);
+    setSignOutError(null);
+    try {
+      await signOutAndReturn(`${window.location.pathname}${window.location.search}#${COMMIT_SIGNING_ANCHOR}`);
+    } catch (err) {
+      setSignOutError(errorText(err, "Could not sign out. Try again."));
+      setSigningOut(false);
+    }
+  };
+
   const onSetUp = async () => {
     const passkey = data.passkey;
     if (!passkey) return;
     setError(null);
+    // The api refuses setup on an old sign-in. When the page knows the
+    // sign-in age, offer sign-out at once instead of a refused request.
+    if (data.freshSignInUntil !== undefined && Date.now() > data.freshSignInUntil) {
+      setSignInAgain(true);
+      return;
+    }
     setCreating(true);
     try {
       const email = meQ.data?.email ?? "valet user";
@@ -80,7 +124,8 @@ export function CommitSigningSection() {
       const resp = await enroll.mutateAsync(attestation);
       if (resp.keyStep) await finishKey(resp.keyStep.body, attestation.attestation.credentialId);
     } catch (err) {
-      setError(errorText(err, "Could not set up commit signing. Try again."));
+      if (isFreshSignInRefusal(err)) setSignInAgain(true);
+      else setError(errorText(err, "Could not set up commit signing. Try again."));
     } finally {
       setCreating(false);
     }
@@ -124,9 +169,23 @@ export function CommitSigningSection() {
         }
         {...(error ? { error } : {})}
       >
-        <Button type="button" disabled={creating || enroll.isPending} onClick={() => void onSetUp()}>
+        <Button ref={setupButton} type="button" disabled={creating || enroll.isPending} onClick={() => void onSetUp()}>
           {creating || enroll.isPending ? "Setting up…" : data.needsReenroll ? "Set up again" : "Set up commit signing"}
         </Button>
+        <ConfirmDialog
+          open={signInAgain}
+          onOpenChange={setSignInAgain}
+          title="Sign in again to set up commit signing"
+          description="Setup needs a sign-in from the last 15 minutes. This stops a stolen session from adding its own passkey."
+          confirmLabel="Sign out and sign in again"
+          pendingLabel="Signing out…"
+          confirmVariant="primary"
+          pending={signingOut}
+          error={signOutError}
+          onConfirm={() => void onSignOut()}
+        >
+          <p className="text-sm text-muted">After you sign in, Valet opens this page again, and you can set up commit signing.</p>
+        </ConfirmDialog>
       </FieldRow>
     );
   }
