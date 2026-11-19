@@ -41,7 +41,7 @@ const inboxSweeper: WorkflowDefinition = {
     {
       id: 'classify',
       type: 'llm',
-      model: 'claude-haiku-4-5',
+      model: 'claude-haiku-5-5',
       system:
         'You sort unread mail. Low priority means bulk mail, newsletters, and automated notices that ' +
         'need no reply. Anything addressed to the reader by a person is NOT low priority. ' +

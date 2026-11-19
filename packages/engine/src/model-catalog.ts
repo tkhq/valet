@@ -40,9 +40,19 @@ function bundledMetadata(provider: string): Model<Api>[] {
   return [...upstream, ...supplementalModels.filter((model) => model.provider === provider && !ids.has(model.id))];
 }
 
+// Claude 4.x and older, and GPT-4.x and older, under any provider's id form:
+// `claude-opus-4-7`, `us.anthropic.claude-sonnet-4-5-...`, `anthropic/claude-haiku-4.5`,
+// `gpt-4o-mini`, `openai/gpt-3.5-turbo`.
+const RETIRED_GENERATIONS = [
+  /(^|[./])claude-(haiku|sonnet|opus|instant)-[1-4]([-.:]|$)/,
+  /(^|[./])claude-[1-4]([-.:]|$)/,
+  /(^|[./])gpt-(3\.5|4)(o|[-.:]|$)/,
+];
+
 /** Retired choices remain resolvable for existing sessions, but cannot be selected anew. */
 export function isCatalogModel(provider: string, modelId: string): boolean {
-  return !(provider === "openai" && modelId === "gpt-5.6-sol");
+  if (provider === "openai" && modelId === "gpt-5.6-sol") return false;
+  return !RETIRED_GENERATIONS.some((pattern) => pattern.test(modelId));
 }
 
 /** Selectable bundled models. Retired metadata remains available for billing. */

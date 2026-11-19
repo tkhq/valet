@@ -185,7 +185,7 @@ const dailyTriageDigest: WorkflowDefinition = {
     {
       id: "digest",
       type: "llm",
-      model: "claude-sonnet-4-5",
+      model: "claude-sonnet-5-5",
       system:
         "You write one morning triage digest across three sources. Lead with what blocks another person. " +
         "Then what blocks the reader. Then what only needs to be read. Give each item its link or its " +
@@ -285,7 +285,7 @@ const meetingPrep: WorkflowDefinition = {
     {
       id: "brief",
       type: "llm",
-      model: "claude-sonnet-4-5",
+      model: "claude-sonnet-5-5",
       system:
         "You prepare one person for a staff meeting. Select only what is worth saying out loud: a " +
         "decision someone must make, a blocker another team owns, a risk to a date, and work that " +
@@ -367,7 +367,7 @@ const batchOverRows: WorkflowDefinition = {
       body: {
         id: "judge_row",
         type: "llm",
-        model: "claude-haiku-4-5",
+        model: "claude-haiku-5-5",
         system:
           "You apply one instruction to one row. Judge only the row in front of you. " +
           "Give a short reason that cites a value from the row.",
@@ -392,7 +392,7 @@ const batchOverRows: WorkflowDefinition = {
     {
       id: "rollup",
       type: "llm",
-      model: "claude-sonnet-4-5",
+      model: "claude-sonnet-5-5",
       system:
         "You summarize a batch. Report the counts first, then the distribution of labels, then any row " +
         "that failed. Quote the failure text as it was given to you.",

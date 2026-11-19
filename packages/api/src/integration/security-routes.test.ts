@@ -482,8 +482,8 @@ describe("api integration: security session model selection", () => {
       const detail = (await (
         await fetch(`${api.baseUrl}/api/sessions/${created.id}`)
       ).json()) as CreateSessionResponse;
-      expect(detail.model).toBe("claude-sonnet-4-6");
-      expect(detail.model).not.toBe("claude-haiku-4-5");
+      expect(detail.model).toBe("claude-sonnet-5-5");
+      expect(detail.model).not.toBe("claude-haiku-5-5");
     } finally {
       await api.cleanup();
     }
@@ -499,17 +499,17 @@ describe("api integration: security session model selection", () => {
           workspace: "/tmp/valet-security-routes-test",
           kind: "security",
           repo: REPO,
-          model: "claude-opus-4-7",
+          model: "claude-opus-5-5",
         }),
       });
       expect(res.status).toBe(201);
       const created = (await res.json()) as CreateSessionResponse;
-      expect(created.model).toBe("claude-opus-4-7");
+      expect(created.model).toBe("claude-opus-5-5");
 
       const detail = (await (
         await fetch(`${api.baseUrl}/api/sessions/${created.id}`)
       ).json()) as CreateSessionResponse;
-      expect(detail.model).toBe("claude-opus-4-7");
+      expect(detail.model).toBe("claude-opus-5-5");
     } finally {
       await api.cleanup();
     }

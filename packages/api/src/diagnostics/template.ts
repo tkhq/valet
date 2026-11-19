@@ -21,7 +21,7 @@
 import type { WorkflowTemplate } from "@valet/engine";
 import type { WorkflowDefinition } from "@valet/workflow";
 
-const REASONING_MODEL = "claude-sonnet-4-5";
+const REASONING_MODEL = "claude-sonnet-5-5";
 /** One stable key per workspace, so the page keeps its link and each night is a new version. */
 export const FRICTION_REPORT_KEY = "reports/daily-friction-scan";
 

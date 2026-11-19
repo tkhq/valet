@@ -27,7 +27,7 @@ describe("GET /api/models", () => {
       const { models } = (await res.json()) as ListModelsResponse;
 
       expect(models.length).toBeGreaterThan(0);
-      expect(models.map((m) => m.id)).toContain("anthropic/claude-haiku-4-5");
+      expect(models.map((m) => m.id)).toContain("anthropic/claude-haiku-5-5");
 
       for (const model of models) {
         expect(typeof model.id).toBe("string");
@@ -38,7 +38,7 @@ describe("GET /api/models", () => {
         expect(model.active).toBe(true);
       }
 
-      const anthropicModel = models.find((m) => m.id === "anthropic/claude-haiku-4-5");
+      const anthropicModel = models.find((m) => m.id === "anthropic/claude-haiku-5-5");
       expect(anthropicModel).toMatchObject({ providerKind: "anthropic", active: true });
       expect(JSON.stringify(models)).not.toContain("sk-ant-env-stub");
     } finally {

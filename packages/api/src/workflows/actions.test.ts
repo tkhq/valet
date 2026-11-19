@@ -570,7 +570,7 @@ describe("DB-backed actions", () => {
     const update = workflowsActionPlugin(() => deps).actions.find((action) => action.id === "workflows.update_model");
     if (!update) throw new Error("update_model action missing");
     const result = await update.execute(
-      { workflow_id: created.id, model: "anthropic/claude-haiku-4-5" },
+      { workflow_id: created.id, model: "anthropic/claude-haiku-5-5" },
       ctx(),
     );
     await setApprovedModels(db, "org1", null);
@@ -589,7 +589,7 @@ describe("DB-backed actions", () => {
       version: "dag/v1",
       nodes: [
         { id: "trigger", type: "trigger" },
-        { id: "draft", type: "llm", model: "anthropic/claude-haiku-4-5", prompt: "Draft" },
+        { id: "draft", type: "llm", model: "anthropic/claude-haiku-5-5", prompt: "Draft" },
       ],
       edges: [{ from: "trigger", to: "draft" }],
     };

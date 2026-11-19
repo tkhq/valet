@@ -112,7 +112,7 @@ describe('NODE_META default nodes', () => {
     expect(result).toEqual({
       ok: false,
       errors: [
-        'node "x": llm.model must be a non-empty string (e.g. "claude-haiku-4-5" or "anthropic/claude-haiku-4-5")',
+        'node "x": llm.model must be a non-empty string (e.g. "claude-haiku-5-5" or "anthropic/claude-haiku-5-5")',
         'node "x": llm.prompt must be a non-empty string',
       ],
     });

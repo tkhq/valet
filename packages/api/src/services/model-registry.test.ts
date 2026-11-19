@@ -9,7 +9,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
-import { bundledModels } from "@valet/engine/model-catalog";
+import { bundledModels, isCatalogModel } from "@valet/engine/model-catalog";
 import { eq } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
@@ -256,7 +256,7 @@ describe("ModelRegistry", () => {
     await registry.refresh();
 
     const ids = registry.listModels("anthropic").map((m) => m.id);
-    for (const bundled of getBuiltinModels("anthropic")) {
+    for (const bundled of getBuiltinModels("anthropic").filter((model) => isCatalogModel("anthropic", model.id))) {
       expect(ids).toContain(bundled.id);
     }
   });

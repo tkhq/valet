@@ -34,7 +34,7 @@ afterEach(async () => {
 async function disableLargeTier(test: TestApi): Promise<void> {
   const { db } = test.providers;
   const row = await createLlmProvider(db, { orgId: "local-org", kind: "openai", name: "OpenAI" });
-  await setOrgTierMap(db, "local-org", { ...DEFAULT_TIER_MAP, l: ["openai/gpt-4.1"] });
+  await setOrgTierMap(db, "local-org", { ...DEFAULT_TIER_MAP, l: ["openai/gpt-5.4"] });
   await updateLlmProvider(db, "local-org", row.id, { enabled: false });
 }
 
@@ -215,7 +215,7 @@ describe("/api/org/model-tiers defaultTier", () => {
     const owner: CredentialOwner = { type: "org", id: "local-org" };
     await engineCredentials.save(owner, `llm:${row.id}`, { type: "api_key", apiKey: "   " });
 
-    const res = await patchTiers(api.baseUrl, { l: ["openai/gpt-4.1"], defaultTier: "l" });
+    const res = await patchTiers(api.baseUrl, { l: ["openai/gpt-5.4"], defaultTier: "l" });
     expect(res.status).toBe(400);
     expect(((await res.json()) as { error: string }).error).toMatch(/serves tier "l"/);
     expect(await getOrgDefaultTier(db, "local-org")).toBeNull();

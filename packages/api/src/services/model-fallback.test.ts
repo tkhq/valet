@@ -12,7 +12,7 @@ import { DEFAULT_TIER_MAP, setOrgTierMap } from "./model-tiers.js";
 
 const orgId = "fallback-org";
 const primary = "anthropic/claude-haiku-5-5";
-const secondary = "openai/gpt-4.1";
+const secondary = "openai/gpt-5.4";
 const third = "google/gemini-2.5-pro";
 let fixture: Awaited<ReturnType<typeof freshTestPgDb>>;
 let credentials: PgCredentialStore;

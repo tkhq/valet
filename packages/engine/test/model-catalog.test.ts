@@ -3,7 +3,7 @@ import * as builtinCatalog from "@earendil-works/pi-ai/providers/all";
 import { getSupportedThinkingLevels, type TranscriptContext } from "@earendil-works/pi-ai";
 import { streamSimple as streamOpenAI } from "@earendil-works/pi-ai/api/openai-responses";
 import { streamSimple as streamAnthropic } from "@earendil-works/pi-ai/api/anthropic-messages";
-import { bundledModel, bundledModels, supportsNativeImageGeneration } from "../src/model-catalog.js";
+import { bundledModel, bundledModels, isCatalogModel, supportsNativeImageGeneration } from "../src/model-catalog.js";
 
 vi.mock("@earendil-works/pi-ai/providers/all", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@earendil-works/pi-ai/providers/all")>();
@@ -21,10 +21,36 @@ describe("bundled model catalog", () => {
 
   it("preserves upstream model metadata", () => {
     const upstream = builtinCatalog.getBuiltinModels("anthropic");
-    expect(bundledModels("anthropic").slice(0, upstream.length)).toEqual(upstream);
+    const selectable = upstream.filter((model) => isCatalogModel("anthropic", model.id));
+    expect(bundledModels("anthropic").slice(0, selectable.length)).toEqual(selectable);
     for (const model of upstream) {
       expect(bundledModel("anthropic", model.id)).toBe(model);
     }
+  });
+
+  it.each([
+    ["anthropic", "claude-opus-4-7"],
+    ["anthropic", "claude-haiku-4-5-20251001"],
+    ["openai", "gpt-4o-mini"],
+    ["openai", "gpt-4.1"],
+    ["amazon-bedrock", "us.anthropic.claude-sonnet-4-5-20250929-v1:0"],
+    ["openrouter", "anthropic/claude-opus-4.1:batch"],
+    ["openrouter", "openai/gpt-3.5-turbo-16k"],
+  ] as const)("retires %s/%s from selection but still resolves it", (provider, id) => {
+    expect(isCatalogModel(provider, id)).toBe(false);
+    expect(bundledModels(provider).some((model) => model.id === id)).toBe(false);
+    expect(bundledModel(provider, id)?.id).toBe(id);
+  });
+
+  it.each([
+    ["anthropic", "claude-haiku-5-5"],
+    ["anthropic", "claude-fable-5-2"],
+    ["openai", "gpt-5.4-mini"],
+    ["amazon-bedrock", "openai.gpt-oss-120b-1:0"],
+    ["amazon-bedrock", "zai.glm-4.7"],
+    ["openrouter", "x-ai/grok-4.6"],
+  ] as const)("keeps %s/%s selectable", (provider, id) => {
+    expect(isCatalogModel(provider, id)).toBe(true);
   });
 
   it("includes Claude Opus 5.5 from the upstream catalog", () => {

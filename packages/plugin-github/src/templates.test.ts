@@ -1507,7 +1507,7 @@ describe(`${ASSIGN_ID} — decline swap (branch B)`, () => {
 
   it("classifies before it reselects, and stops quietly on a non-decline", () => {
     const classify = definition.nodes.find((n): n is LlmNode => n.type === "llm" && n.id === "classify_decline");
-    expect(classify?.model).toBe("claude-haiku-4-5");
+    expect(classify?.model).toBe("claude-haiku-5-5");
     expect(classify?.prompt).toContain("{{ trigger.data.payload.comment.body }}");
     const gate = assignIfNode("is_decline");
     expect(gate.conditions[0]?.left).toBe("nodes.classify_decline.result.output.isDecline");

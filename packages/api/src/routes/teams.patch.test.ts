@@ -153,17 +153,17 @@ describe("PATCH /api/teams/:id", () => {
     api = await bootTestApi();
     await seedTeam(api);
 
-    const res = await patchTeam(api, { defaultModel: "anthropic/claude-sonnet-4-5" }, "test-lead");
+    const res = await patchTeam(api, { defaultModel: "anthropic/claude-sonnet-5-5" }, "test-lead");
     expect(res.status).toBe(200);
     const body = (await res.json()) as PatchTeamResponse;
-    expect(body.team.defaultModel).toBe("anthropic/claude-sonnet-4-5");
+    expect(body.team.defaultModel).toBe("anthropic/claude-sonnet-5-5");
 
     const listRes = await fetch(`${api.baseUrl}/api/teams`, {
       headers: { "x-valet-test-user-id": "test-lead" },
     });
     const list = (await listRes.json()) as ListTeamsResponse;
     expect(list.teams.find((t) => t.id === "team_1")?.defaultModel).toBe(
-      "anthropic/claude-sonnet-4-5",
+      "anthropic/claude-sonnet-5-5",
     );
   });
 
@@ -171,7 +171,7 @@ describe("PATCH /api/teams/:id", () => {
     vi.stubEnv("ANTHROPIC_API_KEY", "sk-ant-env-stub");
     api = await bootTestApi();
     await seedTeam(api);
-    await patchTeam(api, { defaultModel: "anthropic/claude-sonnet-4-5" }, "test-lead");
+    await patchTeam(api, { defaultModel: "anthropic/claude-sonnet-5-5" }, "test-lead");
 
     const res = await patchTeam(api, { defaultModel: null }, "test-lead");
     expect(res.status).toBe(200);
@@ -185,7 +185,7 @@ describe("PATCH /api/teams/:id", () => {
     await seedTeam(api);
 
     // The default stub identity `local-user` is the org admin.
-    const res = await patchTeam(api, { defaultModel: "anthropic/claude-sonnet-4-5" });
+    const res = await patchTeam(api, { defaultModel: "anthropic/claude-sonnet-5-5" });
     expect(res.status).toBe(200);
   });
 
@@ -193,7 +193,7 @@ describe("PATCH /api/teams/:id", () => {
     api = await bootTestApi();
     await seedTeam(api);
 
-    const res = await patchTeam(api, { defaultModel: "anthropic/claude-sonnet-4-5" }, "test-member");
+    const res = await patchTeam(api, { defaultModel: "anthropic/claude-sonnet-5-5" }, "test-member");
     expect(res.status).toBe(404);
   });
 
@@ -301,15 +301,15 @@ describe("PATCH /api/teams/:id", () => {
       await api.providers.db
         .insert(orgMembers)
         .values({ orgId: "local-org", userId: "test-lead", role: "member", createdAt: Date.now() });
-      await setApprovedModels(api.providers.db, "local-org", ["anthropic/claude-opus-4-7"]);
+      await setApprovedModels(api.providers.db, "local-org", ["anthropic/claude-opus-5-5"]);
 
-      const memberRes = await patchTeam(api, { defaultModel: "anthropic/claude-haiku-4-5" }, "test-lead");
+      const memberRes = await patchTeam(api, { defaultModel: "anthropic/claude-haiku-5-5" }, "test-lead");
       expect(memberRes.status).toBe(400);
       const body = (await memberRes.json()) as { error: string };
       expect(body.error).toMatch(/approved list/);
 
       // `local-user` (default identity, no header) is a real org admin.
-      const adminRes = await patchTeam(api, { defaultModel: "anthropic/claude-haiku-4-5" });
+      const adminRes = await patchTeam(api, { defaultModel: "anthropic/claude-haiku-5-5" });
       expect(adminRes.status).toBe(200);
     } finally {
       vi.unstubAllEnvs();

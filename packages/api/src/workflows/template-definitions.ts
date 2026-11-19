@@ -56,8 +56,8 @@ import type { WorkflowDefinition } from "@valet/workflow";
 /** Reasoning steps use the mid-tier model; matching and classification use
  * the small one. Both ids are in the model catalog the validator checks,
  * so a rename upstream fails at list time rather than on a run. */
-const REASONING_MODEL = "claude-sonnet-4-5";
-const CLASSIFY_MODEL = "claude-haiku-4-5";
+const REASONING_MODEL = "claude-sonnet-5-5";
+const CLASSIFY_MODEL = "claude-haiku-5-5";
 
 // ─── Draft, critique, revise ─────────────────────────────────────────────
 

@@ -33,7 +33,7 @@ import { assistants } from "../schema/index.js";
 
 const orgId = "org-res";
 const ANTHROPIC_MODEL = "claude-haiku-5-5";
-const OPENAI_MODEL = "gpt-4.1";
+const OPENAI_MODEL = "gpt-5.4";
 const GOOGLE_MODEL = "gemini-2.5-pro";
 
 describe("resolveModelSpec (catalog-aware bridge)", () => {
@@ -233,7 +233,7 @@ describe("resolveModelSpec (catalog-aware bridge)", () => {
       );
       expect(err).toBeInstanceOf(NoCredentialsError);
       const cred = err as NoCredentialsError;
-      expect(cred.message).toMatch(/no usable API key for model "openai\/gpt-4\.1"/);
+      expect(cred.message).toMatch(/no usable API key for model "openai\/gpt-5\.4"/);
       // The model resolved fine — setModel-style validation accepts it.
       expect(cred.model?.id).toBe(`openai/${OPENAI_MODEL}`);
     });
@@ -551,13 +551,13 @@ describe("EngineHost model resolution wiring", () => {
   it("new-session precedence: user default wins over the tier fallback", async () => {
     api = await bootTestApi();
     const { db, engineHost } = api.providers;
-    await db.update(users).set({ defaultModel: "claude-opus-4-5" }).where(eq(users.id, "local-user"));
+    await db.update(users).set({ defaultModel: "claude-opus-5" }).where(eq(users.id, "local-user"));
 
     const session = await defaultAssistantSessionFor(api.providers,
       { type: "user", id: "local-user" },
       { actorUserId: "local-user", orgId: "local-org" },
     );
-    expect(session.options.model.id).toBe("claude-opus-4-5");
+    expect(session.options.model.id).toBe("claude-opus-5");
   });
 
   it("new-session precedence: the tier fallback walks past a keyless-but-enabled custom target (key-delete can't brick new sessions)", async () => {
@@ -631,7 +631,7 @@ describe("EngineHost model resolution wiring", () => {
     api = await bootTestApi();
     const { db, engineHost } = api.providers;
     const team = await createTeam(db, { orgId: "local-org", name: "Platform", creatorUserId: "local-user" });
-    await db.update(teams).set({ defaultModel: "anthropic/claude-sonnet-4-5" }).where(eq(teams.id, team.id));
+    await db.update(teams).set({ defaultModel: "anthropic/claude-sonnet-5-5" }).where(eq(teams.id, team.id));
 
     const session = await engineHost.sessionFor("team-owned-1", {
       userId: "local-user",
@@ -639,15 +639,15 @@ describe("EngineHost model resolution wiring", () => {
       workspace: "/tmp",
       ownerTeamId: team.id,
     });
-    expect(session.options.model.id).toBe("anthropic/claude-sonnet-4-5");
+    expect(session.options.model.id).toBe("anthropic/claude-sonnet-5-5");
   });
 
   it("new-session precedence: user default wins over the owning team's default (TKAI-255)", async () => {
     api = await bootTestApi();
     const { db, engineHost } = api.providers;
     const team = await createTeam(db, { orgId: "local-org", name: "Platform", creatorUserId: "local-user" });
-    await db.update(teams).set({ defaultModel: "anthropic/claude-sonnet-4-5" }).where(eq(teams.id, team.id));
-    await db.update(users).set({ defaultModel: "claude-opus-4-5" }).where(eq(users.id, "local-user"));
+    await db.update(teams).set({ defaultModel: "anthropic/claude-sonnet-5-5" }).where(eq(teams.id, team.id));
+    await db.update(users).set({ defaultModel: "claude-opus-5" }).where(eq(users.id, "local-user"));
 
     const session = await engineHost.sessionFor("team-owned-2", {
       userId: "local-user",
@@ -655,7 +655,7 @@ describe("EngineHost model resolution wiring", () => {
       workspace: "/tmp",
       ownerTeamId: team.id,
     });
-    expect(session.options.model.id).toBe("claude-opus-4-5");
+    expect(session.options.model.id).toBe("claude-opus-5");
   });
 
   it("new-session precedence: a personal session never reads a team's default (TKAI-255)", async () => {
@@ -664,7 +664,7 @@ describe("EngineHost model resolution wiring", () => {
     // The user is a member (creator) of a team with a default, but the
     // session is user-owned — no ownerTeamId — so the team tier is skipped.
     const team = await createTeam(db, { orgId: "local-org", name: "Platform", creatorUserId: "local-user" });
-    await db.update(teams).set({ defaultModel: "anthropic/claude-sonnet-4-5" }).where(eq(teams.id, team.id));
+    await db.update(teams).set({ defaultModel: "anthropic/claude-sonnet-5-5" }).where(eq(teams.id, team.id));
 
     const session = await engineHost.sessionFor("personal-1", {
       userId: "local-user",
@@ -678,24 +678,24 @@ describe("EngineHost model resolution wiring", () => {
     api = await bootTestApi();
     const { db } = api.providers;
     const team = await createTeam(db, { orgId: "local-org", name: "Platform", creatorUserId: "local-user" });
-    await db.update(teams).set({ defaultModel: "anthropic/claude-sonnet-4-5" }).where(eq(teams.id, team.id));
+    await db.update(teams).set({ defaultModel: "anthropic/claude-sonnet-5-5" }).where(eq(teams.id, team.id));
     // The waker has a personal default. On a SHARED session it must not win:
     // it would persist (restore-no-clobber) and override the team's explicit
     // choice for every other member.
-    await db.update(users).set({ defaultModel: "claude-opus-4-5" }).where(eq(users.id, "local-user"));
+    await db.update(users).set({ defaultModel: "claude-opus-5" }).where(eq(users.id, "local-user"));
 
     const session = await defaultAssistantSessionFor(api.providers,
       { type: "team", id: team.id },
       { actorUserId: "local-user", orgId: "local-org" },
     );
-    expect(session.options.model.id).toBe("anthropic/claude-sonnet-4-5");
+    expect(session.options.model.id).toBe("anthropic/claude-sonnet-5-5");
   });
 
   it("shared team assistant with no team default falls to the tier fallback, not the waker's personal default (TKAI-255 review round)", async () => {
     api = await bootTestApi();
     const { db } = api.providers;
     const team = await createTeam(db, { orgId: "local-org", name: "Platform", creatorUserId: "local-user" });
-    await db.update(users).set({ defaultModel: "claude-opus-4-5" }).where(eq(users.id, "local-user"));
+    await db.update(users).set({ defaultModel: "claude-opus-5" }).where(eq(users.id, "local-user"));
 
     const session = await defaultAssistantSessionFor(api.providers,
       { type: "team", id: team.id },
@@ -734,20 +734,20 @@ describe("EngineHost model resolution wiring", () => {
     api = await bootTestApi();
     const { db } = api.providers;
     const team = await createTeam(db, { orgId: "local-org", name: "Platform", creatorUserId: "local-user" });
-    await db.update(teams).set({ defaultModel: "anthropic/claude-sonnet-4-5" }).where(eq(teams.id, team.id));
+    await db.update(teams).set({ defaultModel: "anthropic/claude-sonnet-5-5" }).where(eq(teams.id, team.id));
 
     const session = await defaultAssistantSessionFor(api.providers,
       { type: "team", id: team.id },
       { actorUserId: "local-user", orgId: "local-org" },
     );
-    expect(session.options.model.id).toBe("anthropic/claude-sonnet-4-5");
+    expect(session.options.model.id).toBe("anthropic/claude-sonnet-5-5");
   });
 
   it("restore-no-clobber: a later team-default change never clobbers a team-owned session's persisted model (TKAI-255)", async () => {
     api = await bootTestApi();
     const { db, engineHost } = api.providers;
     const team = await createTeam(db, { orgId: "local-org", name: "Platform", creatorUserId: "local-user" });
-    await db.update(teams).set({ defaultModel: "anthropic/claude-sonnet-4-5" }).where(eq(teams.id, team.id));
+    await db.update(teams).set({ defaultModel: "anthropic/claude-sonnet-5-5" }).where(eq(teams.id, team.id));
 
     const meta = {
       userId: "local-user",
@@ -756,13 +756,13 @@ describe("EngineHost model resolution wiring", () => {
       ownerTeamId: team.id,
     };
     const session = await engineHost.sessionFor("team-owned-restore", meta);
-    expect(session.options.model.id).toBe("anthropic/claude-sonnet-4-5");
+    expect(session.options.model.id).toBe("anthropic/claude-sonnet-5-5");
 
     engineHost.evictAll({ shutdown: false });
-    await db.update(teams).set({ defaultModel: "claude-opus-4-5" }).where(eq(teams.id, team.id));
+    await db.update(teams).set({ defaultModel: "claude-opus-5" }).where(eq(teams.id, team.id));
 
     const restored = await engineHost.sessionFor("team-owned-restore", meta);
-    expect(restored.options.model.id).toBe("anthropic/claude-sonnet-4-5");
+    expect(restored.options.model.id).toBe("anthropic/claude-sonnet-5-5");
   });
 
   it("restore still throws when the persisted model's provider was disabled after the fact", async () => {
@@ -818,9 +818,9 @@ describe("EngineHost model resolution wiring", () => {
     const restored = await engineHost.sessionFor(session.id, meta);
     expect(restored.options.modelSpec).toBe("openai/gpt-6-astra");
     expect(restored.threadById(thread.id)?.key).toBe("web:retained");
-    await restored.setModel("anthropic/claude-sonnet-4-5");
+    await restored.setModel("anthropic/claude-sonnet-5-5");
     engineHost.evictAll({ shutdown: false });
-    expect((await engineHost.sessionFor(session.id, meta)).options.modelSpec).toBe("anthropic/claude-sonnet-4-5");
+    expect((await engineHost.sessionFor(session.id, meta)).options.modelSpec).toBe("anthropic/claude-sonnet-5-5");
   });
 
   it("restore-no-clobber: a persisted namespaced custom model restores verbatim", async () => {
@@ -852,7 +852,7 @@ describe("EngineHost model resolution wiring", () => {
 
     engineHost.evictAll({ shutdown: false });
     // Change the user default to prove restore prefers the persisted model.
-    await db.update(users).set({ defaultModel: "claude-opus-4-5" }).where(eq(users.id, "local-user"));
+    await db.update(users).set({ defaultModel: "claude-opus-5" }).where(eq(users.id, "local-user"));
 
     const restored = await engineHost.sessionFor("restore-custom", {
       userId: "local-user",
@@ -974,13 +974,13 @@ describe("EngineHost model resolution wiring", () => {
       api = await bootTestApi();
       const { db } = api.providers;
       await setOrgDefaultTier(db, "local-org", "m");
-      await db.update(users).set({ defaultModel: "claude-opus-4-5" }).where(eq(users.id, "local-user"));
+      await db.update(users).set({ defaultModel: "claude-opus-5" }).where(eq(users.id, "local-user"));
 
       const session = await defaultAssistantSessionFor(api.providers,
         { type: "user", id: "local-user" },
         { actorUserId: "local-user", orgId: "local-org" },
       );
-      expect(session.options.model.id).toBe("claude-opus-4-5");
+      expect(session.options.model.id).toBe("claude-opus-5");
     });
 
     it("the owning team's default beats the org default tier", async () => {
@@ -988,7 +988,7 @@ describe("EngineHost model resolution wiring", () => {
       const { db, engineHost } = api.providers;
       await setOrgDefaultTier(db, "local-org", "l");
       const team = await createTeam(db, { orgId: "local-org", name: "Platform", creatorUserId: "local-user" });
-      await db.update(teams).set({ defaultModel: "anthropic/claude-sonnet-4-5" }).where(eq(teams.id, team.id));
+      await db.update(teams).set({ defaultModel: "anthropic/claude-sonnet-5-5" }).where(eq(teams.id, team.id));
 
       const session = await engineHost.sessionFor("team-owned-org-tier", {
         userId: "local-user",
@@ -996,7 +996,7 @@ describe("EngineHost model resolution wiring", () => {
         workspace: "/tmp",
         ownerTeamId: team.id,
       });
-      expect(session.options.model.id).toBe("claude-sonnet-4-5");
+      expect(session.options.model.id).toBe("claude-sonnet-5-5");
     });
 
     it("a team assistant with no team default uses the org default tier", async () => {
@@ -1042,11 +1042,11 @@ describe("EngineHost model resolution wiring", () => {
     it("new workspace runtime uses the personal owner model default", async () => {
       api = await bootTestApi();
       const { db, engineHost } = api.providers;
-      await db.update(users).set({ defaultModel: "claude-opus-4-5" }).where(eq(users.id, "local-user"));
+      await db.update(users).set({ defaultModel: "claude-opus-5" }).where(eq(users.id, "local-user"));
 
       const assistant = await resolveDefaultAssistant(db, "local-org", { type: "user", id: "local-user" });
       // "l" tier resolves to anthropic/claude-opus-5-5 by built-in default
-      // (model-tiers.ts) — distinct from the user's "claude-opus-4-5" pick,
+      // (model-tiers.ts) — distinct from the user's "claude-opus-5" pick,
       // so the two tiers are distinguishable.
       await db.update(users).set({ defaultModel: "l" }).where(eq(users.id, "local-user"));
 
@@ -1123,9 +1123,9 @@ describe("EngineHost model resolution wiring", () => {
       const session = await engineHost.assistantSessionFor(
         assistant.id,
         { actorUserId: "local-user", orgId: "local-org" },
-        { modelId: "claude-opus-4-5" },
+        { modelId: "claude-opus-5" },
       );
-      expect(session.options.model.id).toBe("claude-opus-4-5");
+      expect(session.options.model.id).toBe("claude-opus-5");
     });
   });
 

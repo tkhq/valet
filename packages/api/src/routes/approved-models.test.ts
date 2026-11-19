@@ -5,11 +5,11 @@ import { getOrgTierMap, setOrgTierMap, type TierMap } from "../services/model-ti
 import { setApprovedModels } from "../services/approved-models.js";
 
 const TIER_MAP: TierMap = {
-  xs: ["anthropic/claude-haiku-4-5"],
-  s: ["anthropic/claude-haiku-4-5"],
-  m: ["anthropic/claude-sonnet-4-6"],
-  l: ["anthropic/claude-opus-4-7"],
-  xl: ["anthropic/claude-opus-4-7"],
+  xs: ["anthropic/claude-haiku-5-5"],
+  s: ["anthropic/claude-haiku-5-5"],
+  m: ["anthropic/claude-sonnet-5"],
+  l: ["anthropic/claude-opus-5-5"],
+  xl: ["anthropic/claude-opus-5-5"],
 };
 
 describe("PUT /api/org/approved-models", () => {
@@ -31,15 +31,15 @@ describe("PUT /api/org/approved-models", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         approved: [
-          "anthropic/claude-haiku-4-5",
-          "anthropic/claude-opus-4-7",
+          "anthropic/claude-haiku-5-5",
+          "anthropic/claude-opus-5-5",
         ],
       }),
     });
 
     expect(response.status).toBe(400);
     expect(((await response.json()) as { error: string }).error).toBe(
-      'Model "anthropic/claude-sonnet-4-6" is still used by tier "m". Change the model tier first.',
+      'Model "anthropic/claude-sonnet-5" is still used by tier "m". Change the model tier first.',
     );
   });
 
@@ -75,7 +75,7 @@ describe("PUT /api/org/approved-models", () => {
     const retain = await fetch(`${api.baseUrl}/api/org/approved-models`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ approved: [...tiers, stale, "anthropic/claude-opus-4-6"] }),
+      body: JSON.stringify({ approved: [...tiers, stale, "anthropic/claude-fable-5-1"] }),
     });
     expect(retain.status, await retain.text()).toBe(200);
 

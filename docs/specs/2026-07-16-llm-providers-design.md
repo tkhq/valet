@@ -157,7 +157,9 @@ bundled catalog as the floor.
   `ANTHROPIC_API_KEY` still sees the Anthropic list.
 - **Retired models.** Catalog visibility and model resolution have different
   rules. `openai/gpt-5.6-sol` is retired from selectable catalogs after
-  `openai/gpt-6.1-sol` replaces it. Saved tier targets move to the newest
+  `openai/gpt-6.1-sol` replaces it. Claude 4.x and older, and GPT-4.x and
+  older, are retired under every provider's id form (`isCatalogModel` in
+  `packages/engine/src/model-catalog.ts`). Saved tier targets move to the newest
   allowed replacement in `TIER_MODEL_UPGRADES`
   (`packages/api/src/services/model-tiers.ts`), for example GPT-6.1 Sol to
   GPT-6.2 Sol and Claude Opus 4.7 to Claude Opus 5.5. `registryModels`, org catalogs, and

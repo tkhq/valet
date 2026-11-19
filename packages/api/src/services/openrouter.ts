@@ -37,9 +37,9 @@ export type OpenrouterRegistryModel = Model<Api>;
  * one fails loudly instead of silently shrinking the catalog.
  */
 export const OPENROUTER_DEFAULT_MODEL_IDS: readonly string[] = [
-  "anthropic/claude-opus-4.6",
-  "anthropic/claude-haiku-4.5",
-  "openai/gpt-4.1",
+  "anthropic/claude-opus-5.5",
+  "anthropic/claude-haiku-5.5",
+  "openai/gpt-5.5",
   "google/gemini-2.5-pro",
   "google/gemini-2.5-flash",
   "deepseek/deepseek-v4-pro",

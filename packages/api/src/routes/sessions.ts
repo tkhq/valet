@@ -272,10 +272,10 @@ sessionsRouter.get("/", async (c) => {
 // ── Create ────────────────────────────────────────────────────────────────
 
 /** A security review defaults to a capable model, not the account/org
- * fallback. `resolveModelForBuild` bottoms out at `claude-haiku-4-5`, which
+ * fallback. `resolveModelForBuild` bottoms out at `claude-haiku-5-5`, which
  * is too weak for security review, so a security session with no explicit
  * model gets this instead. An explicit `model` on the request always wins. */
-const SECURITY_DEFAULT_MODEL = "claude-sonnet-4-6";
+const SECURITY_DEFAULT_MODEL = "claude-sonnet-5-5";
 
 /**
  * Session kinds backed by a gateable plugin (plugin-entitlements design). A
