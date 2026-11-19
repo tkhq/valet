@@ -48,7 +48,7 @@ GitHub when the line does not set `reviewDrafts`.
   does, with rechecks of open findings in the files those commits changed.
   The first review of a pull request covers the whole pull request.
 - `@<app> full review` reviews the whole pull request again and rechecks every
-  open finding, as a force-push does.
+  open finding.
 - `<app>` is the App's bot login without `[bot]`, such as `tkhq-valet-dev`.
   The command is case-insensitive and can follow other text on its line.
   Quoted lines (`>`) and code do not count, so a reply that quotes a request

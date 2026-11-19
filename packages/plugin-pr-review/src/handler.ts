@@ -342,9 +342,13 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
   if (!comparison) throw new Error(`GitHub cannot compare ${pr.base.sha.slice(0, 7)} with ${head.slice(0, 7)} on ${slug}. Retry the delivery after the push settles.`);
   const mergeBase = comparison.merge_base_commit.sha;
 
-  // A follow-up review needs the last reviewed head in the new head's history.
-  // A force-push or rebase drops it, and the review covers the whole PR again.
+  // A follow-up review covers what changed since the last reviewed head.
+  // With that head in the new head's history, the new commits are the change.
+  // A force-push or rebase drops it: then the files whose PR changes differ
+  // between the two heads are the change. Only when GitHub cannot compare the
+  // old head with the base does the review cover the whole PR again.
   let from: string | undefined;
+  let rewritten = false;
   let changedSince: Set<string> | undefined;
   // `full review` in a comment reviews the whole PR again.
   if (prior?.lastReviewedHead && !request?.full) {
@@ -352,6 +356,14 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
     if (increment?.status === "ahead") {
       from = prior.lastReviewedHead;
       changedSince = new Set((increment.files ?? []).map((f) => f.filename));
+    } else {
+      const before = await gh.compare(pr.base.sha, prior.lastReviewedHead);
+      const changed = before ? changedPullFiles(before.files ?? [], files) : undefined;
+      if (changed) {
+        from = prior.lastReviewedHead;
+        rewritten = true;
+        changedSince = changed;
+      }
     }
   }
 
@@ -402,8 +414,10 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
     onRules: (paths) => paths.forEach((p) => rules.add(p)),
     onPack: (text) => { packText ??= text; packSeen(); },
     slug, repoName, pr, base: mergeBase, head, settings,
-    diff: from !== undefined ? await incrementDiff(gh, from, head, reviewed, settings.riskPaths) : prDiffFor(prDiff, reviewed, mergeBase, head, settings.riskPaths),
-    ...(from !== undefined ? { incrementFrom: from } : {}),
+    diff: rewritten
+      ? prDiffFor(prDiff, reviewed.filter((f) => changedSince?.has(f.filename)), mergeBase, head, settings.riskPaths)
+      : from !== undefined ? await incrementDiff(gh, from, head, reviewed, settings.riskPaths) : prDiffFor(prDiff, reviewed, mergeBase, head, settings.riskPaths),
+    ...(from !== undefined ? { incrementFrom: from, ...(rewritten ? { incrementRewritten: true } : {}) } : {}),
     knownFindings: [...open.live, ...open.dismissed.filter(hasTitle)].map((f) => ({ path: f.path, line: f.line, title: f.title })),
     dispatchId: dispatch("review"),
     context: {
@@ -499,7 +513,7 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
   const summaryOf = (): string =>
     renderSummary({
       head,
-      ...(from !== undefined ? { incrementFrom: from } : {}),
+      ...(from !== undefined ? { incrementFrom: from, ...(rewritten ? { incrementRewritten: true } : {}) } : {}),
       summary: draft.summary,
       confidence: draft.confidence,
       inline: [...stillOpen.filter((f) => f.commentId !== undefined), ...reopened, ...inline],
@@ -607,7 +621,7 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
   });
   await writeRecords(ctx.store, slug, records).catch((err: unknown) => console.warn(`pr-review ${slug}: could not record ${records.length} finding(s) for outcome measurement`, err));
   await finishPendingUpdates(gh, next, save, ctx.signal);
-  log(slug, `reviewed ${head.slice(0, 7)} (${from ? "follow-up" : "full"}${request ? `, asked for by ${request.author}` : ""}): ${posted.length} new, ${fixed.filter((r) => !r.withdrawn).length} fixed, ${fixed.filter((r) => r.withdrawn).length} withdrawn, ${reopened.length} reopened, ${stillOpen.length} still open`);
+  log(slug, `reviewed ${head.slice(0, 7)} (${from ? (rewritten ? "follow-up after a force-push" : "follow-up") : "full"}${request ? `, asked for by ${request.author}` : ""}): ${posted.length} new, ${fixed.filter((r) => !r.withdrawn).length} fixed, ${fixed.filter((r) => r.withdrawn).length} withdrawn, ${reopened.length} reopened, ${stillOpen.length} still open`);
 }
 
 async function finishPendingUpdates(
@@ -879,7 +893,10 @@ async function runReviewerChild(
   thread: PluginThreadRef,
   input: {
     slug: string; repoName: string; pr: PullRequest; base: string; head: string; settings: ReviewSettings; diff: PullRequestDiff;
-    incrementFrom?: string; knownFindings: { path: string; line: number; title: string }[]; dispatchId: string;
+    incrementFrom?: string;
+    /** The PR's history was rewritten since `incrementFrom`: the diff is the PR diff of the files whose changes differ. */
+    incrementRewritten?: boolean;
+    knownFindings: { path: string; line: number; title: string }[]; dispatchId: string;
     /** Gather a context pack first, in the child's sandbox. `patch` is the diff before the budget; unset uses the reviewed diff. */
     context?: { readTrusted: (path: string) => Promise<string | undefined>; patch?: string | undefined };
     /** Limit this child to one defect class. Unset: the general review. */
@@ -899,7 +916,7 @@ async function runReviewerChild(
         base: input.base,
         head: input.head,
         diff: input.diff,
-        ...(input.incrementFrom !== undefined ? { increment: { from: input.incrementFrom } } : {}),
+        ...(input.incrementFrom !== undefined ? { increment: { from: input.incrementFrom, ...(input.incrementRewritten ? { rewritten: true } : {}) } } : {}),
         knownFindings: input.knownFindings,
         ...(pack !== undefined ? { contextPack: pack } : {}),
       }),
@@ -1098,6 +1115,35 @@ function prDiffFor(patch: string | undefined, files: PullFile[], base: string, h
   const stat = files.map((f) => `${f.filename} | +${f.additions} -${f.deletions}`).join("\n");
   if (patch === undefined) return unrendered(stat, names, base, head);
   return { stat, files: names, ...cutPatch(onlyFiles(patch, new Set(names)), DIFF_BUDGET, riskPaths) };
+}
+
+/** GitHub's compare endpoint lists at most 300 files. */
+const MAX_COMPARE_FILES = 300;
+
+/**
+ * The files whose pull-request changes differ between an earlier head and the
+ * current one, for a review after a force-push or rebase. Two patches match
+ * when their lines match: a rebase moves hunks, so hunk positions do not count.
+ * A file without a patch at either head counts as changed. Undefined: GitHub
+ * listed too many files at the earlier head to tell.
+ */
+export function changedPullFiles(before: PullFile[], after: PullFile[]): Set<string> | undefined {
+  if (before.length >= MAX_COMPARE_FILES) return undefined;
+  const earlier = new Map(before.map((f) => [f.filename, f.patch]));
+  const changed = new Set<string>();
+  for (const f of after) {
+    const was = earlier.get(f.filename);
+    earlier.delete(f.filename);
+    if (was === undefined || f.patch === undefined || hunkLines(was) !== hunkLines(f.patch)) changed.add(f.filename);
+  }
+  // A file the PR no longer changes: its open findings need a recheck.
+  for (const name of earlier.keys()) changed.add(name);
+  return changed;
+}
+
+/** A patch without its hunk positions and the function names GitHub adds after them. */
+function hunkLines(patch: string): string {
+  return patch.replace(/^@@ [^@]*@@.*$/gm, "@@");
 }
 
 /** The diff of the new commits, limited to the PR's reviewed files: a merge of the base branch is not new PR code. */

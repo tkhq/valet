@@ -75,8 +75,12 @@ export interface PullRequestContext {
   base: string;
   head: string;
   diff: PullRequestDiff;
-  /** Set for a follow-up review: only the commits since `from` are new. */
-  increment?: { from: string };
+  /**
+   * Set for a follow-up review: only the changes since `from` are new.
+   * `rewritten`: a force-push or rebase dropped `from`, so the diff is the PR
+   * diff of the files whose changes differ from the review at `from`.
+   */
+  increment?: { from: string; rewritten?: boolean };
   /** Findings already posted on this PR and still open. */
   knownFindings?: { path: string; line: number; title: string }[];
   /** The context pack from the gather stage (see `gatherContext`). */
@@ -104,7 +108,9 @@ export function buildReviewPrompt(pr: PullRequestContext): string {
       ? [
           "",
           "## Follow-up review",
-          `This PR was already reviewed at commit ${pr.increment.from}. The diff below covers only the commits since then.`,
+          pr.increment.rewritten
+            ? `This PR was already reviewed at commit ${pr.increment.from}. A force-push or rebase rewrote its history since then. The diff below is the PR diff of only the files whose changes differ from that review.`
+            : `This PR was already reviewed at commit ${pr.increment.from}. The diff below covers only the commits since then.`,
           "Review the new changes and how they interact with the rest of the PR. Do not re-review unchanged code.",
           `Run \`git diff ${pr.base.slice(0, 12)} ${pr.head.slice(0, 12)}\` for the whole PR.`,
         ]

@@ -79,6 +79,8 @@ export interface SummaryInput {
   head: string;
   /** Set for a follow-up review: the head the last review covered. */
   incrementFrom?: string;
+  /** A force-push or rebase dropped `incrementFrom`: the review covered the files whose changes differ. */
+  incrementRewritten?: boolean;
   summary: string;
   confidence: number;
   /** Open findings with an inline comment. */
@@ -97,7 +99,9 @@ export interface SummaryInput {
 
 /** The body of the PR's one summary review, edited in place on each review. */
 export function renderSummary(s: SummaryInput): string {
-  const scope = s.incrementFrom ? `the commits since \`${s.incrementFrom.slice(0, 7)}\`` : "the whole pull request";
+  const scope = s.incrementFrom
+    ? s.incrementRewritten ? `the files changed since \`${s.incrementFrom.slice(0, 7)}\`, after a force-push` : `the commits since \`${s.incrementFrom.slice(0, 7)}\``
+    : "the whole pull request";
   const summaryOnly = s.unconfirmed ?? [];
   const unconfirmed = summaryOnly.filter((f) => !f.unsupported);
   const unsupported = summaryOnly.filter((f) => f.unsupported);
