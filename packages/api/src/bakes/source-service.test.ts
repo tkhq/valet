@@ -763,6 +763,68 @@ describe("SourceService", () => {
       expect(builder.specs).toHaveLength(0);
       expect(await db.select().from(bakes)).toHaveLength(0);
     });
+
+    describe("full registry drain", () => {
+      const fullRegistry = (async () =>
+        Response.json({ capacityBytes: 246e9, availableBytes: 0.1e9, usedBytes: 245.9e9 })) as typeof fetch;
+      const healthyRegistry = (async () =>
+        Response.json({ capacityBytes: 246e9, availableBytes: 200e9, usedBytes: 46e9 })) as typeof fetch;
+
+      async function seedThreeBakes(): Promise<void> {
+        const src = await seedRepoSource(db);
+        await seedBake(db, src, { id: "old1", imageRef: "ref/old1", sizeBytes: 2e9, createdAt: NOW - 3000 });
+        await seedBake(db, src, { id: "old2", imageRef: "ref/old2", sizeBytes: 2e9, createdAt: NOW - 2000 });
+        await seedBake(db, src, { id: "newest", imageRef: "ref/newest", sizeBytes: 2e9, createdAt: NOW - 1000 });
+      }
+
+      async function remainingIds(): Promise<string[]> {
+        return (await db.select({ id: bakes.id }).from(bakes)).map((row) => row.id).sort();
+      }
+
+      // A full registry refuses every bake before a row exists, so the
+      // post-bake retention never runs. The health pass must evict instead.
+      it("evicts over-budget images when the registry is full and no bake can start", async () => {
+        await seedThreeBakes();
+        let now = NOW;
+        const svc = makeService({
+          env: { VALET_PREBUILD_CACHE_BUDGET_GB: "3", VALET_REGISTRY_HEALTH_URL: "http://registry/health" },
+          registryFetch: fullRegistry,
+          now: () => now,
+        });
+        const log = vi.spyOn(console, "error").mockImplementation(() => {});
+        try {
+          await svc.reportHealth();
+          expect(retentionCalls.flatMap((call) => call.imageRefs)).toEqual(["ref/old1", "ref/old2"]);
+          expect(await remainingIds()).toEqual(["newest"]);
+
+          // Registry disk stays full until garbage collection. A new
+          // over-budget bake inside the cooldown waits for the next pass.
+          const src = (await db.select({ sourceId: bakes.sourceId }).from(bakes))[0].sourceId;
+          await seedBake(db, src, { id: "older", imageRef: "ref/older", sizeBytes: 4e9, createdAt: NOW - 4000 });
+          retentionCalls = [];
+          now = NOW + 60_000;
+          await svc.reportHealth();
+          expect(retentionCalls).toHaveLength(0);
+          now = NOW + 5 * 60_000;
+          await svc.reportHealth();
+          expect(retentionCalls.flatMap((call) => call.imageRefs)).toEqual(["ref/older"]);
+        } finally { log.mockRestore(); }
+      });
+
+      it("leaves eviction to post-bake retention while the registry is healthy", async () => {
+        await seedThreeBakes();
+        const svc = makeService({
+          env: { VALET_PREBUILD_CACHE_BUDGET_GB: "3", VALET_REGISTRY_HEALTH_URL: "http://registry/health" },
+          registryFetch: healthyRegistry,
+        });
+        const log = vi.spyOn(console, "error").mockImplementation(() => {});
+        try {
+          await svc.reportHealth();
+          expect(retentionCalls).toHaveLength(0);
+          expect(await remainingIds()).toEqual(["newest", "old1", "old2"]);
+        } finally { log.mockRestore(); }
+      });
+    });
   });
 
   beforeEach(async () => {

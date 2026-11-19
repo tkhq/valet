@@ -848,6 +848,8 @@ export class SourceService {
   private readonly bakeSpans = new Map<string, ReturnType<typeof startBakeSpan>>();
   /** Last failed-bake retention pass per source (`FAILED_RETENTION_COOLDOWN_MS`). */
   private readonly failedRetentionAt = new Map<string, number>();
+  /** Last full-registry ceiling pass per org (`FAILED_RETENTION_COOLDOWN_MS`). One entry per org. */
+  private readonly fullRegistryRetentionAt = new Map<string, number>();
   private readonly registryInsecure: boolean;
   private readonly registryPushHost: string | undefined;
 
@@ -1028,12 +1030,32 @@ export class SourceService {
           console.error("bake_storage_pressure", { orgId, ...health,
             action: "Free registry space or remove unused registry images. Run registry garbage collection after image removal. Check the registry health probe." });
         }
+        await this.drainFullRegistry(orgId, health);
       }
     } catch (error) {
       console.error("bake_health_check_failed: Restore database and registry health access.", error);
     } finally {
       this.healthReporting = false;
     }
+  }
+
+  /**
+   * Runs the cache ceiling when the registry is full. A full registry makes
+   * `startBake` refuse before it inserts a row, so no bake reaches the pushed
+   * or failed transition that runs retention, and the registry cannot drain
+   * itself. Only an over-budget cache with an evictable bake qualifies; once
+   * the cache is under budget, this stops. Disk space returns at the next
+   * registry garbage collection. Cooldown-limited per org, like the
+   * failed-bake pass, so failed image deletes do not repeat every minute.
+   */
+  private async drainFullRegistry(orgId: string, health: Awaited<ReturnType<SourceService["health"]>>): Promise<void> {
+    const backend = this.builderBackend;
+    if (!backend || health.registry.status !== "full") return;
+    if (!health.cache.overBudget || health.cache.over_budget_all_protected) return;
+    const last = this.fullRegistryRetentionAt.get(orgId) ?? 0;
+    if (this.now() - last < FAILED_RETENTION_COOLDOWN_MS) return;
+    this.fullRegistryRetentionAt.set(orgId, this.now());
+    await this.enforceCacheCeiling(orgId, backend);
   }
 
   private async loadSource(sourceId: string): Promise<ImageSourceRow> {
