@@ -670,7 +670,7 @@ describe("PATCH /api/workflows/:id/model", () => {
     const res = await fetch(`${api.baseUrl}/api/workflows/${created.id}/model`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model: "anthropic/claude-haiku-4-5" }),
+      body: JSON.stringify({ model: "anthropic/claude-haiku-5-5" }),
     });
     expect(res.status).toBe(400);
     expect(await res.json()).toMatchObject({ error: expect.stringContaining("not approved") });
@@ -725,14 +725,14 @@ describe("model validation on full workflow saves", () => {
   it("saves a model the org approved and activated", async () => {
     vi.stubEnv("ANTHROPIC_API_KEY", "test-anthropic-key");
     api = await bootTestApi();
-    expect((await save(api.baseUrl, "anthropic/claude-haiku-4-5")).status).toBe(201);
+    expect((await save(api.baseUrl, "anthropic/claude-haiku-5-5")).status).toBe(201);
   });
 
   it("rejects a model the org did not approve, as the model-only path does", async () => {
     vi.stubEnv("ANTHROPIC_API_KEY", "test-anthropic-key");
     api = await bootTestApi();
-    await setApprovedModels(api.providers.db, "local-org", ["anthropic/claude-opus-4-7"]);
-    const res = await save(api.baseUrl, "anthropic/claude-haiku-4-5");
+    await setApprovedModels(api.providers.db, "local-org", ["anthropic/claude-opus-5-5"]);
+    const res = await save(api.baseUrl, "anthropic/claude-haiku-5-5");
     expect(res.status).toBe(400);
     const body = (await res.json()) as { errors: string[] };
     expect(body.errors.join(" ")).toContain("Settings > Models");
@@ -747,7 +747,7 @@ describe("model validation on full workflow saves", () => {
       name: "Anthropic",
       enabled: false,
     });
-    expect((await save(api.baseUrl, "anthropic/claude-haiku-4-5")).status).toBe(400);
+    expect((await save(api.baseUrl, "anthropic/claude-haiku-5-5")).status).toBe(400);
   });
 
   it("keeps a bare OpenAI id saveable while OpenAI is active", async () => {

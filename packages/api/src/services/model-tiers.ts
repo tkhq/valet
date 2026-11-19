@@ -33,12 +33,45 @@ export type TierMap = Record<SizeTier, string[]>;
 
 /** Built-in defaults when the org has no `model_tiers` set. */
 export const DEFAULT_TIER_MAP: TierMap = {
-  xs: ["anthropic/claude-haiku-4-5"],
-  s: ["anthropic/claude-haiku-4-5"],
-  m: ["anthropic/claude-sonnet-4-6"],
-  l: ["anthropic/claude-opus-4-7"],
-  xl: ["anthropic/claude-opus-4-7"],
+  xs: ["anthropic/claude-haiku-5-5"],
+  s: ["anthropic/claude-haiku-5-5"],
+  m: ["anthropic/claude-sonnet-5-5"],
+  l: ["anthropic/claude-opus-5-5"],
+  xl: ["anthropic/claude-fable-5-2"],
 };
+
+const ANTHROPIC_UPGRADES: Record<string, string[]> = {
+  "claude-haiku-5-5": ["claude-haiku-4-5"],
+  "claude-sonnet-5-5": ["claude-sonnet-4-5", "claude-sonnet-4-6", "claude-sonnet-5"],
+  "claude-opus-5-5": ["claude-opus-4-5", "claude-opus-4-6", "claude-opus-4-7", "claude-opus-4-8", "claude-opus-5"],
+  "claude-fable-5-2": ["claude-fable-5", "claude-fable-5-1"],
+};
+
+/**
+ * Saved tier targets that newer models replace, as namespaced specs. Each
+ * value lists replacements newest first; the first one the org allows wins.
+ */
+export const TIER_MODEL_UPGRADES: Readonly<Record<string, readonly string[]>> = {
+  "openai/gpt-5.6-sol": ["openai/gpt-6.2-sol", "openai/gpt-6.1-sol"],
+  "openai/gpt-6-sol": ["openai/gpt-6.2-sol"],
+  "openai/gpt-6.1-sol": ["openai/gpt-6.2-sol"],
+  "openai/gpt-6-astra": ["openai/gpt-6.2-astra"],
+  ...Object.fromEntries(Object.entries(ANTHROPIC_UPGRADES).flatMap(([latest, older]) =>
+    older.map((id) => [`anthropic/${id}`, [`anthropic/${latest}`]]))),
+};
+
+function sameSpec(a: string, b: string): boolean {
+  const left = parseModelId(a);
+  const right = parseModelId(b);
+  return left.namespace === right.namespace && left.modelId === right.modelId;
+}
+
+/** The newest allowed replacement for a saved tier target, or the target itself. */
+export function upgradeTierSpec(spec: string, approved: string[] | null): string {
+  const { namespace, modelId } = parseModelId(spec);
+  const replacements = TIER_MODEL_UPGRADES[`${namespace}/${modelId}`] ?? [];
+  return replacements.find((next) => approved === null || approved.some((entry) => sameSpec(entry, next))) ?? spec;
+}
 
 /**
  * Read the org's tier map from `orgs.model_tiers`, falling back to defaults
@@ -56,15 +89,15 @@ export async function getOrgTierMap(db: AppQueryable, orgId: string, proposedApp
   // tiers it names; missing tiers keep the default.
   const stored = raw as Record<string, unknown>;
   const merged: TierMap = { ...DEFAULT_TIER_MAP };
+  const savedApproved = proposedApproved === undefined ? rows[0]?.approvedModels : proposedApproved;
+  const approved = savedApproved == null ? null
+    : Array.isArray(savedApproved) ? savedApproved.filter((id): id is string => typeof id === "string") : [];
   for (const tier of TIER_TOKENS) {
     const entry = stored[tier];
     if (Array.isArray(entry) && entry.every((v) => typeof v === "string")) {
-      // Upgrade retired recommendations only when the replacement is allowed.
+      // Upgrade older recommendations only when the replacement is allowed.
       // Explicit session/workflow model IDs remain unchanged and resolvable.
-      const approved = proposedApproved === undefined ? rows[0]?.approvedModels : proposedApproved;
-      const canUseSol61 = approved == null || (Array.isArray(approved) && approved.includes("openai/gpt-6.1-sol"));
-      merged[tier] = [...new Set(entry.map((spec: string) =>
-        canUseSol61 && spec === "openai/gpt-5.6-sol" ? "openai/gpt-6.1-sol" : spec))];
+      merged[tier] = [...new Set(entry.map((spec: string) => upgradeTierSpec(spec, approved)))];
     }
   }
   return merged;

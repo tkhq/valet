@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { createAssistantMessageEventStream, fauxAssistantMessage, registerApiProvider, registerFauxProvider, unregisterApiProviders, Type, type FauxResponseFactory } from "@earendil-works/pi-ai/compat";
+import { createAssistantMessageEventStream, fauxAssistantMessage, registerApiProvider, registerFauxProvider, unregisterApiProviders, type FauxResponseFactory } from "@earendil-works/pi-ai/compat";
+import { Type } from "typebox";
 import { fauxToolCall } from "../src/test-helpers/tool-intent.js";
 import { Engine, InMemoryEventStream, InMemorySessionStore, VirtualSandboxProvider, type MessageEntry, type SessionEntry } from "../src/index.js";
 import { entriesToSummaryMessages, summarize } from "../src/compaction.js";

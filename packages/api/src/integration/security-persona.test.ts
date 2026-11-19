@@ -185,7 +185,7 @@ describe("api integration: persona round trip over the cell claim", () => {
       expect(child1Session).not.toBeNull();
       // The persona inherits the runner's model — the runner defaulted to the
       // capable security model, so the persona runs on it, not the haiku floor.
-      expect(child1Session!.options.model.id).toBe("claude-sonnet-4-6");
+      expect(child1Session!.options.model.id).toBe("claude-sonnet-5-5");
       const child1Tools = (child1Session!.options.tools ?? []).map((t) => t.name);
       expect(child1Tools).toContain("sec_fs_write");
       expect(child1Tools).toContain("sec_fs_read");

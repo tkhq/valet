@@ -426,7 +426,7 @@ describe("SessionHeader — thread-scoped model picker", () => {
     realThreadReasoning = true;
     teamsData = { teams: [{ id: "team_1", orgId: "org_1", name: "Platform", origin: "local", externalId: null, createdAt: 1, memberCount: 3, callerRole: "admin", defaultModel: null }] };
     threadDefaultsData = { model: "s", reasoning: "medium", scope, reasoningScope: scope };
-    const savedThread = { id: "th-1", sessionId: "sess-1", createdAt: 1, lastUserActivityAt: 1, model: "claude-opus-4-7", reasoning: "low" };
+    const savedThread = { id: "th-1", sessionId: "sess-1", createdAt: 1, lastUserActivityAt: 1, model: "claude-fable-5-2", reasoning: "low" };
     let settle = () => {};
     const request = new Promise<void>((resolve) => { settle = resolve; });
     let settleRefetch = () => {};
@@ -464,9 +464,9 @@ describe("SessionHeader — thread-scoped model picker", () => {
       if (scope === "team") {
         const dialog = await screen.findByRole("dialog", { name: "Change the team default?" });
         await user.click(within(dialog).getByRole("button", { name }));
-        expect(patchTeamMutate).toHaveBeenCalledWith({ id: "team_1", body: { defaultModel: "claude-opus-4-7", defaultReasoning: "high" } }, expect.anything());
+        expect(patchTeamMutate).toHaveBeenCalledWith({ id: "team_1", body: { defaultModel: "claude-fable-5-2", defaultReasoning: "high" } }, expect.anything());
       } else {
-        expect(patchMeMutate).toHaveBeenCalledWith({ defaultModel: "claude-opus-4-7", defaultReasoning: "high" });
+        expect(patchMeMutate).toHaveBeenCalledWith({ defaultModel: "claude-fable-5-2", defaultReasoning: "high" });
       }
     } finally {
       await act(async () => { settle(); settleRefetch(); });
@@ -480,30 +480,30 @@ describe("SessionHeader — thread-scoped model picker", () => {
     const user = userEvent.setup();
     isWorkspaceRuntime = true;
     threadDefaultsData = { model: "s", reasoning: "medium", scope: "personal", reasoningScope: "personal" };
-    headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, model: "claude-opus-4-7", reasoning: "high" }];
+    headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, model: "claude-fable-5-2", reasoning: "high" }];
     renderHeader(undefined, "th-1");
     await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
     expect(screen.getByText(/New threads:/)).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Make my default" }));
-    expect(patchMeMutate).toHaveBeenCalledWith({ defaultModel: "claude-opus-4-7", defaultReasoning: "high" });
+    expect(patchMeMutate).toHaveBeenCalledWith({ defaultModel: "claude-fable-5-2", defaultReasoning: "high" });
   });
 
   it("saves only the model when the assistant carries its own reasoning", async () => {
     const user = userEvent.setup();
     isWorkspaceRuntime = true;
     threadDefaultsData = { model: "s", reasoning: "high", scope: "personal", reasoningScope: null };
-    headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, model: "claude-opus-4-7", reasoning: "low" }];
+    headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, model: "claude-fable-5-2", reasoning: "low" }];
     renderHeader(undefined, "th-1");
     await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
     await user.click(screen.getByRole("button", { name: "Make my default" }));
-    expect(patchMeMutate).toHaveBeenCalledWith({ defaultModel: "claude-opus-4-7" });
+    expect(patchMeMutate).toHaveBeenCalledWith({ defaultModel: "claude-fable-5-2" });
   });
 
   it("offers no save when the assistant's own settings outrank the defaults", async () => {
     const user = userEvent.setup();
     isWorkspaceRuntime = true;
     threadDefaultsData = { model: "s", reasoning: "medium", scope: null, reasoningScope: null };
-    headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, model: "claude-opus-4-7" }];
+    headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, model: "claude-fable-5-2" }];
     renderHeader(undefined, "th-1");
     await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
     expect(screen.getByText(/New threads:/)).toBeTruthy();
@@ -518,7 +518,7 @@ describe("SessionHeader — thread-scoped model picker", () => {
       teams: [{ id: "team_1", orgId: "org_1", name: "Platform", origin: "local", externalId: null, createdAt: 1, memberCount: 3, callerRole: "admin", defaultModel: null }],
     };
     threadDefaultsData = { model: "s", reasoning: "medium", scope: "team", reasoningScope: "team" };
-    headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, model: "claude-opus-4-7" }];
+    headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, model: "claude-fable-5-2" }];
     renderHeader(undefined, "th-1", { ...baseSession(), isWorkspaceRuntime: true, owner: { type: "team", id: "team_1" } });
     await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
     await user.click(screen.getByRole("button", { name: "Make team default" }));
@@ -526,23 +526,23 @@ describe("SessionHeader — thread-scoped model picker", () => {
     const dialog = await screen.findByRole("dialog", { name: "Change the team default?" });
     expect(dialog.textContent).toContain("every member of Platform");
     await user.click(within(dialog).getByRole("button", { name: "Make team default" }));
-    expect(patchTeamMutate).toHaveBeenCalledWith({ id: "team_1", body: { defaultModel: "claude-opus-4-7" } }, expect.anything());
+    expect(patchTeamMutate).toHaveBeenCalledWith({ id: "team_1", body: { defaultModel: "claude-fable-5-2" } }, expect.anything());
   });
 
   it("shows a pending selection immediately without changing the saved pin", () => {
     headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, model: "s" }];
     threadModelPending = true;
-    threadModelVariables = { threadId: "th-1", model: "claude-opus-4-7" };
+    threadModelVariables = { threadId: "th-1", model: "claude-fable-5-2" };
     renderHeader(undefined, "th-1");
-    expect(screen.getByRole("button", { name: /^Choose model:/ }).textContent).toContain("Opus 4.7");
+    expect(screen.getByRole("button", { name: /^Choose model:/ }).textContent).toContain("Fable 5.2");
     expect(screen.getByRole("status").textContent).toContain("Saving model");
     expect(headerThreads[0]?.model).toBe("s");
   });
 
   it("does not show another thread's pending selection or error", () => {
-    headerThreads = [{ id: "th-2", sessionId: "sess-1", createdAt: 1, model: "claude-sonnet-4-5" }];
+    headerThreads = [{ id: "th-2", sessionId: "sess-1", createdAt: 1, model: "claude-sonnet-5-5" }];
     threadModelPending = true;
-    threadModelVariables = { threadId: "th-1", model: "claude-opus-4-7" };
+    threadModelVariables = { threadId: "th-1", model: "claude-fable-5-2" };
     threadModelError = new Error("Model unavailable. Choose another model.");
     renderHeader(undefined, "th-2");
     expect(screen.getByRole("button", { name: /^Choose model:/ }).textContent).toContain("Sonnet");
@@ -551,8 +551,8 @@ describe("SessionHeader — thread-scoped model picker", () => {
   });
 
   it("shows a rejected switch and retains the saved selection", () => {
-    headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, model: "claude-sonnet-4-5" }];
-    threadModelVariables = { threadId: "th-1", model: "claude-opus-4-7" };
+    headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, model: "claude-sonnet-5-5" }];
+    threadModelVariables = { threadId: "th-1", model: "claude-fable-5-2" };
     threadModelError = new Error("Model unavailable. Choose another model.");
     renderHeader(undefined, "th-1");
     expect(screen.getByRole("button", { name: /^Choose model:/ }).textContent).toContain("Sonnet");
@@ -561,14 +561,14 @@ describe("SessionHeader — thread-scoped model picker", () => {
 
   it("shows the selected thread's active submission model", () => {
     headerThreads = [
-      { id: "th-1", sessionId: "sess-1", createdAt: 1, model: "claude-sonnet-4-5" },
+      { id: "th-1", sessionId: "sess-1", createdAt: 1, model: "claude-sonnet-5-5" },
     ];
-    activeModel("th-1", "anthropic/claude-opus-4-7");
+    activeModel("th-1", "anthropic/claude-fable-5-2");
 
     renderHeader(undefined, "th-1");
 
     expect(screen.getByRole("button", { name: /^Choose model:/ }).textContent).toContain(
-      "Opus 4.7",
+      "Fable 5.2",
     );
   });
 
@@ -577,34 +577,34 @@ describe("SessionHeader — thread-scoped model picker", () => {
       { id: "th-1", sessionId: "sess-1", createdAt: 1, model: "l" },
       { id: "th-2", sessionId: "sess-1", createdAt: 2, model: "l" },
     ];
-    activeModel("th-1", "anthropic/claude-opus-4-7");
-    activeModel("th-2", "anthropic/claude-haiku-4-5");
+    activeModel("th-1", "anthropic/claude-fable-5-2");
+    activeModel("th-2", "anthropic/claude-haiku-5-5");
     const { rerender } = renderHeader(undefined, "th-1");
     expect(screen.getByRole("button", { name: /^Choose model:/ }).textContent).toContain(
-      "Opus 4.7",
+      "Fable 5.2",
     );
 
     rerender(headerElement(undefined, "th-2"));
 
     expect(screen.getByRole("button", { name: /^Choose model:/ }).textContent).toContain(
-      "Haiku 4.5",
+      "Haiku 5.5",
     );
   });
 
   it("falls back to the configured model when model.state becomes idle", () => {
     headerThreads = [
-      { id: "th-1", sessionId: "sess-1", createdAt: 1, model: "claude-sonnet-4-5" },
+      { id: "th-1", sessionId: "sess-1", createdAt: 1, model: "claude-sonnet-5-5" },
     ];
-    activeModel("th-1", "anthropic/claude-opus-4-7");
+    activeModel("th-1", "anthropic/claude-fable-5-2");
     renderHeader(undefined, "th-1");
     expect(screen.getByRole("button", { name: /^Choose model:/ }).textContent).toContain(
-      "Opus 4.7",
+      "Fable 5.2",
     );
 
     act(() => idleModel("th-1"));
 
     expect(screen.getByRole("button", { name: /^Choose model:/ }).textContent).toContain(
-      "Sonnet 4.5",
+      "Sonnet 5.5",
     );
   });
 
@@ -624,14 +624,14 @@ describe("SessionHeader — thread-scoped model picker", () => {
 
   it("does not announce a difference for equivalent Anthropic model ids", () => {
     headerThreads = [
-      { id: "th-1", sessionId: "sess-1", createdAt: 1, model: "claude-opus-4-7" },
+      { id: "th-1", sessionId: "sess-1", createdAt: 1, model: "claude-fable-5-2" },
     ];
-    activeModel("th-1", "anthropic/claude-opus-4-7");
+    activeModel("th-1", "anthropic/claude-fable-5-2");
     renderHeader(undefined, "th-1");
 
     expect(
       screen.getByRole("button", {
-        name: "Choose model: Opus 4.7",
+        name: "Choose model: Fable 5.2",
         description:
           "Model for this thread (pinned at creation). New threads use the workspace default.",
       }),
@@ -640,11 +640,11 @@ describe("SessionHeader — thread-scoped model picker", () => {
 
   it("shows the ACTIVE THREAD's pinned model, not the session default", () => {
     headerThreads = [
-      { id: "th-1", sessionId: "sess-1", createdAt: 1, model: "claude-opus-4-7" },
+      { id: "th-1", sessionId: "sess-1", createdAt: 1, model: "claude-fable-5-2" },
     ];
     renderHeader(undefined, "th-1");
     const trigger = screen.getByRole("button", { name: /^Choose model:/ });
-    expect(trigger.textContent).toContain("Opus 4.7");
+    expect(trigger.textContent).toContain("Fable 5.2");
   });
 
   it("disables the picker while the active thread is unresolved (never a session-scope write)", () => {
@@ -657,20 +657,20 @@ describe("SessionHeader — thread-scoped model picker", () => {
   });
 
   it("announces the runtime model while the active thread is unresolved", () => {
-    activeModel("th-unknown", "anthropic/claude-opus-4-7");
+    activeModel("th-unknown", "anthropic/claude-fable-5-2");
 
     renderHeader(undefined, "th-unknown", {
       ...baseSession(),
-      model: "claude-sonnet-4-5",
+      model: "claude-sonnet-5-5",
       reasoning: "high",
     });
 
     const trigger = screen.getByRole("button", {
-      name: "Choose model: Opus 4.7",
+      name: "Choose model: Fable 5.2",
       description:
         "Model for this thread (pinned at creation). New threads use the workspace default.",
     }) as HTMLButtonElement;
-    expect(trigger.textContent).toContain("Opus 4.7");
+    expect(trigger.textContent).toContain("Fable 5.2");
     expect(trigger.textContent).not.toContain("High");
     expect(trigger.disabled).toBe(true);
   });

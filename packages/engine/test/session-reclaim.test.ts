@@ -1,6 +1,7 @@
 import { fauxToolCall } from "../src/test-helpers/index.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fauxAssistantMessage, registerFauxProvider, Type } from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
+import { Type } from "typebox";
 import { Engine, InMemoryEventStream, InMemorySessionStore, VirtualSandboxProvider } from "../src/index.js";
 
 function fixture() {

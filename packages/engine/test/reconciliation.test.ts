@@ -1,10 +1,7 @@
 import { getCurrentSystemPrompt } from "@earendil-works/pi-ai/utils/transcript";
 import { describe, it, expect, vi } from "vitest";
-import {
-  fauxAssistantMessage,
-  registerFauxProvider,
-  Type,
-} from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
+import { Type } from "typebox";
 import {
   decideReconciliation,
   Engine,

@@ -35,8 +35,8 @@ beforeEach(() => {
   modelsData = {
     models: [
       {
-        id: "anthropic/claude-sonnet-4-5",
-        name: "Claude Sonnet 4.5",
+        id: "anthropic/claude-sonnet-5-5",
+        name: "Claude Sonnet 5.5",
         providerId: "anthropic",
         providerKind: "anthropic",
         providerName: "Anthropic",
@@ -61,7 +61,7 @@ describe("ModelCombobox — catalog-driven", () => {
     const user = userEvent.setup();
     render(<ModelCombobox value={null} onSelect={vi.fn()} onClear={vi.fn()} />);
     await user.click(screen.getByRole("combobox"));
-    expect(screen.getByText("Sonnet 4.5")).toBeTruthy();
+    expect(screen.getByText("Sonnet 5.5")).toBeTruthy();
     expect(screen.getByText("balanced")).toBeTruthy();
   });
 
@@ -77,8 +77,8 @@ describe("ModelCombobox — catalog-driven", () => {
     const onSelect = vi.fn();
     render(<ModelCombobox value={null} onSelect={onSelect} onClear={vi.fn()} />);
     await user.click(screen.getByRole("combobox"));
-    await user.click(screen.getByText("Sonnet 4.5"));
-    expect(onSelect).toHaveBeenCalledWith("anthropic/claude-sonnet-4-5");
+    await user.click(screen.getByText("Sonnet 5.5"));
+    expect(onSelect).toHaveBeenCalledWith("anthropic/claude-sonnet-5-5");
   });
 
   it("selecting a custom-provider entry submits its catalog id", async () => {
@@ -91,8 +91,8 @@ describe("ModelCombobox — catalog-driven", () => {
   });
 
   it("labels a legacy bare persisted value via the curated fallback and shows no warning", () => {
-    render(<ModelCombobox value="claude-haiku-4-5" onSelect={vi.fn()} onClear={vi.fn()} />);
-    expect(screen.getByDisplayValue("Haiku 4.5")).toBeTruthy();
+    render(<ModelCombobox value="claude-haiku-5-5" onSelect={vi.fn()} onClear={vi.fn()} />);
+    expect(screen.getByDisplayValue("Haiku 5.5")).toBeTruthy();
     expect(screen.queryByText(/isn't in the current model registry/)).toBeNull();
   });
 
@@ -104,7 +104,7 @@ describe("ModelCombobox — catalog-driven", () => {
 
 describe("ModelCombobox — Size tier group", () => {
   it("renders a tier row per SIZE_TIERS entry before the model rows, with a resolved subtitle", async () => {
-    tierMapData = { xs: [], s: [], m: [], l: [], xl: ["anthropic/claude-sonnet-4-5"] };
+    tierMapData = { xs: [], s: [], m: [], l: [], xl: ["anthropic/claude-sonnet-5-5"] };
     const user = userEvent.setup();
     render(<ModelCombobox value={null} onSelect={vi.fn()} onClear={vi.fn()} />);
     await user.click(screen.getByRole("combobox"));
@@ -113,8 +113,8 @@ describe("ModelCombobox — Size tier group", () => {
     // Five tier rows first, then the model rows.
     expect(options[0].textContent).toContain("Extra Small");
     expect(options[4].textContent).toContain("X-Large");
-    expect(options[4].textContent).toContain("Sonnet 4.5");
-    expect(options[5].textContent).toContain("Sonnet 4.5");
+    expect(options[4].textContent).toContain("Sonnet 5.5");
+    expect(options[5].textContent).toContain("Sonnet 5.5");
   });
 
   it("filters the Size group by tier label and token", async () => {
@@ -175,8 +175,8 @@ describe("ModelCombobox — approved-models filter", () => {
     modelsData = {
       models: [
         {
-          id: "anthropic/claude-sonnet-4-5",
-          name: "Claude Sonnet 4.5",
+          id: "anthropic/claude-sonnet-5-5",
+          name: "Claude Sonnet 5.5",
           providerId: "anthropic",
           providerKind: "anthropic",
           providerName: "Anthropic",
@@ -201,7 +201,7 @@ describe("ModelCombobox — approved-models filter", () => {
     render(<ModelCombobox value={null} onSelect={vi.fn()} onClear={vi.fn()} />);
     await user.click(screen.getByRole("combobox"));
     expect(screen.queryByText("Llama 3")).toBeNull();
-    expect(screen.getByText("Sonnet 4.5")).toBeTruthy();
+    expect(screen.getByText("Sonnet 5.5")).toBeTruthy();
   });
 
   it("an unapproved model does not surface even via search", async () => {

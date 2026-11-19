@@ -84,7 +84,7 @@ const dailyDevDigest: WorkflowDefinition = {
     {
       id: "digest",
       type: "llm",
-      model: "claude-sonnet-4-5",
+      model: "claude-sonnet-5-5",
       system:
         "You write a short morning digest for one engineer. Rank by what blocks other people first, " +
         "then by what blocks the reader. Name each item once. Give every item its URL. " +
@@ -143,7 +143,7 @@ const stalePullRequestNudge: WorkflowDefinition = {
     {
       id: "find_stale",
       type: "llm",
-      model: "claude-haiku-4-5",
+      model: "claude-haiku-5-5",
       system:
         "You find work that has gone quiet. A pull request is stale when its last update is more than " +
         "five days before the time you are given. Report only stale items. Report nothing else.",
@@ -508,7 +508,7 @@ const pullRequestReview: WorkflowDefinition = {
     {
       id: "review",
       type: "llm",
-      model: "claude-sonnet-4-5",
+      model: "claude-sonnet-5-5",
       system:
         "You review one pull request diff. You report a finding only when you can name the file " +
         "and the line it is on, and only when that line is one the pull request added or " +
@@ -1083,7 +1083,7 @@ const assignReviewers: WorkflowDefinition = {
       // `foreach` instead of an `if` a foreach body cannot express.
       id: "shortlist",
       type: "llm",
-      model: "claude-sonnet-4-5",
+      model: "claude-sonnet-5-5",
       system:
         "You read a CODEOWNERS file and a reviewer roster, and you report what they say. You never invent an " +
         "owner, a person or a group. A person you cannot find in the roster does not exist.",
@@ -1203,7 +1203,7 @@ const assignReviewers: WorkflowDefinition = {
       // `candidates` already carries every field a DM needs.
       id: "select",
       type: "llm",
-      model: "claude-sonnet-4-5",
+      model: "claude-sonnet-5-5",
       system:
         "You choose the reviewers for one pull request. Covering every required owner is the only thing that lets " +
         "you choose anybody: when one owner is left uncovered, you assign nobody and you say which owner and why. " +
@@ -1426,7 +1426,7 @@ const assignReviewers: WorkflowDefinition = {
       // silently dropped.
       id: "confirm",
       type: "llm",
-      model: "claude-haiku-4-5",
+      model: "claude-haiku-5-5",
       system:
         "You compare two lists of GitHub handles and you report which of the first list is in the second. You " +
         "never add a handle that is not in one of the two lists.",
@@ -1628,7 +1628,7 @@ const assignReviewers: WorkflowDefinition = {
       // assignee reaches this node, and most of them are not declines.
       id: "classify_decline",
       type: "llm",
-      model: "claude-haiku-4-5",
+      model: "claude-haiku-5-5",
       system:
         "You read one comment a GitHub pull request assignee left on their own pull request, and you decide " +
         "whether it declines the review they were assigned. You are not judging the pull request itself.",
@@ -1711,7 +1711,7 @@ const assignReviewers: WorkflowDefinition = {
       // us who they are.
       id: "shortlist_swap",
       type: "llm",
-      model: "claude-sonnet-4-5",
+      model: "claude-sonnet-5-5",
       system:
         "You read a CODEOWNERS file and a reviewer roster, and you report what they say. You never invent an " +
         "owner, a person or a group. A person you cannot find in the roster does not exist.",
@@ -1836,7 +1836,7 @@ const assignReviewers: WorkflowDefinition = {
       // without their say, which costs more than one harmless extra name.
       id: "select_swap",
       type: "llm",
-      model: "claude-sonnet-4-5",
+      model: "claude-sonnet-5-5",
       system:
         "You update the reviewers on one pull request after one of them declined. Keep everybody still assigned " +
         "who has not declined. Cover every required owner is the only thing that lets you add anybody new: when " +
@@ -2067,7 +2067,7 @@ const assignReviewers: WorkflowDefinition = {
       // here would tell somebody they were assigned a second time.
       id: "confirm_swap",
       type: "llm",
-      model: "claude-haiku-4-5",
+      model: "claude-haiku-5-5",
       system:
         "You compare two lists of GitHub handles and you report which of the first list is in the second. You " +
         "never add a handle that is not in one of the two lists.",

@@ -1,5 +1,6 @@
 import { afterEach, expect, it } from "vitest";
-import { fauxAssistantMessage, registerFauxProvider, Type } from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
+import { Type } from "typebox";
 import { fauxToolCall } from "../src/test-helpers/tool-intent.js";
 import { Engine, InMemoryEventStream, InMemorySessionStore, VirtualSandboxProvider, type SessionEntry } from "../src/index.js";
 import { entriesToAgentMessages } from "../src/thread.js";
@@ -49,7 +50,9 @@ it("defers an older tail turn when the generated summary needs its space", async
       firstCoverage = checkpoint?.type === "compaction" ? checkpoint.coveredEntryIds : [];
       firstContext = JSON.stringify(entriesToAgentMessages(saved, model, { threadKey: thread.key,
         taskSourceQueueItemId: entries.find(entry => entry.type === "message" && entry.role === "user")?.queueItemId }));
-      return { text: "Evidence collected" };
+      // About 6k tokens, so the request after this tool no longer fits and
+      // runs the proactive pass that must defer the older tail.
+      return { text: "Evidence collected " + "e".repeat(24_000) };
     } }],
   });
   sessionId = session.id;

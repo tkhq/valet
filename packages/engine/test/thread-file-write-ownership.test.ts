@@ -3,7 +3,8 @@ import { afterEach, expect, it } from "vitest";
 import { mkdtemp, writeFile, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fauxAssistantMessage, registerFauxProvider, Type } from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
+import { Type } from "typebox";
 import { Engine, InMemoryEventStream, InMemorySessionStore, readTurnCheckpoint, type ToolDef } from "../src/index.js";
 import { HostDirSandbox, HostDirSandboxProvider } from "./fixtures/host-dir-sandbox.js";
 

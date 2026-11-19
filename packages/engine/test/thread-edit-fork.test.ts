@@ -9,12 +9,8 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import * as checkpoints from "../src/checkpoints.js";
 afterEach(() => vi.restoreAllMocks());
 import { getCurrentSystemMessage } from "@earendil-works/pi-ai/utils/transcript";
-import {
-  fauxAssistantMessage,
-  registerFauxProvider,
-  Type,
-  type FauxResponseStep,
-} from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, registerFauxProvider, type FauxResponseStep } from "@earendil-works/pi-ai/compat";
+import { Type } from "typebox";
 import {
   Engine,
   InMemoryEventStream,

@@ -7,7 +7,8 @@
  * the window-sized trigger.
  */
 import { describe, it, expect } from "vitest";
-import { fauxAssistantMessage, registerFauxProvider, Type } from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
+import { Type } from "typebox";
 import { MODEL_CALL_LIMIT_KEY } from "@valet/shared";
 import { fauxToolCall } from "../src/test-helpers/tool-intent.js";
 import {

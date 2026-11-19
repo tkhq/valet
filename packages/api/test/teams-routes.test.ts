@@ -811,7 +811,7 @@ describe("teams routes", () => {
         const defaults = await fetch(`${api.baseUrl}/api/teams/${teamId}`, {
           method: "PATCH",
           headers: HEADERS,
-          body: JSON.stringify({ defaultModel: "claude-haiku-4-5" }),
+          body: JSON.stringify({ defaultModel: "claude-haiku-5-5" }),
         });
         expect(defaults.status).toBe(200);
       } finally {

@@ -4,22 +4,32 @@ import { getBuiltinModels, getBuiltinProviders } from "@earendil-works/pi-ai/pro
 
 // Metadata for releases newer than the pinned SDK. Built-in entries win by ID.
 // Sources and compatibility scope: docs/specs/2026-08-24-thread-model-pinning-and-compaction-design.md.
+// GPT-6.2 copies pi 1.5.2's GPT-6.1 Sol entry with the GPT-6.2 prices from pi's
+// unreleased catalog. Remove both entries when the pinned pi includes them.
+const gpt62 = {
+  provider: "openai", api: "openai-responses", baseUrl: "https://api.openai.com/v1",
+  reasoning: true, input: ["text", "image"], contextWindow: 272_000, maxTokens: 128_000,
+  thinkingLevelMap: { off: null, minimal: null, low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max" },
+  compat: {
+    supportsStrictMode: true, supportsOpenAIGrammarTools: true, supportsAdditionalTools: true, supportsToolSearch: true,
+    supportsMidConvoSystemMessages: true, supportsExplicitPromptCacheMode: true, supportsMidConvoEffort: true,
+  },
+  inputLimits: {
+    maxRequestBytes: 536_870_912,
+    images: { maxPerRequest: 1500, resize: { maxWidth: 2000, maxHeight: 2000, maxBytes: 4_718_592, jpegQuality: 80 } },
+  },
+} satisfies Omit<Model<"openai-responses">, "id" | "name" | "cost">;
+
 const supplementalModels: Model<Api>[] = [
   {
-    id: "gpt-6.1-sol", name: "GPT-6.1 Sol", provider: "openai", api: "openai-responses",
-    baseUrl: "https://api.openai.com/v1", reasoning: true, input: ["text", "image"],
-    contextWindow: 1_050_000, maxTokens: 128_000,
+    ...gpt62, id: "gpt-6.2-sol", name: "GPT-6.2 Sol",
     cost: { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5,
       tiers: [{ inputTokensAbove: 272_000, input: 4, output: 15, cacheRead: 0.2, cacheWrite: 5 }] },
-    thinkingLevelMap: { off: null, minimal: null, low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max" },
   },
   {
-    id: "claude-sonnet-5-5", name: "Claude Sonnet 5.5", provider: "anthropic", api: "anthropic-messages",
-    baseUrl: "https://api.anthropic.com", reasoning: true, input: ["text", "image"],
-    contextWindow: 1_000_000, maxTokens: 128_000,
-    cost: { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 },
-    thinkingLevelMap: { off: null, minimal: null, low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max" },
-    compat: { forceAdaptiveThinking: true, supportsTemperature: false },
+    ...gpt62, id: "gpt-6.2-astra", name: "GPT-6.2 Astra",
+    cost: { input: 8, output: 40, cacheRead: 0.4, cacheWrite: 10,
+      tiers: [{ inputTokensAbove: 272_000, input: 16, output: 60, cacheRead: 0.8, cacheWrite: 20 }] },
   },
 ];
 
@@ -30,9 +40,19 @@ function bundledMetadata(provider: string): Model<Api>[] {
   return [...upstream, ...supplementalModels.filter((model) => model.provider === provider && !ids.has(model.id))];
 }
 
+// Claude 4.x and older, and GPT-4.x and older, under any provider's id form:
+// `claude-opus-4-7`, `us.anthropic.claude-sonnet-4-5-...`, `anthropic/claude-haiku-4.5`,
+// `gpt-4o-mini`, `openai/gpt-3.5-turbo`.
+const RETIRED_GENERATIONS = [
+  /(^|[./])claude-(haiku|sonnet|opus|instant)-[1-4]([-.:]|$)/,
+  /(^|[./])claude-[1-4]([-.:]|$)/,
+  /(^|[./])gpt-(3\.5|4)(o|[-.:]|$)/,
+];
+
 /** Retired choices remain resolvable for existing sessions, but cannot be selected anew. */
 export function isCatalogModel(provider: string, modelId: string): boolean {
-  return !(provider === "openai" && modelId === "gpt-5.6-sol");
+  if (provider === "openai" && modelId === "gpt-5.6-sol") return false;
+  return !RETIRED_GENERATIONS.some((pattern) => pattern.test(modelId));
 }
 
 /** Selectable bundled models. Retired metadata remains available for billing. */

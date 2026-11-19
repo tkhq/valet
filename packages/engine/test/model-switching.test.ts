@@ -25,16 +25,8 @@ import { getCurrentSystemPrompt } from "@earendil-works/pi-ai/utils/transcript";
  *    like a hung turn. Wait on `submission_settled`.
  */
 import { afterEach, describe, it, expect, vi } from "vitest";
-import {
-  fauxAssistantMessage,
-
-  getModel,
-  registerBuiltInApiProviders,
-  registerFauxProvider,
-  Type,
-  type FauxProvider,
-  type Model,
-} from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, getModel, registerBuiltInApiProviders, registerFauxProvider, type FauxProvider, type Model } from "@earendil-works/pi-ai/compat";
+import { Type } from "typebox";
 import { fauxToolCall } from "../src/test-helpers/tool-intent.js";
 import {
   builtinTools,

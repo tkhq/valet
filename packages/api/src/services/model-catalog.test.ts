@@ -22,6 +22,7 @@ import {
   type BedrockDiscoveryClient,
 } from "./bedrock-discovery.js";
 import { registryModels } from "./model-registry.js";
+import { isCatalogModel } from "@valet/engine/model-catalog";
 import { OPENROUTER_DEFAULT_MODEL_IDS } from "./openrouter.js";
 import { setApprovedModels } from "./approved-models.js";
 
@@ -128,7 +129,7 @@ describe("model catalog", () => {
       vi.stubEnv("ANTHROPIC_API_KEY", "sk-ant-env-stub");
       try {
         const entries = await buildOrgCatalog(db, credentials, orgId);
-        const anthropicIds = getModels("anthropic").map((m) => m.id);
+        const anthropicIds = getModels("anthropic").map((m) => m.id).filter((id) => isCatalogModel("anthropic", id));
         expect(anthropicIds.length).toBeGreaterThan(0);
 
         for (const id of anthropicIds) {
@@ -468,7 +469,7 @@ describe("model catalog", () => {
         expected: ["minimal", "low", "medium", "high", "xhigh", "max"],
       },
       {
-        name: "sparse map {max} supports minimal..high plus max (claude-sonnet-4-6 shape)",
+        name: "sparse map {max} supports minimal..high plus max (claude-sonnet-5 shape)",
         map: { max: "m" } satisfies ThinkingLevelMap,
         expected: ["minimal", "low", "medium", "high", "max"],
       },
@@ -483,7 +484,7 @@ describe("model catalog", () => {
         expected: ["minimal", "medium", "high", "max"],
       },
       {
-        name: "an absent map on a reasoning model supports minimal..high, not xhigh/max (claude-sonnet-4-5 shape)",
+        name: "an absent map on a reasoning model supports minimal..high, not xhigh/max (claude-sonnet-5-5 shape)",
         map: undefined,
         expected: ["minimal", "low", "medium", "high"],
       },

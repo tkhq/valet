@@ -44,7 +44,8 @@ per-org tier map, but no UI exposes them. This change adds:
 ### Tiers (merged, backend only)
 
 - `packages/api/src/services/model-tiers.ts` — `TIER_TOKENS`,
-  `DEFAULT_TIER_MAP` (xs/s → Haiku, m → Sonnet, l/xl → Opus),
+  `DEFAULT_TIER_MAP` (xs/s → Haiku 5.5, m → Sonnet 5.5, l → Opus 5.5,
+  xl → Fable 5.2),
   `getOrgTierMap`, `setOrgTierMap`, `resolveTier`.
 - `orgs.model_tiers` jsonb (null = defaults) + `SCHEMA_REPAIRS` entry.
 - `GET /api/org/model-tiers` (member) / `PATCH` (admin) in

@@ -39,7 +39,7 @@ afterEach(async () => {
   vi.unstubAllEnvs();
 });
 
-const MODEL = "claude-haiku-4-5";
+const MODEL = "claude-haiku-5-5";
 
 async function createWorkflow(baseUrl: string, definition: unknown): Promise<CreateWorkflowResponse> {
   const res = await fetch(`${baseUrl}/api/workflows`, {

@@ -209,11 +209,11 @@ describe("PATCH /api/me", () => {
       const patch = await fetch(`${api.baseUrl}/api/me`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ defaultModel: "claude-haiku-4-5" }),
+        body: JSON.stringify({ defaultModel: "claude-haiku-5-5" }),
       });
       expect(patch.status).toBe(200);
       const body = (await patch.json()) as MeResponse;
-      expect(body.defaultModel).toBe("claude-haiku-4-5");
+      expect(body.defaultModel).toBe("claude-haiku-5-5");
     } finally {
       vi.unstubAllEnvs();
     }
@@ -227,11 +227,11 @@ describe("PATCH /api/me", () => {
       const patch = await fetch(`${api.baseUrl}/api/me`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ defaultModel: "anthropic/claude-haiku-4-5" }),
+        body: JSON.stringify({ defaultModel: "anthropic/claude-haiku-5-5" }),
       });
       expect(patch.status).toBe(200);
       const body = (await patch.json()) as MeResponse;
-      expect(body.defaultModel).toBe("anthropic/claude-haiku-4-5");
+      expect(body.defaultModel).toBe("anthropic/claude-haiku-5-5");
     } finally {
       vi.unstubAllEnvs();
     }
@@ -246,7 +246,7 @@ describe("PATCH /api/me", () => {
       const res = await fetch(`${api.baseUrl}/api/me`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ defaultModel: "claude-haiku-4-5" }),
+        body: JSON.stringify({ defaultModel: "claude-haiku-5-5" }),
       });
       expect(res.status).toBe(400);
     } finally {
@@ -275,7 +275,7 @@ describe("PATCH /api/me", () => {
       await fetch(`${api.baseUrl}/api/me`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ defaultModel: "claude-haiku-4-5" }),
+        body: JSON.stringify({ defaultModel: "claude-haiku-5-5" }),
       });
 
       const patch = await fetch(`${api.baseUrl}/api/me`, {
@@ -296,12 +296,12 @@ describe("PATCH /api/me", () => {
     try {
       api = await bootTestApi();
       // Approve only opus; haiku is catalog-valid but not on the list.
-      await setApprovedModels(api.providers.db, "local-org", ["anthropic/claude-opus-4-7"]);
+      await setApprovedModels(api.providers.db, "local-org", ["anthropic/claude-opus-5-5"]);
 
       const memberRes = await fetch(`${api.baseUrl}/api/me`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json", "x-valet-test-user-id": "test-member" },
-        body: JSON.stringify({ defaultModel: "anthropic/claude-haiku-4-5" }),
+        body: JSON.stringify({ defaultModel: "anthropic/claude-haiku-5-5" }),
       });
       expect(memberRes.status).toBe(400);
       const body = (await memberRes.json()) as { error: string };
@@ -311,7 +311,7 @@ describe("PATCH /api/me", () => {
       const adminRes = await fetch(`${api.baseUrl}/api/me`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ defaultModel: "anthropic/claude-haiku-4-5" }),
+        body: JSON.stringify({ defaultModel: "anthropic/claude-haiku-5-5" }),
       });
       expect(adminRes.status).toBe(200);
     } finally {

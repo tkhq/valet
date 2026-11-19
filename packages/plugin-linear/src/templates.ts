@@ -39,7 +39,7 @@ const weeklyIssueTriage: WorkflowDefinition = {
     {
       id: 'triage',
       type: 'llm',
-      model: 'claude-sonnet-4-5',
+      model: 'claude-sonnet-5-5',
       system:
         'You run a weekly triage over one person\'s issue list. Say what changed, what is at risk, and ' +
         'what should move. Every suggestion names one issue and one concrete change. ' +

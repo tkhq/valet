@@ -2,7 +2,8 @@ import { fauxToolCall } from "../src/test-helpers/tool-intent.js";
 import { describe, expect, it } from "vitest";
 import { branchNoteText, readBranchNote, summarizeBranchActions, type BranchNote } from "../src/branch-note.js";
 import type { BranchSummaryEntry, MessageEntry, SessionEntry } from "../src/types.js";
-import { fauxAssistantMessage, registerFauxProvider, Type } from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
+import { Type } from "typebox";
 import { Engine, InMemoryEventStream, InMemorySessionStore, VirtualSandboxProvider } from "../src/index.js";
 
 const tools = { silent: new Set<string>(), files: new Set(["write_file"]), plugin: new Set(["call_tool"]) };

@@ -104,7 +104,7 @@ const sweepDefinition = definition(
       type: "foreach",
       items: "{{ nodes.labels.result.labels }}",
       maxItems: 25,
-      body: { id: "one", type: "llm", model: "claude-haiku-4-5", prompt: "{{ item }}" },
+      body: { id: "one", type: "llm", model: "claude-haiku-5-5", prompt: "{{ item }}" },
     },
   ],
   [
@@ -945,7 +945,7 @@ describe("installWorkflowTemplate", () => {
 
   it("refuses an install whose model the organization removed from its approved list", async () => {
     await db.insert(orgs).values({ id: OWNER.orgId, name: "Org", createdAt: Date.now() });
-    await setApprovedModels(db, OWNER.orgId, ["anthropic/claude-opus-4-7"]);
+    await setApprovedModels(db, OWNER.orgId, ["anthropic/claude-opus-5-5"]);
     await connect("gmail");
     const result = await installWorkflowTemplate(deps(), OWNER, "gmail-sweep");
     expect(result.ok).toBe(false);

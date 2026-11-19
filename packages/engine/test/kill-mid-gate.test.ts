@@ -5,11 +5,8 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PGlite } from "@electric-sql/pglite";
-import {
-  fauxAssistantMessage,
-  registerFauxProvider,
-  Type,
-} from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
+import { Type } from "typebox";
 import { PgSessionStore, PgEventStream, pgDbFromPglite } from "@valet/store-postgres";
 import {
   Engine,

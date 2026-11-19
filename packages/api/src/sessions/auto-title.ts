@@ -20,7 +20,7 @@ import { agentSessions, sessionThreads } from "../schema/index.js";
 
 /** Cheap fast model — auto-titling has no reasoning value, and this call
  * is fired once per session lifetime, so use the cheapest option. */
-const NAMING_MODEL = "claude-haiku-4-5";
+const NAMING_MODEL = "claude-haiku-5-5";
 const MAX_MESSAGES_FOR_TITLE = 4;
 const MAX_CHARS_PER_MESSAGE = 800;
 const MAX_TITLE_CHARS = 60;

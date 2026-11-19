@@ -457,7 +457,7 @@ memoryRouter.get("/journal-summary", async (c) => {
   if (cached) return c.json({ date, summary: cached });
 
   try {
-    const model = getModel("anthropic", "claude-haiku-4-5");
+    const model = getModel("anthropic", "claude-haiku-5-5");
     if (!model) return c.json({ date, summary: null });
     const result = await completeSimple(
       model,

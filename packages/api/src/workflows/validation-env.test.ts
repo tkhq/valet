@@ -60,30 +60,30 @@ describe("buildOrgValidateEnvironment", () => {
   it("accepts an active, approved model in both spellings", async () => {
     vi.stubEnv("ANTHROPIC_API_KEY", "env-anthropic");
     const isKnownModel = await orgEnv();
-    expect(isKnownModel("anthropic/claude-haiku-4-5")).toBe(true);
-    expect(isKnownModel("claude-haiku-4-5")).toBe(true);
+    expect(isKnownModel("anthropic/claude-haiku-5-5")).toBe(true);
+    expect(isKnownModel("claude-haiku-5-5")).toBe(true);
   });
 
   it("rejects a model whose provider row is disabled", async () => {
     vi.stubEnv("ANTHROPIC_API_KEY", "env-anthropic");
     await createLlmProvider(db, { orgId, kind: "anthropic", name: "Anthropic", enabled: false });
     const isKnownModel = await orgEnv();
-    expect(isKnownModel("anthropic/claude-haiku-4-5")).not.toBe(true);
+    expect(isKnownModel("anthropic/claude-haiku-5-5")).not.toBe(true);
   });
 
   it("rejects an active model the org did not approve", async () => {
     vi.stubEnv("ANTHROPIC_API_KEY", "env-anthropic");
-    await setApprovedModels(db, orgId, ["anthropic/claude-opus-4-7"]);
+    await setApprovedModels(db, orgId, ["anthropic/claude-opus-5-5"]);
     const isKnownModel = await orgEnv();
-    expect(isKnownModel("anthropic/claude-opus-4-7")).toBe(true);
-    expect(isKnownModel("anthropic/claude-haiku-4-5")).not.toBe(true);
+    expect(isKnownModel("anthropic/claude-opus-5-5")).toBe(true);
+    expect(isKnownModel("anthropic/claude-haiku-5-5")).not.toBe(true);
   });
 
   it("names the corrective action when it rejects a model", async () => {
     vi.stubEnv("ANTHROPIC_API_KEY", "env-anthropic");
-    await setApprovedModels(db, orgId, ["anthropic/claude-opus-4-7"]);
+    await setApprovedModels(db, orgId, ["anthropic/claude-opus-5-5"]);
     const isKnownModel = await orgEnv();
-    expect(isKnownModel("anthropic/claude-haiku-4-5")).toEqual(expect.stringContaining("Settings > Models"));
+    expect(isKnownModel("anthropic/claude-haiku-5-5")).toEqual(expect.stringContaining("Settings > Models"));
   });
 
   it("keeps a bare OpenAI id valid while its provider is active and approved", async () => {
@@ -163,7 +163,7 @@ describe("buildOrgValidateEnvironment", () => {
 
   it("falls back to the bundled ids when no org set is supplied", () => {
     const env = buildValidateEnvironment();
-    expect(env.isKnownModel?.("claude-haiku-4-5")).toBe(true);
+    expect(env.isKnownModel?.("claude-haiku-5-5")).toBe(true);
     expect(env.isKnownModel?.("gpt-6.1-sol")).toBe(true);
     expect(env.isKnownModel?.("m")).toBe(true);
   });

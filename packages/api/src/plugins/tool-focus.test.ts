@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { actionInScope, toolInScope } from "@valet/shared";
-import { fauxAssistantMessage, registerFauxProvider, Type } from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
+import { Type } from "typebox";
 import { fauxToolCall } from "@valet/engine/test-helpers";
 import { Engine, InMemoryEventStream, InMemorySessionStore, pluginCatalogTools, VirtualSandboxProvider, type ActionPlugin } from "@valet/engine";
 import { workflowToolFocus } from "./tool-focus.js";

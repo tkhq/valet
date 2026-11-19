@@ -573,7 +573,7 @@ function validateNodeFields(
       break;
     case 'llm':
       if (!isNonEmptyString(node.model)) {
-        errors.push(`${label}: llm.model must be a non-empty string (e.g. "claude-haiku-4-5" or "anthropic/claude-haiku-4-5")`);
+        errors.push(`${label}: llm.model must be a non-empty string (e.g. "claude-haiku-5-5" or "anthropic/claude-haiku-5-5")`);
       } else {
         checkModel(label, 'llm.model', node.model, env, errors);
       }
@@ -1080,7 +1080,7 @@ function checkModel(
   // their own hook, so a return value outside the contract must fail the
   // model, never pass it.
   errors.push(
-    `${label}: unknown ${field} ${JSON.stringify(model)} — use a known model id like "claude-haiku-4-5", or "provider/model" form`,
+    `${label}: unknown ${field} ${JSON.stringify(model)} — use a known model id like "claude-haiku-5-5", or "provider/model" form`,
   );
 }
 

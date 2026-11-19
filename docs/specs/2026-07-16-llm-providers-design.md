@@ -157,7 +157,12 @@ bundled catalog as the floor.
   `ANTHROPIC_API_KEY` still sees the Anthropic list.
 - **Retired models.** Catalog visibility and model resolution have different
   rules. `openai/gpt-5.6-sol` is retired from selectable catalogs after
-  `openai/gpt-6.1-sol` replaces it. `registryModels`, org catalogs, and
+  `openai/gpt-6.1-sol` replaces it. Claude 4.x and older, and GPT-4.x and
+  older, are retired under every provider's id form (`isCatalogModel` in
+  `packages/engine/src/model-catalog.ts`). Saved tier targets move to the newest
+  allowed replacement in `TIER_MODEL_UPGRADES`
+  (`packages/api/src/services/model-tiers.ts`), for example GPT-6.1 Sol to
+  GPT-6.2 Sol and Claude Opus 4.7 to Claude Opus 5.5. `registryModels`, org catalogs, and
   pickers exclude the retired id. `registryModelById` still resolves it from
   the unfiltered pi-ai bundled registry for a persisted session or default.
   This is the same live-versus-picker rule that de-selected OpenRouter models
@@ -172,13 +177,13 @@ bundled catalog as the floor.
 
 ## Extension: manual bundled overlay (2026-09-05)
 
-Valet uses pi-ai and pi-agent-core 1.0.3. This release bundles
-`gpt-6.1-sol`. The `MANUAL_BUNDLED_MODELS` table in
-`packages/engine/src/model-catalog.ts` adds models that pi has committed
-but has not released. Pi bundled entries win by id. Each manual
-entry must match pi's generated catalog. A canary test fails when a later pi
-release bundles the id, which signals that the manual entry must be removed.
-The first entry is `gpt-6-astra` from unreleased pi commit `17de82d7`.
+Valet uses pi-ai and pi-agent-core 1.5.2. This release bundles
+`gpt-6.1-sol`, `claude-sonnet-5-5`, and `claude-fable-5-2`. The
+`supplementalModels` table in `packages/engine/src/model-catalog.ts` adds
+models that pi has committed but has not released. Pi bundled entries win by
+id. Each supplemental entry must match pi's generated catalog. The current
+entries are `gpt-6.2-sol` and `gpt-6.2-astra` from pi's unreleased catalog.
+Remove them when the pinned pi bundles both ids.
 
 API registry baselines, standalone engine resolution, evals, workflow model
 validation and execution, and proxy pricing use this common bundled catalog.

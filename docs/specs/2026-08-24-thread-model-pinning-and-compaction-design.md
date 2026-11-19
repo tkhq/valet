@@ -648,9 +648,10 @@ No permissions, provider validation, or running-submission model behavior change
 
 ## Catalog and cost policy
 
-The bundled catalog fills missing GPT-6.1 Sol and Claude Sonnet 5.5 metadata; SDK entries and runtime overlays take precedence.
+The bundled catalog fills missing GPT-6.2 Sol and GPT-6.2 Astra metadata; SDK entries and runtime overlays take precedence.
+The entries copy pi 1.5.2's GPT-6.1 Sol shape with the GPT-6.2 prices from pi's unreleased catalog. Remove them when the pinned pi includes both models.
 Provider availability and organization approval still apply. Serialization tests use fake HTTP transports, without paid requests.
-Source metadata: https://developers.openai.com/api/docs/models/gpt-6.1-sol and https://platform.claude.com/docs/en/models/sonnet-5-5/overview.
+Source metadata: https://developers.openai.com/api/docs/models/gpt-6.2-sol and https://developers.openai.com/api/docs/models/gpt-6.2-astra.
 Astra is available from the SDK catalog and follows normal provider credentials and organization approval rules.
 This change does not add Astra to default tiers or rewrite saved approval lists.
 Restricted organizations must approve Astra before members can select it or use it as a tier fallback.
