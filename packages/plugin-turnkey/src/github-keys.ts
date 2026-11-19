@@ -3,7 +3,9 @@
  * the person adds their Valet signing key to GitHub themselves
  * (`docs/specs/2026-11-17-commit-signing-user-registered-keys-design.md`),
  * and Valet checks it on the public `GET /users/{login}/ssh_signing_keys`,
- * which needs no token or permission. The token is used only to read the
+ * which needs no token or permission. GitHub's form defaults to
+ * Authentication Key, so a key that is missing there is also looked up on
+ * the public `GET /users/{login}/keys`. The token is used only to read the
  * account's login and noreply address (`GET /user`).
  * `fetch` rather than Octokit: two endpoints do not earn a dependency.
  */
@@ -76,15 +78,23 @@ function keyBody(line: string): string {
   return line.trim().split(/\s+/).slice(0, 2).join(" ");
 }
 
-/** True when `login` lists `publicKeyLine` as an SSH signing key on GitHub. */
-export async function publicSigningKeyListed(
+/** Where GitHub lists a key: as a signing key, as an authentication key, or nowhere. */
+export type GithubKeyType = "signing" | "authentication" | null;
+
+const KEY_LISTS = {
+  signing: "ssh_signing_keys",
+  authentication: "keys",
+} as const;
+
+async function publicKeyListed(
   login: string,
   publicKeyLine: string,
-  apiUrl: string = resolveGithubApiUrl(),
+  kind: keyof typeof KEY_LISTS,
+  apiUrl: string,
 ): Promise<boolean> {
-  const res = await fetch(`${apiUrl}/users/${encodeURIComponent(login)}/ssh_signing_keys?per_page=100`, { headers: HEADERS });
+  const res = await fetch(`${apiUrl}/users/${encodeURIComponent(login)}/${KEY_LISTS[kind]}?per_page=100`, { headers: HEADERS });
   if (res.status === 404) return false;
-  if (!res.ok) throw new Error(`GitHub refused to list signing keys for ${login}: ${res.status} ${await safeText(res)}. Try again.`);
+  if (!res.ok) throw new Error(`GitHub refused to list ${kind} keys for ${login}: ${res.status} ${await safeText(res)}. Try again.`);
   const body: unknown = await res.json();
   if (!Array.isArray(body)) return false;
   const want = keyBody(publicKeyLine);
@@ -92,6 +102,26 @@ export async function publicSigningKeyListed(
     const key = typeof item === "object" && item !== null && "key" in item ? item.key : undefined;
     return typeof key === "string" && keyBody(key) === want;
   });
+}
+
+/** True when `login` lists `publicKeyLine` as an SSH signing key on GitHub. */
+export async function publicSigningKeyListed(
+  login: string,
+  publicKeyLine: string,
+  apiUrl: string = resolveGithubApiUrl(),
+): Promise<boolean> {
+  return publicKeyListed(login, publicKeyLine, "signing", apiUrl);
+}
+
+/** How `login` lists `publicKeyLine` on GitHub. A signing key wins when GitHub lists it as both. */
+export async function githubKeyType(
+  login: string,
+  publicKeyLine: string,
+  apiUrl: string = resolveGithubApiUrl(),
+): Promise<GithubKeyType> {
+  if (await publicKeyListed(login, publicKeyLine, "signing", apiUrl)) return "signing";
+  if (await publicKeyListed(login, publicKeyLine, "authentication", apiUrl)) return "authentication";
+  return null;
 }
 
 async function safeText(res: Response): Promise<string> {

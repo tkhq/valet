@@ -1,7 +1,5 @@
 import { useState } from "react";
-import { finishAuthChange } from "~/lib/auth-navigation";
-import { authClient } from "~/lib/auth-client";
-import { useComposerDraftStore } from "~/stores/composer-drafts";
+import { signOutAndReturn } from "~/lib/auth-navigation";
 
 /**
  * "Not you? Sign out" for the approval pages. Signing out returns to this
@@ -11,9 +9,7 @@ export function NotYou({ account }: { account: string }) {
   const [busy, setBusy] = useState(false);
   async function switchAccount() {
     setBusy(true);
-    await authClient.signOut();
-    useComposerDraftStore.getState().activateOwner("");
-    finishAuthChange(`/login?next=${encodeURIComponent(window.location.pathname + window.location.search)}`);
+    await signOutAndReturn(window.location.pathname + window.location.search);
   }
   return (
     <p className="text-center text-xs text-muted">

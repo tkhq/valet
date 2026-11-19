@@ -1,4 +1,4 @@
-import { finishAuthChange } from "~/lib/auth-navigation";
+import { signOutAndReturn } from "~/lib/auth-navigation";
 import { useEffect, useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
 import { Section } from "~/components/settings/section";
@@ -7,8 +7,6 @@ import { EnableOrgCard } from "~/components/settings/enable-org-card";
 import { Button, ErrorRow, Input, LoadingRow } from "~/components/primitives";
 import { ProfilePictureUpload } from "~/components/settings/profile-picture-upload";
 import { useMe, useOrg, usePatchMe, useUploadMyAvatar } from "~/api/settings";
-import { authClient } from "~/lib/auth-client";
-import { useComposerDraftStore } from "~/stores/composer-drafts";
 import { errorText } from "~/lib/error-text";
 
 /**
@@ -69,11 +67,6 @@ export function ProfilePage() {
   const showEnableCard =
     orgQ.data?.callerRole === "admin" && orgQ.data.features.organizations === false;
 
-  async function signOut() {
-    await authClient.signOut();
-    useComposerDraftStore.getState().activateOwner("");
-    finishAuthChange("/login");
-  }
 
   return (
     <div className="space-y-10">
@@ -147,7 +140,7 @@ export function ProfilePage() {
 
       <Section title="Sign out" description="Sign out of Valet on this device.">
         <div className="py-4">
-          <Button type="button" variant="secondary" onClick={signOut}>
+          <Button type="button" variant="secondary" onClick={() => void signOutAndReturn()}>
             Sign out
           </Button>
         </div>

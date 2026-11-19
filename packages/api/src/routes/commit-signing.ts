@@ -35,18 +35,19 @@ import {
   type SigningKeyIndexDoc,
 } from "@valet/plugin-turnkey/store";
 import { turnkeyOps, type TurnkeyOpsFactory } from "@valet/plugin-turnkey/turnkey-client";
-import { publicSigningKeyListed } from "@valet/plugin-turnkey/github-keys";
+import { githubKeyType, type GithubKeyType } from "@valet/plugin-turnkey/github-keys";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { resolveUserApiToken } from "../services/github-tokens.js";
 import type { AppEnv } from "../env.js";
 import { pluginStore } from "../services/plugin-store.js";
-import type {
-  CommitSigningHistoryEntry,
-  CommitSigningKeySummary,
-  GetCommitSigningResponse,
-  PostCommitSigningEnrollRequest,
-  PostCommitSigningEnrollResponse,
-  PostCommitSigningGithubCheckResponse,
+import {
+  FRESH_SIGN_IN_REQUIRED,
+  type CommitSigningHistoryEntry,
+  type CommitSigningKeySummary,
+  type GetCommitSigningResponse,
+  type PostCommitSigningEnrollRequest,
+  type PostCommitSigningEnrollResponse,
+  type PostCommitSigningGithubCheckResponse,
 } from "../wire/types.js";
 
 export interface CommitSigningRouteDeps {
@@ -55,7 +56,7 @@ export interface CommitSigningRouteDeps {
   rpId?: string;
   /** Test seams: the user's GitHub login, and the public key list check. */
   githubLogin?: (orgId: string, userId: string) => Promise<string | null>;
-  keyListed?: (login: string, publicKeyLine: string) => Promise<boolean>;
+  keyType?: (login: string, publicKeyLine: string) => Promise<GithubKeyType>;
   /** Test seam: forwards the passkey-stamped key creation to Turnkey. */
   forward?: ForwardStamped;
 }
@@ -197,6 +198,7 @@ export function buildCommitSigningRouter(deps: CommitSigningRouteDeps = {}): Hon
         .map((row) => summarize(row.doc))
         .sort((a, b) => b.notBefore - a.notBefore),
       history: recentHistory(history.items.map((row) => row.doc)),
+      ...(user.sessionCreatedAt !== undefined ? { freshSignInUntil: user.sessionCreatedAt + ENROLL_FRESH_SIGN_IN_MS } : {}),
     };
     return c.json(resp);
   });
@@ -213,7 +215,7 @@ export function buildCommitSigningRouter(deps: CommitSigningRouteDeps = {}): Hon
       return c.json({ error: "Commit signing is already set up for this account." }, 409);
     }
     const stale = freshSignInRefusal(user, Date.now());
-    if (stale) return c.json({ error: stale }, 403);
+    if (stale) return c.json({ error: stale, code: FRESH_SIGN_IN_REQUIRED }, 403);
 
     let body: unknown;
     try {
@@ -327,8 +329,13 @@ export function buildCommitSigningRouter(deps: CommitSigningRouteDeps = {}): Hon
       const resp: PostCommitSigningGithubCheckResponse = { connected: false, listed: false };
       return c.json(resp);
     }
-    const listed = await (deps.keyListed ?? publicSigningKeyListed)(login, key.publicKey);
-    const resp: PostCommitSigningGithubCheckResponse = { connected: true, login, listed };
+    const type = await (deps.keyType ?? githubKeyType)(login, key.publicKey);
+    const resp: PostCommitSigningGithubCheckResponse = {
+      connected: true,
+      login,
+      listed: type === "signing",
+      ...(type === "authentication" ? { listedAsAuthentication: true } : {}),
+    };
     return c.json(resp);
   });
 

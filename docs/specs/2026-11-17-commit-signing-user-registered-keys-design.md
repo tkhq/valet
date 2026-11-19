@@ -108,7 +108,7 @@ In presence mode, setup never gives Valet's server authority in the person's sub
 2. The api checks that the root quorum is exactly the passkey, records a pending enrollment, and returns an unsigned `CREATE_PRIVATE_KEYS_V2` body for one Ed25519 key named `valet-signing`.
 3. The browser stamps that body with the same passkey. The api checks the body is the one it issued, forwards it to Turnkey, checks the completed activity carries the passkey's vote, and records the key.
 
-Setup is two passkey prompts. If the second fails, Settings shows "Finish setup", which issues a fresh key-creation body. Setup needs a sign-in less than 15 minutes old, so a stolen session cannot enroll its own passkey for someone else.
+Setup is two passkey prompts. If the second fails, Settings shows "Finish setup", which issues a fresh key-creation body. Setup needs a sign-in less than 15 minutes old, so a stolen session cannot enroll its own passkey for someone else. `GET /api/me/commit-signing` returns `freshSignInUntil`, so Settings opens a "Sign in again" dialog on click instead of sending a request the api refuses. The api refusal carries `code: "fresh_sign_in_required"`, and Settings opens the same dialog for it. The dialog signs out through `/login?next=`, which returns the person to the Commit signing section with the setup button focused. The passkey prompt needs a click or key press, so setup does not start by itself.
 
 In session mode, the parent key is a temporary root during setup so it can create `valet-agent`, the tags, the key, and the policies. That mode trusts Valet's server at setup.
 
@@ -119,13 +119,15 @@ Add your Valet signing key to GitHub
 
 1. Open GitHub, Settings, SSH and GPG keys, New SSH key.   [Open GitHub]
 2. Title: Valet commit signing
-   Key type: Signing Key            (not Authentication Key)
+   Change Key type to Signing Key   (GitHub selects Authentication Key first)
+   [ ] I set Key type to Signing Key
 3. Key:  ssh-ed25519 AAAAC3Nza...  valet-signing          [Copy]
+   (shows after the box is checked)
 
 [Check GitHub]
 ```
 
-"Check GitHub" reads GitHub's public endpoint `GET /users/{login}/ssh_signing_keys`, which needs no token or permission. The login comes from the person's GitHub connection. The modal shows found, not found yet, or no GitHub connection. The signing action runs the same check and, if the key is missing, answers with a message that names the fix.
+"Check GitHub" reads GitHub's public endpoint `GET /users/{login}/ssh_signing_keys`, which needs no token or permission. The login comes from the person's GitHub connection. The modal shows found, not found yet, or no GitHub connection. If the signing key list does not have the key, the check also reads `GET /users/{login}/keys`, the account's authentication keys. A key there was added with GitHub's default type, and the modal tells the person to delete it and add it again with Key type: Signing Key. The signing action runs the same check and, if the key is missing, answers with a message that names the fix.
 
 ### Presence mode (default): the passkey signs each commit
 
