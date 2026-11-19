@@ -878,6 +878,27 @@ export interface ThreadFileStore {
   read(id: string): Promise<(ThreadFile & { data: Uint8Array }) | null>;
 }
 
+/** What a successful `git push` in `bash` reported. */
+export interface GitPushFacts {
+  /** `owner/name`, from git's `To <remote>` line. */
+  repo?: string;
+  branch?: string;
+  /** The pushed head, abbreviated as git printed it. Absent for a new branch. */
+  headSha?: string;
+}
+
+/** The turn a `git push` ran in, for `CreateSessionOptions.gitPushNote`. */
+export interface GitPushTurn {
+  userId: string;
+  orgId: string;
+  sessionId: string;
+  threadId: string;
+  /** A channel sender with no Valet account. */
+  externalSender?: boolean;
+  /** No person waits on this turn: a workflow task, or an automated event or schedule delivery. */
+  unattended?: boolean;
+}
+
 export interface ToolContext {
   /** Effective session, submission, and thread restrictions. This may change after a focus call. */
   readonly toolScope?: ToolScope;
@@ -940,6 +961,12 @@ export interface ToolContext {
   repo?: { url?: string; branch?: string; ref?: string; provider?: string };
   credentials: CredentialProvider;
   sandbox: Sandbox;
+  /**
+   * A note for the model after a successful `git push` in `bash`, from facts
+   * the host holds about this turn, such as commit signing. Absent on a
+   * context built by hand.
+   */
+  gitPushNote?: (push: GitPushFacts) => Promise<string | undefined>;
   /**
    * True when this skill's body, at this version, is already in the
    * thread's live context from an earlier skill read: it is not covered by
@@ -3161,6 +3188,11 @@ export interface CreateSessionOptions {
    * `buildToolContext`. Absent === no `pluginStore` on plugin actions.
    */
   pluginStoreFactory?: (pluginName: string) => PluginStore;
+  /**
+   * A note to append to a successful `git push` in `bash`. Bound to the turn
+   * in `buildToolContext` as `ToolContext.gitPushNote`. Absent === no note.
+   */
+  gitPushNote?: (push: GitPushFacts, turn: GitPushTurn) => Promise<string | undefined>;
   /**
    * Threaded onto `ToolContext.extractDocument` via `buildToolContext`.
    * Absent === plugin actions get no document extraction.

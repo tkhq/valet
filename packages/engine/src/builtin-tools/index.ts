@@ -12,6 +12,8 @@ import {
 import { storedToolResultText } from "../compaction.js";
 import { isDecisionGateExpired, isDecisionGateWithdrawn, isUnattendedWorkflowRefusal } from "../decision-gate.js";
 import { answerTimeLine } from "../model-context.js";
+import { errorLogFields, log } from "../log.js";
+import { gitPushFacts } from "./git-push.js";
 import { terminalOutcome } from "./terminal-outcome.js";
 import { defineTool } from "./define.js";
 export { defineTool } from "./define.js";
@@ -490,7 +492,18 @@ export const bashTool = defineTool({
     const timeoutNote = result.timedOut ? `\n${timeoutHint(timeoutMs)}` : "";
     const exitNote = !result.timedOut && result.exitCode !== undefined && result.exitCode !== 0 ? `\n[exit ${result.exitCode}]` : "";
     const outcome = result.jobTimedOut || result.jobFailed ? undefined : terminalOutcome(args.command, result.stdout, result.exitCode);
-    return { text: `${result.stdout}${result.stderr}${truncNote}${exitNote}${timeoutNote}${result.jobFailed ? "\n[job failed]" : ""}`, ...(outcome ? { outcome } : {}) };
+    const pushed = result.jobTimedOut || result.jobFailed ? undefined : gitPushFacts(args.command, `${result.stdout}\n${result.stderr}`, result.exitCode);
+    // The push already happened: a failed note lookup is logged, and the push output still returns.
+    const pushNote = pushed && ctx.gitPushNote
+      ? await ctx.gitPushNote(pushed).catch((err: unknown) => {
+        log.warn("git push note failed", { sessionId: ctx.sessionId, threadId: ctx.threadId, ...errorLogFields(err) });
+        return undefined;
+      })
+      : undefined;
+    return {
+      text: `${result.stdout}${result.stderr}${truncNote}${exitNote}${timeoutNote}${result.jobFailed ? "\n[job failed]" : ""}${pushNote ? `\n\n${pushNote}` : ""}`,
+      ...(outcome ? { outcome } : {}),
+    };
   },
 });
 

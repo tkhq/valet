@@ -149,6 +149,18 @@ Turnkey app proofs are not stored. The shipped design planned to store the `POLI
 
 The rewrite sets the committer email to the person's GitHub noreply address, read with their token (`GET /user`), as the shipped design does. It keeps the committer name and time, the author, the tree, and the message.
 
+### Sign by default
+
+Signing is on by default. When the person who asked for the work set up presence-mode signing, the agent signs the commits it pushes for them, also when they did not ask for it. When they did not set it up, the commits stay unsigned and nothing waits.
+
+The guidance sits where the agent decides, not only in the skill: a skill or description alone did not change what agents did in live tests. After a successful `git push` in `bash`, the engine reads the repository, branch, and new head from git's report and asks the host for a note (`CreateSessionOptions.gitPushNote`). The engine binds the turn to the call: the person, the session, whether a channel sender with no account runs it, and whether a person waits on it. The host appends one of these notes to the result:
+
+- The person set up signing: sign these commits with `turnkey.sign_commits`, then push again with lease. Do not sign if the person said not to, or rejected a card for this branch. No note when the pushed head is the head of a chain this session already signed (`signing_history`, scope user, keys that start with the session id).
+- The person did not set up signing: the commits stay unsigned; tell the person once where to set it up, with the Integrations link. The note appears once per person per session (`push_notes`, scope session).
+- No note when no person waits on the turn (a workflow task, an automated event or schedule delivery), when a team, an org, or a channel sender with no account runs it, when the person uses session mode, or when the deployment has no `VALET_TURNKEY_*` configuration.
+
+A push is the hook because every branch the agent publishes goes through it, and git reports the branch and head there. The card can then link each commit on GitHub. When the key is not on GitHub yet, `turnkey.sign_commits` answers that the commits stay unsigned and the person is told once, so the turn does not stop. A failed note lookup is logged, and the push result returns without a note.
+
 ### Session mode: the shipped window
 
 A deployment can set `VALET_TURNKEY_SIGNING_ASSURANCE=session`. Enrollment then also creates the `valet-agent` user, its signing policy, and a parent grant for `CREATE_API_KEYS_V2` and `DELETE_API_KEYS` whose condition names the `valet-agent` user id through `activity.params.user_id`. `CREATE_PRIVATE_KEYS_V2` is not granted: keys are made at enrollment.

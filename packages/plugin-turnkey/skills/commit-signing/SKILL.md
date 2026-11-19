@@ -5,7 +5,9 @@ description: How to get commits signed and shown as Verified on GitHub. Covers s
 
 # Commit signing
 
-Commits you make are unsigned. The user's signing key lives in Turnkey, and the user added its public half to their GitHub account. You never handle a key.
+Commits you make are unsigned until the user signs them. The user's signing key lives in Turnkey, and the user added its public half to their GitHub account. You never handle a key.
+
+Signing is on by default. When the person who asked for the work set up commit signing, sign the commits you push for them, also when they did not ask for it. After each `git push`, the result tells you what to do: sign these commits, or tell the person once that they can set up signing. A run that no person waits on, such as a workflow run, never asks for signatures. Its commits stay unsigned.
 
 Most accounts sign each commit with the user's passkey. A few accounts use a signing window instead. The tools tell you which: each one answers with the other tool's name when the account uses the other mode.
 
@@ -46,6 +48,6 @@ If the user asks to stop signing, call `turnkey.revoke_signing_key` with the fin
 ## When it fails
 
 - The user rejected: stop. Do not call the tool again. Push unsigned only if the user says so.
-- The key is not on GitHub, or signing is not set up: tell the user to open Settings, Commit signing, and follow the steps there.
+- The key is not on GitHub, or signing is not set up: leave the pushed commits unsigned and do not wait. Tell the user once to open Settings, Commit signing, and follow the steps there.
 - Window mode, `No signing key for this session`: you committed with signing on before approval. Call `turnkey.request_signing_key`, or commit with `--no-gpg-sign`.
 - Window mode, `The session's Turnkey key expired`: the window is over. Ask the user whether to approve a new window.
