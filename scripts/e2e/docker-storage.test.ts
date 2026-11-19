@@ -16,8 +16,8 @@ it.each([
     mkdirSync(bin);
     const commands: Record<string, string> = {
       // Keep the production probe commands; replace privilege and mount boundaries.
-      su: 'exec /bin/sh -c "$5"',
-      unshare: 'shift 3; exec "$@"',
+      runuser: 'shift 3; exec "$@"',
+      rootlesskit: 'shift 1; exec "$@"',
       mount: '[ "$SCENARIO" = native ]',
       cp: 'exec /bin/cp /usr/bin/true "$2"',
       umount: 'echo unmounted >> "$LOG"',
@@ -31,7 +31,7 @@ it.each([
       writeFileSync(join(bin, name), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
     }
     const source = readFileSync(new URL("../../docker/start-docker.sh", import.meta.url), "utf8");
-    const start = source.indexOf("DRIVER=vfs", source.indexOf("# ── Rootless dockerd"));
+    const start = source.indexOf("probe_storage() {", source.indexOf("# ── Rootless dockerd"));
     const end = source.indexOf('su -s /bin/bash dockerd -c', start);
     expect(start).toBeGreaterThan(0);
     expect(end).toBeGreaterThan(start);
@@ -39,7 +39,7 @@ it.each([
     mkdirSync(data);
     const log = join(dir, "probe.log");
     execFileSync("bash", ["-eu", "-c", source.slice(start, end)], {
-      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, DATA_ROOT: data, LOG: log, SCENARIO: scenario },
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, DATA_ROOT: data, RUNTIME_DIR: join(dir, "run"), LOG: log, SCENARIO: scenario },
     });
     const output = readFileSync(log, "utf8");
     expect(output).toContain(`storage driver: ${driver}`);

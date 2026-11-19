@@ -159,19 +159,29 @@ Stopped owners still require replacement. Docker hibernation remains disabled.
 
 #### API deployment configuration
 
-The Docker backend reads three optional environment variables:
+The Docker backend reads four optional environment variables:
 
 | Variable | Provider option | Validation |
 | --- | --- | --- |
 | `VALET_DOCKER_CGROUP_PARENT` | `cgroupParent` | Trim surrounding spaces; reject explicit blank values and control characters. |
 | `VALET_SANDBOX_CPU` | `defaultResources.cpu` | Shared CPU range: greater than zero and at most 64. |
 | `VALET_SANDBOX_MEMORY` | `defaultResources.memory` | Positive Kubernetes quantity, such as `2Gi`. |
+| `VALET_DOCKER_DATA_ROOT` | `dockerDataRoot` | Trim surrounding spaces; require an absolute path; reject control characters. |
 
 Unset options remain absent. Empty CPU and memory values also remain absent.
 Invalid configured values stop API startup with corrective guidance.
 Explicit session or repository resources override each CPU or memory default separately.
 Kubernetes-only ephemeral-storage defaults and validation do not apply to Docker.
 Local and Kubernetes backends ignore the Docker cgroup parent variable.
+
+`VALET_DOCKER_DATA_ROOT` is an operator-provisioned directory on the Docker host.
+Each Docker-enabled sandbox gets `<root>/<sandbox id>`, bind-mounted as its nested data-root.
+The container filesystem is overlayfs, which cannot hold an overlay upper directory.
+Without this option the nested daemon uses fuse-overlayfs, or vfs where that fails.
+vfs copies every image layer whole, so nested builds use many times their real size.
+Mount a size-limited filesystem at the root to cap the disk that all nested daemons can use together.
+Release and final deletion remove the sandbox's directory with a one-off root container, because subordinate uids own the nested files.
+Adoption requires the recorded bind mount; owners created before the option keep their own data-root until replacement.
 
 #### Operator provisioning and verification
 
@@ -432,6 +442,11 @@ Mitigations shipped:
   (empirically starts on masked-proc clusters) and probes storage drivers
   in order overlay2 → fuse-overlayfs → vfs. The daemon now starts
   everywhere; inner containers still need an unmasked /proc.
+- The probes run under rootlesskit, as dockerd does. Hosts that restrict
+  unprivileged user namespaces (Ubuntu >= 23.10,
+  `kernel.apparmor_restrict_unprivileged_userns=1`) deny a bare
+  `unshare --user`, but allow rootlesskit through its AppArmor profile. A
+  probe with `unshare` failed both overlay checks there and selected vfs.
 - The fuse-overlayfs probe mounts a layer and executes a copied binary
   inside the rootless user namespace. An open `/dev/fuse` does not prove
   that executable layers work. Docker Desktop LinuxKit 6.10.14 can reject
