@@ -1881,7 +1881,16 @@ export interface DecisionGate {
   tool?: { id: string; args?: Record<string, unknown> };
   /** Present on a `request_secret` card: where the value is saved and under
    * which name. The card saves the value, then answers with the reference. */
-  secretRequest?: { scope: "personal" | "team"; teamId?: string; name: string; purpose: string; sendsTo?: string; replace?: boolean };
+  secretRequest?: {
+    scope: "personal" | "team";
+    teamId?: string;
+    name: string;
+    purpose: string;
+    sendsTo?: string;
+    replace?: boolean;
+    /** Save use-only: the value goes only to these hosts, in this header. */
+    use?: Required<SecretUseRuleInput>;
+  };
   /** `presence`: approving needs the approver's passkey through
    * `/decisions/:gateId/passkey`. The plain resolve route refuses Approve. */
   assurance?: "presence";
@@ -4300,6 +4309,12 @@ export interface SecretSummary {
   /** What `valet-secrets run --env NAME=<reference>` takes. */
   reference: string;
   createdAt: number;
+  /** Set for a use-only secret: the hosts it may be sent to and the header
+   * it goes in. Agents use it with `valet-secrets http`. */
+  use?: { hosts: string[]; header: string; format: string };
+  /** Set with `use`: how often the secret was used, from its receipts.
+   * `lastUsedAt` is null before the first use. */
+  uses?: { count: number; lastUsedAt: number | null };
 }
 
 export interface SecretsListResponse {
@@ -4309,7 +4324,21 @@ export interface SecretsListResponse {
   provider: string | null;
   /** True when the caller may save and delete in this scope. */
   canWrite: boolean;
+  /** True when this deployment has a secret use service, so a secret can be
+   * saved as use-only. */
+  useAvailable: boolean;
   secrets: SecretSummary[];
+}
+
+/** Where a use-only secret may be used, as a person enters it. */
+export interface SecretUseRuleInput {
+  hosts: string[];
+  methods?: string[];
+  pathPrefixes?: string[];
+  /** The header the secret goes in, for example `authorization`. */
+  header: string;
+  /** Header value with `{secret}` once. Default `{secret}`. */
+  format?: string;
 }
 
 /** `POST /api/secrets/import/begin`. */
@@ -4320,12 +4349,17 @@ export interface BeginSecretSaveRequest {
   /** Replace the value of a secret with this name. Without it, a name in
    * use is refused. */
   replace?: boolean;
+  /** Save a use-only secret: the browser seals the value with this rule. */
+  use?: SecretUseRuleInput;
 }
 
 /** What the browser seals the value with. `kind` selects the sealer; the
  * other fields are the provider's and opaque to generic code. */
 export interface SecretSealEnvelope {
   kind: string;
+  /** Set for a use-only save. The browser seals
+   * `{ v: 1, value, client, owner, rules }` instead of the bare value. */
+  use?: { client: string; owner: string; rules: Required<SecretUseRuleInput> };
   [field: string]: unknown;
 }
 

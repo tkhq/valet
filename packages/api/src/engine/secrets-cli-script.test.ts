@@ -1,3 +1,4 @@
+import { HTTP_JS } from "./secrets-http.js";
 import { describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
@@ -215,7 +216,7 @@ describe("the reserved credential labels", () => {
   it("cover every utility the generated scripts call", () => {
     const scripts = [
       // The output filter is a JavaScript program in a quoted string, not shell.
-      secretsCliScript("http://x:1").replace(REDACTOR_JS, ""),
+      secretsCliScript("http://x:1").replace(REDACTOR_JS, "").replace(HTTP_JS, ""),
       commandWrapperScript({
         command: "partner-api",
         env: "CLIENT_KEY",

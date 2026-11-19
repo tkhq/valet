@@ -1,8 +1,11 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useId, useState, type FormEvent } from "react";
 import type { SecretSummary } from "@valet/api/wire";
-import { Button, EmptyRow, ErrorRow, Input, LoadingRow, TabBar, Textarea, tabPanelId, type TabDef } from "~/components/primitives";
+import { Button, Checkbox, EmptyRow, ErrorRow, Input, LoadingRow, TabBar, Textarea, tabPanelId, type TabDef } from "~/components/primitives";
 import { Section } from "~/components/settings/section";
+import { detectSecrets, secretUseDefaultFor } from "@valet/shared";
+import { draftFromDefault, draftHost, ruleFromDraft, SecretUseFields, type SecretUseDraft } from "~/components/settings/secret-use-fields";
+import { useRuleText, usesText } from "~/lib/secret-use";
 import { useDeleteSecret, useSaveSecret, useSecrets, type SecretTarget } from "~/api/secrets";
 import { useMe, useTeams } from "~/api/settings";
 import { errorText } from "~/lib/error-text";
@@ -69,7 +72,7 @@ function ScopePanel({ target }: { target: SecretTarget }) {
   return (
     <div className="min-w-0 max-w-full space-y-4">
       <p className="text-xs text-muted">{SCOPE_TEXT[target.scope]}</p>
-      {data.canWrite && <SaveSecretForm target={target} />}
+      {data.canWrite && <SaveSecretForm target={target} useAvailable={data.useAvailable} />}
       {data.secrets.length === 0 ? (
         <p className="py-4 text-sm text-muted">
           {data.canWrite ? "No secrets yet. Save one above, then use its reference in a session." : "No secrets here yet."}
@@ -83,28 +86,52 @@ function ScopePanel({ target }: { target: SecretTarget }) {
       )}
       <p className="text-xs text-muted">
         In a session, run <code className="font-mono">valet-secrets run --env NAME=&lt;reference&gt; -- &lt;command&gt;</code>.
+        {data.useAvailable &&
+          " A secret saved for one host is never given to a command: the agent calls that host with valet-secrets http, and only the response comes back."}
         {data.provider && ` Values are encrypted in your browser and stored in ${data.provider}.`}
       </p>
     </div>
   );
 }
 
-function SaveSecretForm({ target }: { target: SecretTarget }) {
+function SaveSecretForm({ target, useAvailable }: { target: SecretTarget; useAvailable: boolean }) {
   const [name, setName] = useState("");
   const [value, setValue] = useState("");
+  const [useOnly, setUseOnly] = useState(false);
+  const [draft, setDraft] = useState<SecretUseDraft>(() => draftFromDefault(undefined));
+  // Set once the person edits the host or header: a pasted key then no longer
+  // pre-fills them.
+  const [ruleTouched, setRuleTouched] = useState(false);
+  const useOnlyId = useId();
   const save = useSaveSecret(target);
   const trimmed = name.trim();
-  const canSave = trimmed.length > 0 && value.length > 0 && !save.isPending;
+  const rule = ruleFromDraft(draft);
+  const host = draftHost(draft);
+  // A use-only secret needs a host: Valet never learns it from the first use.
+  const canSave = trimmed.length > 0 && value.length > 0 && !save.isPending && (!useOnly || rule !== undefined);
+
+  function changeValue(next: string) {
+    setValue(next);
+    if (ruleTouched) return;
+    // A whole known key pre-fills where it goes; the person confirms by saving.
+    const [match] = detectSecrets(next.trim());
+    const def = match && match.confidence === "known" && match.value === next.trim() ? secretUseDefaultFor(match.label) : undefined;
+    if (def) setDraft(draftFromDefault(def));
+  }
 
   function submit(e: FormEvent) {
     e.preventDefault();
     if (!canSave) return;
+    const use = useOnly ? rule : undefined;
     save.mutate(
-      { name: trimmed, value },
+      { name: trimmed, value, ...(use ? { use } : {}) },
       {
         onSuccess: () => {
           setName("");
           setValue("");
+          setUseOnly(false);
+          setDraft(draftFromDefault(undefined));
+          setRuleTouched(false);
         },
       },
     );
@@ -122,7 +149,7 @@ function SaveSecretForm({ target }: { target: SecretTarget }) {
       />
       <Textarea
         value={value}
-        onChange={(e) => setValue(e.target.value)}
+        onChange={(e) => changeValue(e.target.value)}
         placeholder="Value"
         aria-label="Secret value"
         autoComplete="off"
@@ -130,6 +157,32 @@ function SaveSecretForm({ target }: { target: SecretTarget }) {
         rows={2}
         className="font-mono"
       />
+      {useAvailable && (
+        <div className="flex items-center gap-2">
+          <Checkbox id={useOnlyId} checked={useOnly} onCheckedChange={setUseOnly} aria-label="Use only with one host" />
+          <label htmlFor={useOnlyId} className="select-none text-sm text-ink">
+            Use only with one host
+          </label>
+        </div>
+      )}
+      {useAvailable && useOnly && (
+        <SecretUseFields
+          draft={draft}
+          onChange={(next) => {
+            setDraft(next);
+            setRuleTouched(true);
+          }}
+        />
+      )}
+      {useAvailable && (
+        <p className="text-xs text-muted">
+          {!useOnly
+            ? "Commands in a session can read this value. Check Use only with one host to keep it from commands."
+            : host
+              ? `The agent never gets this value. Valet sends it only to ${host}, and only the response comes back.`
+              : "Type the host the agent will call. The agent can call that host with this secret but can never read it."}
+        </p>
+      )}
       <div className="flex items-center justify-end gap-2">
         {save.error && <p role="alert" className="mr-auto text-sm text-danger-500">{errorText(save.error)}</p>}
         <Button type="submit" disabled={!canSave}>
@@ -151,8 +204,10 @@ function SecretRow({ secret, target, canWrite }: { secret: SecretSummary; target
   function replace(e: FormEvent) {
     e.preventDefault();
     if (!nextValue || save.isPending) return;
+    // A use-only secret keeps its rule: the rule is sealed with the value, so a
+    // replace seals it again.
     save.mutate(
-      { name: secret.name, value: nextValue, replace: true },
+      { name: secret.name, value: nextValue, replace: true, ...(secret.use ? { use: secret.use } : {}) },
       {
         onSuccess: () => {
           setNextValue("");
@@ -168,6 +223,8 @@ function SecretRow({ secret, target, canWrite }: { secret: SecretSummary; target
         <div className="min-w-0 flex-1">
           <div className="truncate text-sm font-medium text-ink">{secret.name}</div>
           <div className="truncate font-mono text-xs text-muted">{secret.reference}</div>
+          {secret.use && <div className="truncate text-xs text-muted">{useRuleText(secret.use)}</div>}
+          {secret.uses && <div className="truncate text-xs text-muted">{usesText(secret.uses, (ms) => formatDateOr(ms, "—"))}</div>}
         </div>
         <div className="hidden shrink-0 text-xs text-muted sm:block">Saved {formatDateOr(secret.createdAt, "—")}</div>
         <Button type="button" variant="ghost" size="sm" className="shrink-0" onClick={() => void copy(secret.reference)}>

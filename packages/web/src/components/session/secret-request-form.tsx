@@ -5,6 +5,7 @@ import { saveSecretValue } from "~/api/secrets";
 import { ApiError } from "~/api/api-error";
 import { errorText } from "~/lib/error-text";
 import { cn } from "~/lib/cn";
+import { useRuleText } from "~/lib/secret-use";
 
 type SecretRequest = NonNullable<DecisionGate["secretRequest"]>;
 
@@ -50,7 +51,10 @@ export function SecretRequestForm({
     if (!saved) {
       const target = request.scope === "team" && request.teamId ? { scope: "team" as const, teamId: request.teamId } : { scope: "personal" as const };
       try {
-        await saveSecretValue(target, request.name, value, { replace: request.replace === true });
+        await saveSecretValue(target, request.name, value, {
+          replace: request.replace === true,
+          ...(request.use ? { use: request.use } : {}),
+        });
       } catch (err) {
         setError(
           err instanceof ApiError && err.status === 409
@@ -83,6 +87,12 @@ export function SecretRequestForm({
             <dd className="min-w-0 break-all font-mono text-ink">{request.sendsTo}</dd>
           </>
         )}
+        {request.use && (
+          <>
+            <dt className="text-muted">Use</dt>
+            <dd className="min-w-0 break-words text-ink">{useRuleText(request.use)}</dd>
+          </>
+        )}
         <dt className="text-muted">Saved to</dt>
         <dd className="text-ink">{where}{request.replace ? ", replacing the saved value" : ""}</dd>
       </dl>
@@ -97,7 +107,11 @@ export function SecretRequestForm({
         disabled={disabled}
         className="font-mono"
       />
-      <p className="text-xs text-muted">Encrypted in your browser. The agent gets a reference, never the value.</p>
+      <p className="text-xs text-muted">
+        {request.use
+          ? `Encrypted in your browser. Valet sends it only to ${request.use.hosts.join(", ")}; the agent gets the response, never the value.`
+          : "Encrypted in your browser. The agent gets a reference, never the value."}
+      </p>
       {error && <p role="alert" className="text-xs text-danger-text">{error}</p>}
       <div className="flex items-center justify-end gap-2">
         <Button type="button" variant="ghost" size="sm" onClick={onDecline} disabled={disabled}>

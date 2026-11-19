@@ -399,6 +399,7 @@ describe("ChannelHost.handleUpdate", () => {
     const secretStore: SecretStoreService = {
       enabled: true,
       providerLabel: "Memory",
+      findForUse: refuse,
       list: async (_a, scope) => saved.map((s) => ({ name: s.name, createdAt: 0, reference: secretReference(scope, s.name) })),
       saveValue: async (_a, scope, name, value) => {
         saved.push({ name, value });

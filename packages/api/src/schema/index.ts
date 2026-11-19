@@ -1669,6 +1669,32 @@ export const secretStoreSpaces = pgTable(
   (t) => [primaryKey({ columns: [t.orgId, t.ownerType, t.ownerId, t.provider] })],
 );
 
+/** One use of a use-only secret through the secret use service
+ * (`routes/sandbox-secrets.ts` `/use`). The receipt is what the use service
+ * signed. Holds no secret. The secrets list counts these per secret, and a
+ * delete removes them. */
+export const secretUses = pgTable(
+  "secret_uses",
+  {
+    id: text("id").primaryKey(),
+    orgId: text("org_id").notNull(),
+    /** `useOwner`: the owner sealed in the secret. */
+    owner: text("owner").notNull(),
+    secretName: text("secret_name").notNull(),
+    sessionId: text("session_id").notNull(),
+    method: text("method").notNull(),
+    host: text("host").notNull(),
+    path: text("path").notNull(),
+    /** The upstream HTTP status. */
+    status: integer("status").notNull(),
+    /** Who signed the receipt: `enclave` (attested) or `use service`. */
+    signer: text("signer").notNull(),
+    receipt: jsonb("receipt").$type<{ payload: string; publicKey: string; signature: string }>().notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  },
+  (t) => [index("secret_uses_secret").on(t.orgId, t.owner, t.secretName, t.createdAt)],
+);
+
 // `mcp_oauth_clients` — one dynamically-registered OAuth client per MCP
 // service, shared across all users (integration-OAuth design,
 // docs/specs/2026-07-20-integration-oauth-design.md). Never deleted on

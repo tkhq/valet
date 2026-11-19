@@ -18,8 +18,17 @@ const SEALERS: Record<string, Sealer> = {
   [TURNKEY_SEAL_KIND]: sealForTurnkey,
 };
 
+/** The plaintext a sealer receives. For a use-only save the use service
+ * reads JSON: the value plus the rules for using it, so the rules travel
+ * inside the sealed value and nobody who stores it can change them. */
+export function plaintextFor(envelope: SecretSealEnvelope, value: string): string {
+  if (!envelope.use) return value;
+  const { client, owner, rules } = envelope.use;
+  return JSON.stringify({ v: 1, value, client, owner, rules });
+}
+
 export async function sealSecret(envelope: SecretSealEnvelope, value: string): Promise<SealedSecret> {
   const sealer = SEALERS[envelope.kind];
   if (!sealer) throw new Error("This page cannot seal values for this secret store. Reload the page, then save again.");
-  return sealer(envelope, value);
+  return sealer(envelope, plaintextFor(envelope, value));
 }

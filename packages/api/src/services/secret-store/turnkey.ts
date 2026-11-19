@@ -43,6 +43,10 @@ export interface TurnkeyConfig {
   orgId: string;
   provisioner: TurnkeyKeyPair;
   broker: TurnkeyKeyPair;
+  /** The secret use service's Turnkey API public key. When set, each new
+   * personal sub-organization gets a user for it and an export policy for
+   * use-only secrets (`VALET_TURNKEY_USE_SERVICE_PUBLIC_KEY`). */
+  useServicePublicKey?: string;
 }
 
 /** Every key value, or a boot error that names the missing ones. */
@@ -63,7 +67,12 @@ export function turnkeyConfigFromEnv(env: NodeJS.ProcessEnv): TurnkeyConfig {
   if (values.VALET_TURNKEY_PROVISIONER_API_PUBLIC_KEY === values.VALET_TURNKEY_BROKER_API_PUBLIC_KEY) {
     throw new Error("The provisioner and broker must use different Turnkey API keys. Create one key for each user.");
   }
+  const useServicePublicKey = env.VALET_TURNKEY_USE_SERVICE_PUBLIC_KEY?.trim();
+  if (useServicePublicKey && !/^0[23][0-9a-fA-F]{64}$/.test(useServicePublicKey)) {
+    throw new Error("VALET_TURNKEY_USE_SERVICE_PUBLIC_KEY must be a compressed P-256 public key (66 hex characters). Copy it from the use service's /v1/keys.");
+  }
   return {
+    ...(useServicePublicKey ? { useServicePublicKey } : {}),
     apiBaseUrl: env.VALET_TURNKEY_API_BASE_URL?.trim() || "https://api.turnkey.com",
     orgId: values.VALET_TURNKEY_ORG_ID!,
     provisioner: {
@@ -103,6 +112,8 @@ export interface TurnkeySecretMetadata {
   secretId: string;
   name?: string;
   createdAtUnixMs: string;
+  /** The SDK's `getSecrets` returns these as an object, not Turnkey's key-value pairs. */
+  staticProperties?: Record<string, string>;
 }
 
 /** Turnkey's name for the sealed-import encryption. */
@@ -113,6 +124,7 @@ export const TURNKEY_SEAL_KIND = "turnkey-enclave-v1";
 /** User names of the two service users inside a personal sub-organization. */
 export const PROVISIONER_USER_NAME = "valet-root";
 export const BROKER_USER_NAME = "valet-broker";
+export const USE_SERVICE_USER_NAME = "valet-use-service";
 
 /** The SDK calls this provider makes. Tests pass a fake. */
 export interface TurnkeyApiClient {
@@ -128,6 +140,16 @@ export interface TurnkeyApiClient {
     }[];
   }): Promise<CreateSubOrganizationResponse>;
   getUsers(input: { organizationId: string }): Promise<{ users: { userId: string; userName: string }[] }>;
+  createUsers(input: {
+    organizationId: string;
+    users: {
+      userName: string;
+      apiKeys: { apiKeyName: string; publicKey: string; curveType: "API_KEY_CURVE_P256" }[];
+      authenticators: never[];
+      oauthProviders: never[];
+      userTags: never[];
+    }[];
+  }): Promise<{ userIds: string[] }>;
   createPolicy(input: {
     organizationId: string;
     policyName: string;
@@ -230,6 +252,27 @@ export function personalBrokerPolicy(brokerUserId: string) {
   };
 }
 
+/** The use service's grant inside a personal sub-organization: export only
+ * use-only secrets (scope `use-personal`), with the same owner checks as the
+ * broker. The broker's policy requires scope `personal`, so it never matches
+ * a use-only secret. */
+export function personalUseServicePolicy(useServiceUserId: string) {
+  return {
+    policyName: "valet-use-service: export use-only personal secrets",
+    effect: "EFFECT_ALLOW" as const,
+    consensus: `approvers.any(u, u.id == '${useServiceUserId}')`,
+    condition: [
+      "activity.type == 'ACTIVITY_TYPE_EXPORT_SECRETS'",
+      "secret.static_properties['scope'] == 'use-personal'",
+      "request_context['valet_company_org_id'] == secret.static_properties['valet_company_org_id']",
+      "request_context['valet_user_id'] == secret.static_properties['valet_owner_user_id']",
+      "request_context['valet_session_owner_type'] == 'user'",
+      "request_context['valet_session_owner_id'] == secret.static_properties['valet_owner_user_id']",
+    ].join(" && "),
+    notes: "Valet use-only personal secrets. Only the attested use service exports them; the value never reaches Valet.",
+  };
+}
+
 /** Turnkey pages list results at 100. Ten pages bound one name lookup. */
 const PAGE_SIZE = 100;
 const MAX_PAGES = 10;
@@ -300,6 +343,15 @@ export function createTurnkeySecretStore(
       if (!provisionerId || !brokerId) throw new Error("Turnkey sub-organization is missing a Valet service user");
       await client.createPolicy({ organizationId: subOrgId, ...personalProvisionerPolicy(provisionerId) });
       await client.createPolicy({ organizationId: subOrgId, ...personalBrokerPolicy(brokerId) });
+      if (config.useServicePublicKey) {
+        const created = await client.createUsers({
+          organizationId: subOrgId,
+          users: [{ ...apiKey(USE_SERVICE_USER_NAME, config.useServicePublicKey), userTags: [] }],
+        });
+        const useServiceId = created.userIds[0];
+        if (!useServiceId) throw new Error("Turnkey created no use service user");
+        await client.createPolicy({ organizationId: subOrgId, ...personalUseServicePolicy(useServiceId) });
+      }
       // From here a root action needs both keys; each key alone has only its policy.
       await client.updateRootQuorum({ organizationId: subOrgId, threshold: 2, userIds: [provisionerId, brokerId] });
       return subOrgId;
@@ -308,7 +360,12 @@ export function createTurnkeySecretStore(
     async list(spaceId, prefix) {
       return (await listAll(spaceId))
         .filter((s) => (s.name ?? "").startsWith(prefix))
-        .map((s): SecretMeta => ({ name: s.name ?? "", id: s.secretId, createdAt: Number(s.createdAtUnixMs) }));
+        .map((s): SecretMeta => ({
+          name: s.name ?? "",
+          id: s.secretId,
+          createdAt: Number(s.createdAtUnixMs),
+          ...(s.staticProperties ? { labels: { ...s.staticProperties } } : {}),
+        }));
     },
 
     async put(spaceId, { name, value, labels }) {

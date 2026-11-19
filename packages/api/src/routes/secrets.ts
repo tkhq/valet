@@ -15,12 +15,14 @@
 import { Hono, type Context } from "hono";
 import type { AppEnv } from "../env.js";
 import { SecretStoreError } from "../services/secret-store/provider.js";
-import type { SecretActor, SecretScope } from "../services/secret-store/service.js";
+import { normalizeUseRule, useOwner, type SecretActor, type SecretScope, type UseRule } from "../services/secret-store/service.js";
 import { isOrgAdmin } from "../services/org.js";
+import { forgetSecretUses, secretUseStats } from "../services/secret-use-log.js";
 import { isTeamMember } from "../services/teams.js";
 import type {
   BeginSecretSaveResponse,
   FinishSecretSaveRequest,
+  SecretSealEnvelope,
   SecretSummary,
   SecretsListResponse,
 } from "../wire/types.js";
@@ -70,16 +72,25 @@ secretsRouter.get("/", async (c) => {
   const scope = parseScope(c.req.query("scope"), c.req.query("teamId"));
   if (typeof scope === "string") return c.json({ error: scope }, 400);
   if (!secretStore.enabled) {
-    const resp: SecretsListResponse = { enabled: false, provider: null, canWrite: false, secrets: [] };
+    const resp: SecretsListResponse = { enabled: false, provider: null, canWrite: false, useAvailable: false, secrets: [] };
     return c.json(resp);
   }
   try {
-    const rows = await secretStore.list(actorOf(c), scope);
-    const secrets: SecretSummary[] = rows.map((r) => ({ name: r.name, reference: r.reference, createdAt: r.createdAt }));
+    const actor = actorOf(c);
+    const rows = await secretStore.list(actor, scope);
+    const useNames = rows.filter((r) => r.use).map((r) => r.name);
+    const stats = await secretUseStats(c.var.providers.db, actor.orgId, useOwner(actor.orgId, actor.userId, scope), useNames);
+    const secrets: SecretSummary[] = rows.map((r) => ({
+      name: r.name,
+      reference: r.reference,
+      createdAt: r.createdAt,
+      ...(r.use ? { use: r.use, uses: stats.get(r.name) ?? { count: 0, lastUsedAt: null } } : {}),
+    }));
     const resp: SecretsListResponse = {
       enabled: true,
       provider: secretStore.providerLabel,
       canWrite: await canWrite(c, scope),
+      useAvailable: c.var.providers.secretUse !== null,
       secrets,
     };
     return c.json(resp);
@@ -97,6 +108,17 @@ async function readBody(c: Context<AppEnv>): Promise<Partial<FinishSecretSaveReq
   }
 }
 
+/** The use rule a save asks for, or undefined for an ordinary secret. Throws
+ * a `SecretStoreError` when the rule is malformed or no use service is set. */
+function useRuleOf(c: Context<AppEnv>, body: Partial<FinishSecretSaveRequest>): UseRule | undefined {
+  if (body.use === undefined) return undefined;
+  if (!c.var.providers.secretUse) {
+    throw new SecretStoreError("This Valet has no secret use service, so a secret cannot be saved for one host. Save it without a host.", "invalid_value");
+  }
+  if (typeof body.use !== "object" || body.use === null) throw new SecretStoreError("Send use as an object with hosts and header.", "invalid_value");
+  return normalizeUseRule(body.use);
+}
+
 secretsRouter.post("/import/begin", async (c) => {
   const { secretStore } = c.var.providers;
   const body = await readBody(c);
@@ -104,8 +126,16 @@ secretsRouter.post("/import/begin", async (c) => {
   const scope = parseScope(body.scope, body.teamId);
   if (typeof scope === "string") return c.json({ error: scope }, 400);
   try {
-    const envelope = await secretStore.beginSave(actorOf(c), scope, body.name.trim(), { replace: body.replace === true });
-    const resp: BeginSecretSaveResponse = { envelope };
+    const use = useRuleOf(c, body);
+    const actor = actorOf(c);
+    const envelope: SecretSealEnvelope = await secretStore.beginSave(actor, scope, body.name.trim(), { replace: body.replace === true });
+    const secretUse = c.var.providers.secretUse;
+    const resp: BeginSecretSaveResponse = {
+      envelope:
+        use && secretUse
+          ? { ...envelope, use: { client: secretUse.clientPublicKey, owner: useOwner(actor.orgId, actor.userId, scope), rules: use } }
+          : envelope,
+    };
     return c.json(resp);
   } catch (err) {
     return mapError(c, err);
@@ -122,8 +152,17 @@ secretsRouter.post("/import/finish", async (c) => {
   const scope = parseScope(body.scope, body.teamId);
   if (typeof scope === "string") return c.json({ error: scope }, 400);
   try {
-    const saved = await secretStore.finishSave(actorOf(c), scope, body.name.trim(), sealed, { replace: body.replace === true });
-    const resp: SecretSummary = { name: saved.name, reference: saved.reference, createdAt: saved.createdAt };
+    const use = useRuleOf(c, body);
+    const saved = await secretStore.finishSave(actorOf(c), scope, body.name.trim(), sealed, {
+      replace: body.replace === true,
+      ...(use ? { use } : {}),
+    });
+    const resp: SecretSummary = {
+      name: saved.name,
+      reference: saved.reference,
+      createdAt: saved.createdAt,
+      ...(saved.use ? { use: saved.use } : {}),
+    };
     return c.json(resp, 201);
   } catch (err) {
     return mapError(c, err);
@@ -138,7 +177,9 @@ secretsRouter.delete("/", async (c) => {
   const scope = parseScope(c.req.query("scope"), c.req.query("teamId"));
   if (typeof scope === "string") return c.json({ error: scope }, 400);
   try {
-    await secretStore.remove(actorOf(c), scope, name);
+    const actor = actorOf(c);
+    await secretStore.remove(actor, scope, name);
+    await forgetSecretUses(c.var.providers.db, actor.orgId, useOwner(actor.orgId, actor.userId, scope), name);
     return c.json({ ok: true });
   } catch (err) {
     return mapError(c, err);

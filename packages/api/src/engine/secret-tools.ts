@@ -16,12 +16,15 @@
 import { Type } from "typebox";
 import type { TSchema } from "typebox";
 import type { ToolDef } from "@valet/engine";
+import { SecretStoreError } from "../services/secret-store/provider.js";
 import {
+  normalizeUseRule,
   parseSecretReference,
   secretReference,
   validSecretName,
   type SecretScope,
   type SecretStoreService,
+  type UseRule,
 } from "../services/secret-store/service.js";
 
 /** Preserves the schema's static type through `execute`, like the other tool files. */
@@ -44,14 +47,25 @@ export interface SecretRequestContext {
   sendsTo?: string;
   /** The saved value stopped working: the card replaces it. */
   replace?: boolean;
+  /** Save use-only: the value goes only to these hosts, in this header,
+   * through the use service. */
+  use?: UseRule;
 }
 
 /** Reads `context.secretRequest` off a gate, or undefined when it is not one. */
 export function secretRequestOf(context: Record<string, unknown> | undefined): SecretRequestContext | undefined {
   const raw = context?.secretRequest;
   if (typeof raw !== "object" || raw === null) return undefined;
-  const { scope, teamId, name, purpose, sendsTo, replace } = raw as Record<string, unknown>;
+  const { scope, teamId, name, purpose, sendsTo, replace, use } = raw as Record<string, unknown>;
   if ((scope !== "personal" && scope !== "team") || typeof name !== "string" || typeof purpose !== "string") return undefined;
+  let rule: UseRule | undefined;
+  if (typeof use === "object" && use !== null) {
+    try {
+      rule = normalizeUseRule(use as Parameters<typeof normalizeUseRule>[0]);
+    } catch {
+      rule = undefined;
+    }
+  }
   return {
     scope,
     name,
@@ -59,6 +73,7 @@ export function secretRequestOf(context: Record<string, unknown> | undefined): S
     ...(typeof teamId === "string" ? { teamId } : {}),
     ...(typeof sendsTo === "string" && sendsTo ? { sendsTo } : {}),
     ...(replace === true ? { replace: true } : {}),
+    ...(rule ? { use: rule } : {}),
   };
 }
 
@@ -86,7 +101,13 @@ function normalizeName(raw: string): string | null {
   return validSecretName(name) ? name : null;
 }
 
-export function buildSecretTools(deps: { secretStore: SecretStoreService }): ToolDef[] {
+/** How the agent calls a use-only secret. */
+export function useHint(reference: string, rule: UseRule): string {
+  const value = rule.format.replace("{secret}", `{{${reference}}}`);
+  return `Call it with valet-secrets http METHOD https://${rule.hosts[0]}/PATH -H '${rule.header}: ${value}'. It can only be sent to ${rule.hosts.join(", ")}; only the response comes back.`;
+}
+
+export function buildSecretTools(deps: { secretStore: SecretStoreService; useAvailable?: boolean }): ToolDef[] {
   const requestSecret = defineTool({
     name: REQUEST_SECRET_TOOL,
     description:
@@ -99,6 +120,16 @@ export function buildSecretTools(deps: { secretStore: SecretStoreService }): Too
       purpose: Type.String({ description: "One sentence: what you will use it for." }),
       sends_to: Type.Optional(Type.String({ description: "The host or service the value will be sent to, for example api.openai.com." })),
       replace: Type.Optional(Type.Boolean({ description: "True when the saved value stopped working and the user should enter a new one." })),
+      header: Type.Optional(
+        Type.String({
+          description:
+            "Set it to save the credential for one host only: the header it goes in, for example Authorization or x-api-key. " +
+            "Needs sends_to as a bare host. You then call that host with valet-secrets http and never get the value. Prefer this for HTTP APIs.",
+        }),
+      ),
+      header_format: Type.Optional(
+        Type.String({ description: "The header value with {secret} in it, for example 'Bearer {secret}'. Default {secret}." }),
+      ),
     }),
     execute: async (args, ctx) => {
       const name = normalizeName(args.name);
@@ -113,11 +144,24 @@ export function buildSecretTools(deps: { secretStore: SecretStoreService }): Too
         return { text: "A workflow run cannot ask the user for a credential. Ask the user to save it in Settings, Secrets, before the run." };
       }
       const sendsTo = args.sends_to?.trim().slice(0, 200);
+      let use: UseRule | undefined;
+      if (args.header !== undefined) {
+        if (!deps.useAvailable) {
+          return { text: "This Valet has no secret use service, so a credential cannot be saved for one host. Call request_secret again without header." };
+        }
+        try {
+          use = normalizeUseRule({ hosts: sendsTo ? [sendsTo] : [], header: args.header, format: args.header_format });
+        } catch (err) {
+          if (!(err instanceof SecretStoreError)) throw err;
+          return { text: `${err.message} Call request_secret again with sends_to as a bare host and header as a header name.` };
+        }
+      }
       const base = {
         name,
         purpose: args.purpose.trim(),
         ...(sendsTo ? { sendsTo } : {}),
         ...(args.replace ? { replace: true } : {}),
+        ...(use ? { use } : {}),
       };
       const request: SecretRequestContext =
         owner.type === "team" ? { scope: "team", teamId: owner.id, ...base } : { scope: "personal", ...base };
@@ -126,13 +170,15 @@ export function buildSecretTools(deps: { secretStore: SecretStoreService }): Too
       const actor = { orgId: ctx.orgId, userId: ctx.userId };
       // Already saved and not being replaced: no card, no question.
       if (!request.replace && (await deps.secretStore.exists(actor, scope, name).catch(() => false))) {
-        return { text: `Saved as ${reference}. Run commands with valet-secrets run --env ${envName(name)}=${reference} -- <command>. Never print the value.` };
+        return { text: savedText(reference, name, use) };
       }
       const where = request.scope === "team" ? "this team's secrets" : "your personal secrets";
       const resolution = await ctx.requestDecision({
         type: "credential_request",
         title: request.replace ? `Replace ${name}` : `Add ${name}`,
-        body: `${request.purpose}${sendsTo ? `\nIt will be sent to ${sendsTo}.` : ""}\nIt is saved to ${where} and never appears in this conversation. Enter it only in Valet, never in chat.`,
+        body: use
+          ? `${request.purpose}\nIt can only be sent to ${use.hosts.join(", ")}, in the ${use.header} header. The agent never gets the value.\nIt is saved to ${where}. Enter it only in Valet, never in chat.`
+          : `${request.purpose}${sendsTo ? `\nIt will be sent to ${sendsTo}.` : ""}\nIt is saved to ${where} and never appears in this conversation. Enter it only in Valet, never in chat.`,
         context: { secretRequest: request },
         actions: [{ id: SECRET_DECLINE_ACTION, label: "Decline" }],
         resumeKey: `${REQUEST_SECRET_TOOL}:${reference}`,
@@ -145,12 +191,15 @@ export function buildSecretTools(deps: { secretStore: SecretStoreService }): Too
       if (!saved || resolution.value !== reference || !(await deps.secretStore.exists(savedBy, scope, name).catch(() => false))) {
         return { text: `The card closed, but ${reference} is not saved. Call request_secret again.` };
       }
-      return {
-        text: `Saved as ${reference}. Run commands with valet-secrets run --env ${envName(name)}=${reference} -- <command>. Never print the value.`,
-      };
+      return { text: savedText(reference, name, use) };
     },
   });
   return [requestSecret];
+}
+
+function savedText(reference: string, name: string, use: UseRule | undefined): string {
+  if (use) return `Saved as ${reference}. ${useHint(reference, use)}`;
+  return `Saved as ${reference}. Run commands with valet-secrets run --env ${envName(name)}=${reference} -- <command>. Never print the value.`;
 }
 
 /** The env var the reference goes into: the last segment, as a shell name. */

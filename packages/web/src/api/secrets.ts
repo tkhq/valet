@@ -4,11 +4,12 @@
  *
  * Every save goes through `saveSecretValue`: the api authorizes the scope
  * and name and returns an envelope, the browser seals the value to it, and
- * the api receives only the sealed value. The Settings page, the secret
+ * the api receives only the sealed value. With `use`, the secret is saved
+ * use-only: it can be sent only to the named host, through the use service. The Settings page, the secret
  * request card in a thread, and the composer's paste prompt all use it.
  */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import type { SecretScopeKind, SecretSummary, SecretsListResponse } from "@valet/api/wire";
+import type { SecretScopeKind, SecretSummary, SecretsListResponse, SecretUseRuleInput } from "@valet/api/wire";
 import { sealSecret } from "~/lib/secret-seal";
 import { api } from "./client";
 
@@ -34,13 +35,14 @@ export async function saveSecretValue(
   target: SecretTarget,
   name: string,
   value: string,
-  opts: { replace?: boolean } = {},
+  opts: { replace?: boolean; use?: SecretUseRuleInput } = {},
 ): Promise<SecretSummary> {
   const request = {
     scope: target.scope,
     name,
     ...(target.teamId ? { teamId: target.teamId } : {}),
     ...(opts.replace ? { replace: true } : {}),
+    ...(opts.use ? { use: opts.use } : {}),
   };
   const { envelope } = await api.beginSecretSave(request);
   const sealed = await sealSecret(envelope, value);
@@ -49,8 +51,8 @@ export async function saveSecretValue(
 
 export function useSaveSecret(target: SecretTarget) {
   const qc = useQueryClient();
-  return useMutation<SecretSummary, Error, { name: string; value: string; replace?: boolean }>({
-    mutationFn: ({ name, value, replace }) => saveSecretValue(target, name, value, { replace }),
+  return useMutation<SecretSummary, Error, { name: string; value: string; replace?: boolean; use?: SecretUseRuleInput }>({
+    mutationFn: ({ name, value, replace, use }) => saveSecretValue(target, name, value, { replace, ...(use ? { use } : {}) }),
     onSuccess: () => qc.invalidateQueries({ queryKey: qkSecretsAll() }),
   });
 }

@@ -9,6 +9,7 @@
  * Underscore-prefixed filename so vitest's `*.test.ts` glob doesn't pick it
  * up as a test.
  */
+import type { SecretUseService } from "../services/secret-use.js";
 import { wireSessionOutcomeTagging } from "../tagging/session-outcome.js";
 import { taggingDrain } from "../tagging/worker.js";
 import { externalUsageRetention } from "../services/external-usage.js";
@@ -102,6 +103,7 @@ export interface BootTestApiOpts {
   onePassword?: OnePasswordService;
   /** The secret store for the suite. Defaults to the disabled service. */
   secretStore?: SecretStoreService;
+  secretUse?: SecretUseService | null;
   /** Override the default `VirtualSandboxProvider` — e.g. a create-counting
    * wrapper that proves a code path never provisions a sandbox. */
   sandboxProvider?: SandboxProvider;
@@ -630,6 +632,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     storedCredentials: engineCredentials,
     onePassword,
     secretStore: opts.secretStore ?? disabledSecretStore(),
+    secretUse: opts.secretUse ?? null,
     credentialCipher: engineCredentials.fieldCipher,
     engineHost,
     autoTitleHost,

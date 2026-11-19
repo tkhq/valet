@@ -1004,6 +1004,23 @@ CREATE TABLE "secret_store_spaces" (
 	PRIMARY KEY("org_id", "owner_type", "owner_id", "provider")
 );
 --> statement-breakpoint
+CREATE TABLE "secret_uses" (
+	"id" text PRIMARY KEY NOT NULL,
+	"org_id" text NOT NULL,
+	"owner" text NOT NULL,
+	"secret_name" text NOT NULL,
+	"session_id" text NOT NULL,
+	"method" text NOT NULL,
+	"host" text NOT NULL,
+	"path" text NOT NULL,
+	"status" integer NOT NULL,
+	"signer" text NOT NULL,
+	"receipt" jsonb NOT NULL,
+	"created_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE INDEX "secret_uses_secret" ON "secret_uses" USING btree ("org_id","owner","secret_name","created_at");
+--> statement-breakpoint
 CREATE TABLE "mcp_oauth_clients" (
 	"service" text PRIMARY KEY NOT NULL,
 	"client_id" text NOT NULL,

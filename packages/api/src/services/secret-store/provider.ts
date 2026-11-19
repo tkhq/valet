@@ -23,6 +23,8 @@ export interface SecretMeta {
   id?: string;
   /** Epoch milliseconds. */
   createdAt: number;
+  /** The labels stored with the secret, when the provider returns them. */
+  labels?: SecretLabels;
 }
 
 /** String maps Valet builds. A provider with policy support stores labels

@@ -2549,6 +2549,12 @@ WHERE r.status <> 'merged' ORDER BY l.org_id, l.subject_type, l.subject_id, l.di
  "id" text PRIMARY KEY NOT NULL, "org_id" text NOT NULL, "actor_user_id" text, "actor_email" text, "action" text NOT NULL,
  "target_type" text NOT NULL, "target_id" text, "target_name" text, "changes" jsonb, "ip" text, "user_agent" text, "created_at" bigint NOT NULL
 )` },
+  { describe: "secret_uses table", probe: { kind: "table", table: "secret_uses" }, sql: `CREATE TABLE IF NOT EXISTS "secret_uses" (
+ "id" text PRIMARY KEY NOT NULL, "org_id" text NOT NULL, "owner" text NOT NULL, "secret_name" text NOT NULL, "session_id" text NOT NULL,
+ "method" text NOT NULL, "host" text NOT NULL, "path" text NOT NULL, "status" integer NOT NULL, "signer" text NOT NULL, "receipt" jsonb NOT NULL,
+ "created_at" bigint NOT NULL
+)` },
+  { describe: "secret_uses_secret index", probe: { kind: "index", index: "secret_uses_secret" }, sql: `CREATE INDEX IF NOT EXISTS "secret_uses_secret" ON "secret_uses" ("org_id", "owner", "secret_name", "created_at")` },
   { describe: "admin_audit_events_org_created index", probe: { kind: "index", index: "admin_audit_events_org_created" }, sql: `CREATE INDEX IF NOT EXISTS "admin_audit_events_org_created" ON "admin_audit_events" ("org_id", "created_at" DESC, "id" DESC)` },
 ];
 
