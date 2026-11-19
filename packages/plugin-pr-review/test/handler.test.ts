@@ -28,6 +28,7 @@ import {
   reviewRequest,
   nearestCommentableLine,
   createReviewHandler,
+  changedPullFiles,
   excluded,
   flaggedCodeChanged,
   focusRole,
@@ -91,7 +92,9 @@ class FakeGitHub {
   refuseInline = false;
   state: "open" | "closed" = "open";
   /** Files compare(BASE...<sha>) lists, by target sha. Default: a.ts. */
-  filesAt: Record<string, { filename: string; status: string }[]> = {};
+  filesAt: Record<string, { filename: string; status: string; patch?: string }[]> = {};
+  /** Commits a force-push dropped: compare answers 404 for them. */
+  gone = new Set<string>();
   compared: string[] = [];
   diffed: string[] = [];
   merged = false;
@@ -187,6 +190,7 @@ class FakeGitHub {
       }
       const to = path.slice("/compare/".length).split("...")[1];
       this.compared.push(`${from}...${to}`);
+      if (this.gone.has(from) || this.gone.has(to)) return new Response(JSON.stringify({ message: "Not Found" }), { status: 404 });
       if (from === BASE) return ok({ status: "ahead", merge_base_commit: { sha: BASE }, files: this.filesAt[to] ?? [{ filename: "a.ts" }] });
       return ok({ status: this.incrementStatus, merge_base_commit: { sha: from }, files: this.incrementFiles.map((filename) => ({ filename })) });
     }
@@ -992,10 +996,11 @@ describe("review-pull-request handler", () => {
     expect(store.pointers()?.rounds?.[99]).toMatchObject({ head: H1, mode: "incremental", newFindings: [], resolved: [] });
   });
 
-  it("rechecks every open finding and reviews the whole PR after a force-push", async () => {
+  it("after a force-push, rechecks and reviews only the files whose PR changes differ", async () => {
     const gh = new FakeGitHub();
     const store = new FakeStore();
     const handler = createReviewHandler({ fetch: gh.fetch });
+    gh.filesAt[H1] = [{ filename: "a.ts", status: "modified", patch: PATCH_A.replace("+line 3", "+old line 3") }];
     await handler.handle(event("ev1"), context(new FakeThreads(scripted(reviewOf([finding({})]), {})), store));
     gh.head = H2;
     gh.incrementStatus = "diverged";
@@ -1003,7 +1008,44 @@ describe("review-pull-request handler", () => {
     const second = new FakeThreads(scripted(reviewOf([]), {}));
     await handler.handle(event("ev2"), context(second, store));
     expect(second.spawned.some((s) => s.dispatchId.endsWith(":recheck:f1"))).toBe(true);
+    const prompt = second.spawned.find((s) => s.req.role === "pr-reviewer")?.req.prompt ?? "";
+    expect(prompt).toContain("A force-push or rebase rewrote its history");
+    expect(prompt).toContain("+line 20");
+    expect(store.pointers()?.rounds?.at(-1)).toMatchObject({ head: H2, mode: "incremental" });
+    expect(gh.reviews.get(store.pointers()?.reviewId ?? 0)?.body).toContain("the files changed since `1111111`, after a force-push");
+  });
+
+  it("after a rebase that left the PR's changes alone, rechecks nothing and sends no file", async () => {
+    const gh = new FakeGitHub();
+    const store = new FakeStore();
+    const handler = createReviewHandler({ fetch: gh.fetch });
+    // The rebase moved the hunk: only its position differs.
+    gh.filesAt[H1] = [{ filename: "a.ts", status: "modified", patch: PATCH_A.replace("@@ -1,3 +1,20 @@", "@@ -5,3 +5,20 @@ function a()") }];
+    await handler.handle(event("ev1"), context(new FakeThreads(scripted(reviewOf([finding({})]), {})), store));
+    gh.head = H2;
+    gh.incrementStatus = "diverged";
+    gh.incrementFiles = [];
+    const second = new FakeThreads(scripted(reviewOf([]), {}));
+    await handler.handle(event("ev2"), context(second, store));
+    expect(second.spawned.some((s) => s.dispatchId.includes(":recheck:"))).toBe(false);
+    const prompt = second.spawned.find((s) => s.req.role === "pr-reviewer")?.req.prompt ?? "";
+    expect(prompt).toContain("A force-push or rebase rewrote its history");
+    expect(prompt).not.toContain("+line 20");
+    expect(store.pointers()?.findings.find((f) => f.id === "f1")?.status).toBe("open");
+  });
+
+  it("reviews the whole PR again after a force-push when GitHub no longer has the reviewed head", async () => {
+    const gh = new FakeGitHub();
+    const store = new FakeStore();
+    const handler = createReviewHandler({ fetch: gh.fetch });
+    await handler.handle(event("ev1"), context(new FakeThreads(scripted(reviewOf([finding({})]), {})), store));
+    gh.head = H2;
+    gh.gone.add(H1);
+    const second = new FakeThreads(scripted(reviewOf([]), {}));
+    await handler.handle(event("ev2"), context(second, store));
+    expect(second.spawned.some((s) => s.dispatchId.endsWith(":recheck:f1"))).toBe(true);
     expect(second.spawned.find((s) => s.req.role === "pr-reviewer")?.req.prompt).not.toContain("Follow-up review");
+    expect(store.pointers()?.rounds?.at(-1)).toMatchObject({ head: H2, mode: "full" });
   });
 
   it("does nothing for a head it already reviewed", async () => {
@@ -1784,3 +1826,18 @@ describe("review-pull-request handler: learning on close", () => {
   });
 });
 
+
+describe("changedPullFiles", () => {
+  const file = (filename: string, patch?: string) => ({ filename, status: "modified", additions: 1, deletions: 0, ...(patch !== undefined ? { patch } : {}) });
+
+  it("ignores hunk positions and counts changed, added, removed and unrendered files", () => {
+    const before = [file("same.ts", "@@ -1,2 +1,3 @@ fn\n a\n+b"), file("edited.ts", "@@ -1 +1 @@\n+x"), file("dropped.ts", "@@ -1 +1 @@\n+y"), file("binary.png")];
+    const after = [file("same.ts", "@@ -9,2 +9,3 @@ other\n a\n+b"), file("edited.ts", "@@ -1 +1 @@\n+z"), file("added.ts", "@@ -0,0 +1 @@\n+w"), file("binary.png")];
+    expect([...(changedPullFiles(before, after) ?? [])].sort()).toEqual(["added.ts", "binary.png", "dropped.ts", "edited.ts"]);
+  });
+
+  it("cannot tell when GitHub listed the most files it lists", () => {
+    const before = Array.from({ length: 300 }, (_, i) => file(`f${i}.ts`, "@@ -1 +1 @@\n+x"));
+    expect(changedPullFiles(before, before)).toBeUndefined();
+  });
+});

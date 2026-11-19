@@ -83,6 +83,7 @@ export {
   acceptsEvent,
   createReviewHandler,
   excluded,
+  changedPullFiles,
   flaggedCodeChanged,
   focusRole,
   MANUAL_REVIEW_EVENT,
