@@ -17,6 +17,7 @@ import { eq } from "drizzle-orm";
 import { agentSessions } from "../schema/index.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
 import type { CreateSessionResponse, PresenceStepResponse } from "../wire/types.js";
+import { VOTE_READ_DELAYS_MS } from "../services/passkey-approval/verify.js";
 import { presenceDeps, type PresenceDeps } from "./decision-passkey.js";
 
 let api: TestApi | undefined;
@@ -64,7 +65,9 @@ async function setup() {
     if (!found) throw new Error("no such activity");
     return found;
   };
+  const sleeps: number[] = [];
   Object.assign(presenceDeps, {
+    sleep: async (ms: number) => { sleeps.push(ms); },
     turnkey: () => turnkey,
     config: () => ({ organizationId: "parent", apiPublicKey: "02aa", apiPrivateKey: "bb", apiBaseUrl: "https://turnkey.test", assurance: "presence" }),
     forward: async (_base: string, req: { body: string }): Promise<TurnkeyActivity> => {
@@ -81,7 +84,7 @@ async function setup() {
     },
   } satisfies Partial<PresenceDeps>);
   const base = `${api.baseUrl}/api/sessions/${sessionId}/decisions/g1`;
-  return { sessionId, base, forwarded, store, activities };
+  return { sessionId, base, forwarded, store, activities, turnkey, sleeps };
 }
 
 const json = { "Content-Type": "application/json" };
@@ -143,6 +146,50 @@ describe("passkey approval", () => {
     const approval = gate?.resolution?.approval;
     expect(approval?.id).toMatch(/^apr_/);
     expect(approval?.approved_until).toBe(approval?.approved_at);
+  });
+
+  it("reads the activity again until Turnkey shows the passkey's vote, then resolves", async () => {
+    const { base, sessionId, store, activities, turnkey, sleeps } = await setup();
+    let reads = 0;
+    turnkey.getActivity = async ({ activityId }) => {
+      reads += 1;
+      const found = activities.get(activityId);
+      if (!found) throw new Error("no such activity");
+      return reads === 1 ? { ...found, votes: [] } : found;
+    };
+    const step = (await (await fetch(`${base}/passkey`)).json()) as PresenceStepResponse;
+    if (step.done) throw new Error("expected a step");
+    const ok = await fetch(`${base}/passkey`, {
+      method: "POST", headers: json,
+      body: JSON.stringify({ body: step.body, stampHeaderName: "X-Stamp-WebAuthn", stampHeaderValue: "s" }),
+    });
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toEqual({ done: true });
+    expect(reads).toBe(2);
+    expect(sleeps).toEqual([VOTE_READ_DELAYS_MS[0]]);
+    expect((await store.getDecisionGate(sessionId, "g1"))?.status).toBe("resolved");
+  });
+
+  it("refuses after a bounded wait when Turnkey never shows the passkey's vote", async () => {
+    const { base, sessionId, store, activities, turnkey, sleeps } = await setup();
+    let reads = 0;
+    turnkey.getActivity = async ({ activityId }) => {
+      reads += 1;
+      const found = activities.get(activityId);
+      if (!found) throw new Error("no such activity");
+      return { ...found, votes: [] };
+    };
+    const step = (await (await fetch(`${base}/passkey`)).json()) as PresenceStepResponse;
+    if (step.done) throw new Error("expected a step");
+    const res = await fetch(`${base}/passkey`, {
+      method: "POST", headers: json,
+      body: JSON.stringify({ body: step.body, stampHeaderName: "X-Stamp-WebAuthn", stampHeaderValue: "s" }),
+    });
+    expect(res.ok).toBe(false);
+    expect(JSON.stringify(await res.json())).toContain("did not record your passkey's approval");
+    expect(reads).toBe(VOTE_READ_DELAYS_MS.length + 1);
+    expect(sleeps).toEqual(VOTE_READ_DELAYS_MS);
+    expect((await store.getDecisionGate(sessionId, "g1"))?.status).toBe("pending");
   });
 
   it("refuses a forged approval record that Turnkey cannot back", async () => {

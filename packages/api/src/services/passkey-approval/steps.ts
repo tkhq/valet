@@ -125,11 +125,16 @@ export interface VerifiedTap {
   authenticator?: { scheme: string; public_key: string };
 }
 
+/** The passkey user's APPROVED vote on the activity, if Turnkey shows one. */
+export function approvedVote(activity: TurnkeyActivity, passkeyUserId: string): TurnkeyActivity["votes"][number] | undefined {
+  return activity.votes.find((v) => v.userId === passkeyUserId && v.selection === "VOTE_SELECTION_APPROVED");
+}
+
 /** The verified tap from a completed activity, after checking it is the passkey's signature over `payloadHex`. */
 export function verifiedTap(activity: TurnkeyActivity, step: PresenceStep, signer: PresenceSigner, now: number): VerifiedTap | string {
   const signature = verifiedSignature(activity, step, signer);
   if (typeof signature === "string") return signature;
-  const vote = activity.votes.find((v) => v.userId === signer.passkeyUserId && v.selection === "VOTE_SELECTION_APPROVED");
+  const vote = approvedVote(activity, signer.passkeyUserId);
   return {
     signature,
     activityId: activity.id,
@@ -144,7 +149,7 @@ export function verifiedSignature(activity: TurnkeyActivity, step: PresenceStep,
   if (activity.type !== SIGN_ACTIVITY) return `Turnkey ran ${activity.type}, not a signature. Sign again from the card.`;
   if (activity.organizationId !== signer.organizationId) return "Turnkey signed in another organization. Sign again from the card.";
   if (activity.status !== "ACTIVITY_STATUS_COMPLETED") return `Turnkey did not complete the signature (${activity.status}). Sign again from the card.`;
-  if (!activity.votes.some((v) => v.userId === signer.passkeyUserId && v.selection === "VOTE_SELECTION_APPROVED")) {
+  if (!approvedVote(activity, signer.passkeyUserId)) {
     return "Turnkey did not record your passkey's approval on this signature. Sign again with the passkey you set up in Settings.";
   }
   const sig = activity.result?.signRawPayloadResult;

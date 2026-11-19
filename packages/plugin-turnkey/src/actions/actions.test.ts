@@ -28,6 +28,7 @@ import {
   buildTurnkeyActionPlugin,
   NO_GITHUB_MESSAGE,
   NOT_ENROLLED_MESSAGE,
+  NO_PERSON_MESSAGE,
   PRESENCE_MODE_MESSAGE,
   REENROLL_MESSAGE,
   REJECTED_MESSAGE,
@@ -144,8 +145,13 @@ describe("turnkey.sign_commits", () => {
 
     const gate = s.ctx.gates[0];
     expect(gate?.title).toBe("Sign 2 commits");
+    // The card names whose key signs: the requester's own GitHub account.
+    expect(gate?.body).toContain("GitHub shows them as signed by octo.");
+    expect(res.success && res.data).toMatchObject({ signedAs: "octo" });
     expect(gate?.context).toMatchObject({
       assurance: "presence",
+      // Only the requester answers the card, Reject included.
+      approver: { userId: "user-1" },
       presence: {
         kind: "git_commits",
         repo: "tkhq/valet",
@@ -250,6 +256,16 @@ describe("turnkey.sign_commits", () => {
     await s.enroll();
     expect(await s.sign.execute(signArgs, s.ctx)).toEqual({ success: false, error: SIGNING_KEY_MISSING_MESSAGE });
     expect(s.ctx.gates).toHaveLength(0);
+  });
+
+  it("refuses a turn with no person behind it, before opening a gate", async () => {
+    for (const ctx of [{ userId: "team:team-1" }, { externalSender: true }]) {
+      const s = setup();
+      await s.enroll();
+      const turn = Object.assign(s.ctx, ctx);
+      expect(await s.sign.execute(signArgs, turn)).toEqual({ success: false, error: NO_PERSON_MESSAGE });
+      expect(turn.gates).toHaveLength(0);
+    }
   });
 
   it("names the fix for a missing, old, or session-mode enrollment", async () => {

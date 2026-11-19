@@ -86,6 +86,7 @@ import {
   GITHUB_INSTALLATION_CREDENTIAL_SERVICE,
   GitHubAuthError,
   resolveInstallationApiToken,
+  resolveUserApiToken,
 } from "../services/github-tokens.js";
 import {
   githubTokenArgsForOwner,
@@ -2259,6 +2260,29 @@ export class EngineHost {
       }
       const owner: CredentialOwner = actsAsMember ? { type: "user", id: userId } : sessionOwner;
       const scopes = onePasswordScopesFor(actsAsMember ? undefined : owner.type, owner.type === "team" ? owner.id : undefined);
+      if (use.ownAccount) {
+        // An action that acts as the person (commit signing) reads the turn
+        // author's own connection, shared with the team or not. It never
+        // falls back to the team row, another member's share, the org, or
+        // the app: each of those carries someone else's identity.
+        const self = use.externalSender ? undefined : use.actorId ?? (sessionOwner.type === "user" ? sessionOwner.id : undefined);
+        if (!self) return null;
+        if (service === "github" && tokenDeps && db) {
+          const own = await resolveUserApiToken(
+            { db, credentials, key: tokenDeps.key, apiUrl: tokenDeps.apiUrl, githubUrl: tokenDeps.githubUrl, fetchImpl: tokenDeps.fetchImpl, now: tokenDeps.now },
+            orgId,
+            self,
+          );
+          return own ? { type: "oauth2", accessToken: own.token, source: { kind: "personal" } } : null;
+        }
+        const { credential: own, source } = await readUserCredential(
+          { credentials, onePassword },
+          { orgId, userId: self, scopes: onePasswordScopesFor("user") },
+          service,
+          "none",
+        );
+        return own && source?.kind === "personal" ? { ...own, source } : null;
+      }
       if (isAppCredentialRowService(service)) {
         // A native integration's app identity (`linear:app`), the last step
         // of the Part B order for every owner. The org owns it, so the
