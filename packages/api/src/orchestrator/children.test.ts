@@ -2470,6 +2470,33 @@ describe("ChildWatcher", () => {
       expect((await c.engineStore.getWakeup(`wk_child_events:${c.watch.childSessionId}`))?.status).toBe("done");
     });
 
+    it("marks a plugin child's result delivered when it settles", async () => {
+      const c = await armedChild("plugin-delivered");
+      const db = api!.providers.db;
+      await db.update(childWatches).set({ reportToParent: false }).where(eq(childWatches.childSessionId, c.child.id));
+      c.watcher.arm(c.watch);
+      await waitFor(c.settled);
+      // The plugin reads the result from the store, so nothing is left owed.
+      expect((await c.engineStore.getQueueItem(c.child.id, c.watch.queueItemId))?.childResultDelivery).toBe("delivered");
+      expect(await c.settledSignal()).toBeUndefined();
+    });
+
+    it("boot recovery resolves a plugin child's owed result without building its session", async () => {
+      const c = await armedChild("plugin-boot");
+      const db = api!.providers.db;
+      // A plugin child from before the fix: settled, its result still marked owed.
+      await db.update(childWatches).set({ reportToParent: false, settled: true, eventsStartedAt: 1 })
+        .where(eq(childWatches.childSessionId, c.child.id));
+      // A claimed delegation is marked owed; this one was settled unclaimed.
+      await db.execute(sql`UPDATE engine_queue_items SET child_result_delivery = 'pending' WHERE session_id = ${c.child.id}`);
+      expect((await c.engineStore.getQueueItem(c.child.id, c.watch.queueItemId))?.childResultDelivery).toBe("pending");
+      const builds = vi.spyOn(api!.providers.engineHost, "sessionFor");
+      await testChildWatcher(c.deps).rearm();
+      expect((await c.engineStore.getQueueItem(c.child.id, c.watch.queueItemId))?.childResultDelivery).toBe("delivered");
+      expect(builds.mock.calls.filter(([id]) => id === c.child.id)).toHaveLength(0);
+      expect(await c.settledSignal()).toBeUndefined();
+    });
+
     it("records the admitted report turn when boot recovery settles the watch", async () => {
       // A workflow step finds its child's report turn from this column.
       const c = await armedChild("restart-report");

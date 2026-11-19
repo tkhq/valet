@@ -1143,6 +1143,8 @@ export class ChildWatcher {
       // the parent thread gets no child.settled turn. Its sandbox goes like
       // any settled child's: a live sandbox counts against the parent's
       // child cap, and the plugin reads the result from the store.
+      // Nothing is owed after this, so boot recovery skips the turn.
+      await this.deps.engineStore.resolveChildResultDelivery(watch.childSessionId, itemId, "delivered");
       await this.markSettled(watch.childSessionId, watch.queueItemId);
       await this.parkChildSandbox(watch.childSessionId);
       return;
@@ -1618,6 +1620,13 @@ export class ChildWatcher {
       if (turn.updatedAt < row.eventsStartedAt || (!isSignalSubmission(turn) && !isParentDelegation(turn))
         || turn.outcome?.outcome === "merged" || turn.outcome?.outcome === "superseded") {
         if (turn.childResultDelivery === "pending") await this.deps.engineStore.resolveChildResultDelivery(row.childSessionId, turn.id, "denied");
+        continue;
+      }
+      if (!row.reportToParent) {
+        // A plugin's child: the plugin reads the result from the store, so
+        // nothing goes to the parent. Resolve it here; `attempt` would build
+        // the child's session only to find that out.
+        await this.deps.engineStore.resolveChildResultDelivery(row.childSessionId, turn.id, "delivered");
         continue;
       }
       if (await this.deps.engineStore.getQueueItemByDispatchId(row.parentSessionId, settledReplyId(row.childSessionId, turn.id))) {
