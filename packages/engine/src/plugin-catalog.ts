@@ -6,6 +6,7 @@ import { matchesSearchQuery, parseSearchQuery, rankSearchResults } from "@valet/
 import { builtinTools } from "./builtin-tools/index.js";
 import type {
   CredentialProvider,
+  CredentialRead,
   DecisionAction,
   DecisionGateRequest,
   DecisionResolution,
@@ -2109,9 +2110,12 @@ function scopedCredentialProvider(
   forAction = false,
 ): ToolContext["credentials"] {
   return {
-    get: (service?: string) => forAction
-      ? ctx.credentials.get(service ?? defaultService, { forAction: true })
-      : ctx.credentials.get(service ?? defaultService),
+    get: (service?: string, read?: CredentialRead) => {
+      const purpose: CredentialRead = { ...(forAction ? { forAction: true } : {}), ...(read?.ownAccount ? { ownAccount: true } : {}) };
+      return Object.keys(purpose).length > 0
+        ? ctx.credentials.get(service ?? defaultService, purpose)
+        : ctx.credentials.get(service ?? defaultService);
+    },
     request: (service: string, reason: string) => ctx.credentials.request(service, reason),
   };
 }

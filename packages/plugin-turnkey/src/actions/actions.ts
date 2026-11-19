@@ -60,7 +60,9 @@ export const NOT_ENROLLED_MESSAGE =
 export const REENROLL_MESSAGE =
   "Your commit signing setup is from an older version. Open Settings, Commit signing, choose Set up again, then run this again.";
 export const NO_GITHUB_MESSAGE =
-  "Missing GitHub access token. Connect GitHub under Settings, Connected accounts, then run this again.";
+  "Connect your own GitHub account in Integrations, then run this again. Commit signing uses your GitHub identity, also in team threads.";
+export const NO_PERSON_MESSAGE =
+  "No person asked for this turn, so no one can approve signing. Do not push yet. Tell the user to ask for signing in their thread, then run this again in that turn.";
 export const REJECTED_MESSAGE =
   "The user rejected signing for this branch. Do not retry. Push the commits unsigned, or ask the user what they want.";
 export const NO_STORE_MESSAGE = "This session has no plugin store, so signing keys cannot be recorded. Report this to an admin.";
@@ -116,21 +118,33 @@ async function readEnrollment(ctx: PluginActionContext): Promise<EnrollmentDoc |
   return doc?.doc ?? null;
 }
 
-type Ready = { enrollment: EnrollmentDoc; key: PersonSigningKey; github: GitHubAccount; committerEmail: string };
+/**
+ * A follow-up or background turn in a team thread, or a child it spawned,
+ * runs as the team (`team:<id>`), and a channel sender with no Valet account
+ * acts for nobody. Neither has a passkey to approve with.
+ */
+function askedByPerson(ctx: PluginActionContext): boolean {
+  return !ctx.externalSender && !/^(team|org):/.test(ctx.userId);
+}
+
+type Ready = { enrollment: EnrollmentDoc; key: PersonSigningKey; github: GitHubAccount; login: string; committerEmail: string };
 
 /** The checks both modes share: configured, enrolled with a person key, GitHub connected, key on GitHub. */
 async function readyToSign(ctx: PluginActionContext, deps: SigningDeps): Promise<Ready | PluginActionResult> {
   if (!loadTurnkeyConfig(deps.env)) return fail(NOT_CONFIGURED_MESSAGE);
   if (!ctx.pluginStore) return fail(NO_STORE_MESSAGE);
+  if (!askedByPerson(ctx)) return fail(NO_PERSON_MESSAGE);
   const enrollment = await readEnrollment(ctx);
   if (!enrollment) return fail(NOT_ENROLLED_MESSAGE);
   if (!enrollment.signingKey) return fail(REENROLL_MESSAGE);
-  const credential = await ctx.credentials.get("github");
+  // The requester's own GitHub account, never the team's, a teammate's, or
+  // the GitHub App's: the signature and the noreply committer are theirs.
+  const credential = await ctx.credentials.get("github", { ownAccount: true });
   if (!credential?.accessToken) return fail(NO_GITHUB_MESSAGE);
   const github = deps.github(credential.accessToken);
   const login = await github.login();
   if (!(await deps.keyListed(login, enrollment.signingKey.publicKey))) return fail(SIGNING_KEY_MISSING_MESSAGE);
-  return { enrollment, key: enrollment.signingKey, github, committerEmail: await github.noreplyEmail() };
+  return { enrollment, key: enrollment.signingKey, github, login, committerEmail: await github.noreplyEmail() };
 }
 
 async function git(sandbox: Sandbox, path: string, command: string, what: string): Promise<string> {
@@ -265,6 +279,7 @@ export function buildTurnkeyActionPlugin(overrides: Partial<SigningDeps> = {}): 
         data: {
           ...written,
           ...(reused ? { reused: true } : {}),
+          signedAs: ready.login,
           next: `${branch} now points at the signed commits. Push with: git push --force-with-lease origin ${branch}`,
         },
       });
@@ -288,10 +303,14 @@ export function buildTurnkeyActionPlugin(overrides: Partial<SigningDeps> = {}): 
         branch,
         headSha,
         commits: cards,
+        signer: ready.login,
         context: {
           assurance: "presence",
           presence: { kind: GIT_COMMITS_KIND, repo, branch, commits: cards },
           signing,
+          // Only the requester answers, Reject included. A teammate in a
+          // team thread sees who the card waits on.
+          approver: { userId: ctx.userId, ...(ctx.actor?.id === ctx.userId && ctx.actor.name ? { name: ctx.actor.name } : {}) },
         },
       });
       const resolution = await ctx.requestDecision(request);

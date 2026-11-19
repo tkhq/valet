@@ -11,6 +11,7 @@ export interface PresenceDeps {
   turnkey: TurnkeyOpsFactory;
   forward: ForwardStamped;
   now: () => number;
+  sleep: (ms: number) => Promise<void>;
 }
 
 export const presenceDeps: PresenceDeps = {
@@ -18,4 +19,5 @@ export const presenceDeps: PresenceDeps = {
   turnkey: turnkeyOps,
   forward: forwardStamped,
   now: () => Date.now(),
+  sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
 };

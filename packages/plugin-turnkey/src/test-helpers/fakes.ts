@@ -7,6 +7,7 @@
 import { SESSION_KEY_FILE } from "../sandbox.js";
 import type {
   Credential,
+  CredentialRead,
   DecisionGateRequest,
   DecisionResolution,
   PluginActionContext,
@@ -169,6 +170,8 @@ export function memoryPluginStore(): PluginStore & { dump(): Map<string, PluginS
 }
 
 export interface FakeContextOptions {
+  /** The requester's own GitHub token (an `ownAccount` read). A plain read
+   * answers with an installation token, as a team thread does. */
   githubToken?: string | null;
   decision?: (req: DecisionGateRequest) => Promise<DecisionResolution>;
   pluginStore?: PluginStore;
@@ -182,7 +185,8 @@ export function fakeContext(opts: FakeContextOptions = {}): PluginActionContext 
     throw new Error("not implemented in the plugin-turnkey test fixture");
   };
   const token = opts.githubToken === undefined ? "gh-token" : opts.githubToken;
-  const credential: Credential | null = token === null ? null : { accessToken: token };
+  const credential: Credential | null = token === null ? null : { accessToken: token, source: { kind: "personal" } };
+  const installation: Credential = { accessToken: "installation-token", source: { kind: "app" } };
   const execs: string[] = [];
   const gates: DecisionGateRequest[] = [];
   return {
@@ -196,7 +200,7 @@ export function fakeContext(opts: FakeContextOptions = {}): PluginActionContext 
     threadId: "thread-1",
     decisionGateId: "gate-1",
     credentials: {
-      get: async (service?: string) => (service === "github" ? credential : null),
+      get: async (service?: string, read?: CredentialRead) => (service === "github" ? (read?.ownAccount ? credential : installation) : null),
       request: async () => notImplemented(),
     },
     ...(opts.pluginStore ? { pluginStore: opts.pluginStore } : {}),

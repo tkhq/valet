@@ -1128,6 +1128,11 @@ export interface CredentialRead {
    * and the `list_tools` probe leave it unset. A host counts per-action
    * outcomes (such as a fallback to the app token) on these reads only. */
   forAction?: boolean;
+  /** Only the turn author's own connection, shared with the team or not.
+   * Never the team's row, another member's share, the org's, or the app's.
+   * For an action that acts as the person, such as commit signing, where
+   * another account would carry someone else's identity. */
+  ownAccount?: boolean;
 }
 
 /** Who a credential read acts for: the turn's author and thread. A team host
@@ -1143,6 +1148,8 @@ export interface CredentialUse {
   queueItemId?: string;
   /** Set for one read: the read is an action's own (`CredentialRead`). */
   forAction?: boolean;
+  /** Set for one read: only the author's own connection (`CredentialRead`). */
+  ownAccount?: boolean;
 }
 
 export interface StoredCredential {

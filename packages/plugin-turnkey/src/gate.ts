@@ -73,6 +73,8 @@ export function commitSigningGateRequest(args: {
   branch: string;
   headSha: string;
   commits: Array<{ sha: string }>;
+  /** The requester's GitHub login. Their key signs, and only they can approve. */
+  signer: string;
   context: Record<string, unknown>;
 }): DecisionGateRequest {
   const n = args.commits.length;
@@ -81,7 +83,7 @@ export function commitSigningGateRequest(args: {
     title: n === 1 ? "Sign 1 commit" : `Sign ${n} commits`,
     body:
       `Sign ${n === 1 ? "this commit" : `these ${n} commits`} in ${args.repo}, branch ${args.branch}, with your passkey?\n` +
-      `Your passkey asks once per commit.`,
+      `GitHub shows ${n === 1 ? "it" : "them"} as signed by ${args.signer}. Your passkey asks once per commit.`,
     actions: [
       { id: "approve", label: "Sign with passkey", style: "primary", approves: true },
       { id: "reject", label: "Reject", style: "danger" },

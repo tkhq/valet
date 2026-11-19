@@ -2061,7 +2061,11 @@ export class Session {
       async get(service?: string, purpose?: CredentialRead) {
         if (!resolver && !credStore) return null;
         if (!service) return null; // session-level provider has no default service
-        const stored = await read(service, purpose?.forAction ? { ...use, forAction: true } : use);
+        const stored = await read(service, {
+          ...use,
+          ...(purpose?.forAction ? { forAction: true } : {}),
+          ...(purpose?.ownAccount ? { ownAccount: true } : {}),
+        });
         if (!stored) return null;
         return {
           accessToken: credentialSecret(stored) ?? "",

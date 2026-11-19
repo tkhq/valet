@@ -12,10 +12,11 @@
 import type { DecisionGate, DecisionResolution } from "@valet/engine";
 import { signingContextOf } from "@valet/plugin-turnkey/presence";
 import { COLLECTIONS, DEFAULT_KEY, PLUGIN_NAME, type EnrollmentDoc } from "@valet/plugin-turnkey/store";
+import type { TurnkeyActivity, TurnkeyOps } from "@valet/plugin-turnkey/turnkey-client";
 import type { AppQueryable } from "../../lib/drizzle.js";
 import { pluginStore } from "../plugin-store.js";
 import { presenceDeps } from "./deps.js";
-import { nextPresenceStep, verifiedTap, type PresenceSigner } from "./steps.js";
+import { approvedVote, nextPresenceStep, verifiedTap, type PresenceSigner } from "./steps.js";
 
 /** Who had to sign: from the gate for commit signing, else the approver's enrollment. */
 async function expectedSigner(db: AppQueryable, gate: DecisionGate, resolution: DecisionResolution): Promise<PresenceSigner | null> {
@@ -31,6 +32,26 @@ async function expectedSigner(db: AppQueryable, gate: DecisionGate, resolution: 
     publicKeyHex: enrollment.signingKey.publicKeyHex,
     passkeyUserId: enrollment.passkeyUserId,
   };
+}
+
+/** Waits between reads of a completed activity that does not show the passkey's vote yet: five reads in about 4 seconds. */
+export const VOTE_READ_DELAYS_MS = [250, 500, 1000, 2000];
+
+/**
+ * Reads the activity back from Turnkey. A read right after the passkey tap
+ * can show the activity COMPLETED before it shows the passkey's vote, so a
+ * completed activity with no vote from the signer is read again a few times.
+ * If the vote does not show, the check that follows refuses the approval.
+ */
+async function readBack(ops: Pick<TurnkeyOps, "getActivity">, signer: PresenceSigner, activityId: string): Promise<TurnkeyActivity | null> {
+  const read = () => ops.getActivity({ subOrgId: signer.organizationId, activityId }).catch(() => null);
+  let activity = await read();
+  for (const delay of VOTE_READ_DELAYS_MS) {
+    if (!activity || activity.status !== "ACTIVITY_STATUS_COMPLETED" || approvedVote(activity, signer.passkeyUserId)) break;
+    await presenceDeps.sleep(delay);
+    activity = (await read()) ?? activity;
+  }
+  return activity;
 }
 
 export function presenceApprovalVerifier(db: AppQueryable) {
@@ -49,7 +70,7 @@ export function presenceApprovalVerifier(db: AppQueryable) {
     for (const entry of proof.activities) {
       const step = nextPresenceStep(gate, signatures);
       if (!step) return "The proof lists more passkey taps than this approval has steps.";
-      const activity = await ops.getActivity({ subOrgId: signer.organizationId, activityId: entry.activity_id }).catch(() => null);
+      const activity = await readBack(ops, signer, entry.activity_id);
       if (!activity) return `Turnkey has no activity ${entry.activity_id}. Approve it again with your passkey.`;
       const tap = verifiedTap(activity, step, signer, presenceDeps.now());
       if (typeof tap === "string") return tap;
