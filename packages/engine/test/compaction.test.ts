@@ -741,11 +741,13 @@ describe("compaction: pruning persists via updateEntry", () => {
     thread.rehydrateTranscript(await store.getEntries(session.id, thread.id));
 
     const receipt = await session.prompt(OVER_BUDGET_PROMPT);
+    // The prune can bring the context under budget on its own, so wait for
+    // the submission to settle rather than for a compaction.
     await waitFor(
       () =>
         events.some(
           (e) =>
-            e.event.type === "compaction_end" && e.event.threadId === receipt.threadId,
+            e.event.type === "submission_settled" && e.event.queueItemId === receipt.queueItemId,
         ),
     );
 
@@ -804,7 +806,7 @@ describe("compaction: a prune before a request", () => {
       compaction: { autoContinue: false, pruneProtectTokens: 31_000, pruneMinimumTokens: 1_000 },
     });
     const thread = session.thread();
-    const oldOutput = "x".repeat(340_000);
+    const oldOutput = "x".repeat(400_000);
     const priorTurn = (n: number, parentId: string | null): SessionEntry[] => [
       { id: `u-${n}`, sessionId: session.id, threadId: thread.id, parentId, type: "message", role: "user", content: `prompt ${n}`, createdAt: 2 * n },
       {
@@ -2050,8 +2052,11 @@ describe("compaction: summarizer input covers the head", () => {
     await store.appendEntries(session.id, thread.id, unreadableHead(session.id, thread.id));
     thread.rehydrateTranscript(await store.getEntries(session.id, thread.id));
 
+    // About 2,000 tokens: the head plus one prompt fits the budget, so turn 1
+    // reaches the provider; each later turn adds a prompt and goes over it.
+    const prompt = "third prompt " + "x".repeat(8_000);
     for (let turn = 1; turn <= 3; turn++) {
-      const receipt = await session.prompt(OVER_BUDGET_PROMPT);
+      const receipt = await session.prompt(prompt);
       await waitFor(
         () =>
           events.filter(

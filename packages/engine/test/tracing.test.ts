@@ -126,7 +126,10 @@ describe("engine distributed tracing", () => {
     expect(llmSpans).toHaveLength(2);
     for (const l of llmSpans) {
       expect(l.parentSpanContext?.spanId).toBe(turn!.spanContext().spanId);
-      expect(l.attributes["gen_ai.usage.input_tokens"]).toBeGreaterThan(0);
+      // The faux provider books the prompt as simulated cache tokens, so
+      // uncached input can be 0; output tokens show the round's usage landed.
+      expect(l.attributes["gen_ai.usage.input_tokens"]).toBeTypeOf("number");
+      expect(l.attributes["gen_ai.usage.output_tokens"]).toBeGreaterThan(0);
     }
     // Round 1 made the tool call; round 2 made none.
     expect(llmSpans.map((l) => l.attributes["valet.llm.tool_calls"]).sort()).toEqual([0, 1]);
@@ -145,7 +148,8 @@ describe("engine distributed tracing", () => {
     expect(run!.links[0].context.spanId).toBe(http!.spanContext().spanId);
 
     // Attributes: usage on the turn, outcome on run+settle, queue wait on run.
-    expect(turn!.attributes["gen_ai.usage.input_tokens"]).toBeGreaterThan(0);
+    expect(turn!.attributes["gen_ai.usage.input_tokens"]).toBeTypeOf("number");
+    expect(turn!.attributes["gen_ai.usage.output_tokens"]).toBeGreaterThan(0);
     expect(turn!.attributes["gen_ai.request.model"]).toBe(faux.getModel().id);
     expect(run!.attributes["valet.submission.outcome"]).toBe("completed");
     expect(settle!.attributes["valet.submission.outcome"]).toBe("completed");

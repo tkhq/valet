@@ -92,7 +92,8 @@ describe("engine traces: per-turn usage/cost", () => {
     if (assistant?.type !== "message") throw new Error("no assistant entry");
     expect(assistant.usage).toBeDefined();
     expect(assistant.usage!.total).toBeGreaterThan(0);
-    expect(assistant.usage!.input).toBeGreaterThan(0);
+    // The faux provider books the prompt as simulated cache tokens.
+    expect(assistant.usage!.input + assistant.usage!.cacheRead + assistant.usage!.cacheWrite).toBeGreaterThan(0);
     expect(assistant.cost).toBeUndefined(); // faux is unpriced — null, not $0
 
     // Event: turn_end carries the SAME snapshot plus model + duration.
