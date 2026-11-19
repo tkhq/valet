@@ -164,6 +164,7 @@ import {
   type SummarizeResult,
 } from "./compaction.js";
 import type {
+  GitPushFacts,
   ActiveModelState,
   AwaitResultOptions,
   BranchSummaryEntry,
@@ -7722,6 +7723,16 @@ export class Thread {
       pluginStoreFactory: session.options.pluginStoreFactory,
       browserPolicy: session.options.browserPolicy,
       extractDocument: session.options.extractDocument,
+      ...(session.options.gitPushNote ? {
+        gitPushNote: (push: GitPushFacts) => session.options.gitPushNote!(push, {
+          userId: actorId,
+          orgId: session.options.orgId,
+          sessionId: session.id,
+          threadId: this.id,
+          ...(this.runningItem?.author?.externalSender ? { externalSender: true } : {}),
+          ...(this.isUnattendedTurn() ? { unattended: true } : {}),
+        }),
+      } : {}),
       threadFiles: session.options.threadFiles?.({ orgId: session.options.orgId, sessionId: session.id, threadId: this.id }),
       queueItemId: this.runningItem?.id,
       // The running submission's channel origin, when it came from a channel,

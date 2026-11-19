@@ -1,5 +1,6 @@
 import { hostedToolUsageSink } from "../services/external-usage.js";
 import { presenceApprovalVerifier } from "../services/passkey-approval/verify.js";
+import { signingPushNote } from "../services/signing-push-note.js";
 import { modelFetchFor } from "../lib/outbound-url.js";
 import { buildToolFocusTool, workflowToolFocus } from "../plugins/tool-focus.js";
 import { HOME_THREAD_CONTEXT, HOME_THREAD_KEY } from "../home/context.js";
@@ -1224,6 +1225,11 @@ export class EngineHost {
     return promise;
   }
 
+  /** Sign by default: the note after a successful `git push`, on every session the host builds, children included. */
+  private gitPushNoteOptions(): { gitPushNote?: ReturnType<typeof signingPushNote> } {
+    return this.opts.db ? { gitPushNote: signingPushNote(this.opts.db, publicUrlFromEnv(process.env)) } : {};
+  }
+
   private async buildSession(sessionId: string, meta: SessionMeta): Promise<Session> {
     const configEpoch = this.buildEpoch.get(sessionId) ?? 0;
     // Security runner wiring (Valet Security spec §Tools): a session whose
@@ -1480,6 +1486,7 @@ export class EngineHost {
             ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
             ...this.browserOptions(sessionId),
             extractDocument: extractDocumentText,
+            ...this.gitPushNoteOptions(),
             threadSystemContext: threadLink,
             ...this.wakeupsOptions(sessionId, () => builtSession, { orgId: meta.orgId, owner: principal }),
             ...this.leaseOptions(sessionId),
@@ -1522,6 +1529,7 @@ export class EngineHost {
           ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
           ...this.browserOptions(sessionId),
           extractDocument: extractDocumentText,
+          ...this.gitPushNoteOptions(),
           threadSystemContext: threadLink,
           ...this.wakeupsOptions(sessionId, () => builtSession, { orgId: meta.orgId, owner: principal }),
           ...this.leaseOptions(sessionId),
@@ -3366,6 +3374,7 @@ export class EngineHost {
       ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
       ...this.browserOptions(sessionId),
       extractDocument: extractDocumentText,
+      ...this.gitPushNoteOptions(),
       ...this.wakeupsOptions(sessionId, () => builtSession, { orgId: meta.orgId, owner: principal }),
       ...this.leaseOptions(sessionId),
       ...this.threadAccessOptions(sessionId),
@@ -4677,6 +4686,7 @@ export class EngineHost {
       ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
       ...this.browserOptions(childSessionId),
       extractDocument: extractDocumentText,
+      ...this.gitPushNoteOptions(),
       ...this.wakeupsOptions(childSessionId, () => builtSession, { orgId: opts.orgId, owner: opts.owner }),
       ...this.leaseOptions(childSessionId),
       ...this.threadAccessOptions(),
@@ -4924,6 +4934,7 @@ export class EngineHost {
       ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
       ...this.browserOptions(sessionId),
       extractDocument: extractDocumentText,
+      ...this.gitPushNoteOptions(),
       ...this.wakeupsOptions(sessionId, () => builtSession),
       ...this.leaseOptions(sessionId),
       ...this.threadAccessOptions(sessionId),

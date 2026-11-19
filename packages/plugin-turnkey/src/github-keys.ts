@@ -34,7 +34,7 @@ export interface GitHubAccount {
 }
 
 export const SIGNING_KEY_MISSING_MESSAGE =
-  "Your Valet signing key is not on your GitHub account yet. Open Settings, Commit signing, add the key on GitHub, then run this again.";
+  "Your Valet signing key is not on your GitHub account yet, so these commits cannot be signed. Leave the pushed commits unsigned and do not wait. Tell the user once to open Settings, Commit signing, and add the key on GitHub, then run this again after they do.";
 
 export function resolveGithubApiUrl(env: Record<string, string | undefined> = process.env): string {
   return (env.GITHUB_API_URL ?? "https://api.github.com").replace(/\/+$/, "");

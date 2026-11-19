@@ -41,6 +41,11 @@ export const COLLECTIONS = {
    * chain (`SigningHistoryDoc`), listed in Settings, Commit signing.
    */
   signingHistory: "signing_history",
+  /**
+   * Scope `session`, key `setup:<userId>`: the push note told the agent once
+   * that this person has not set up commit signing.
+   */
+  pushNotes: "push_notes",
 } as const;
 
 /** One passkey-signed chain, for the person's signing history. */
