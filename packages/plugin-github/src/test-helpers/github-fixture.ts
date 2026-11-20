@@ -88,6 +88,10 @@ export interface GithubFixtureHandlers {
   /** `GET /repos/:owner/:repo/branches` — receives the parsed query so a
    * fixture can assert `per_page`/`page`. */
   listBranches?: (owner: string, repo: string, query: Record<string, string>) => GithubFixtureResponse;
+  /** `GET /repos/:owner/:repo/compare/:basehead` */
+  compare?: (owner: string, repo: string, basehead: string) => GithubFixtureResponse;
+  /** `POST /repos/:owner/:repo/pulls` */
+  createPull?: (owner: string, repo: string, body: unknown) => GithubFixtureResponse;
 }
 
 export interface GithubFixture {
@@ -153,6 +157,11 @@ const DEFAULTS: Required<GithubFixtureHandlers> = {
     body: { total_count: 1, repositories: [{ full_name: "fixture-org/repo" }] },
   }),
   listBranches: () => ({ body: [{ name: "main" }] }),
+  compare: () => ({ body: { total_commits: 0, commits: [] } }),
+  createPull: (owner, repo) => ({
+    status: 201,
+    body: { number: 1, html_url: `https://github.com/${owner}/${repo}/pull/1`, title: "PR", state: "open", draft: false },
+  }),
 };
 
 function listenPort(server: ServerType): number {
@@ -348,6 +357,24 @@ export function startGithubFixture(handlerOverrides: GithubFixtureHandlers = {})
     record(c, { owner, repo });
     const { status, body } = handlers.listBranches(owner, repo, c.req.query());
     return c.json(body as object, status ?? 200);
+  });
+
+  app.get("/repos/:owner/:repo/compare/:basehead{.+}", (c) => {
+    const owner = c.req.param("owner");
+    const repo = c.req.param("repo");
+    const basehead = c.req.param("basehead");
+    record(c, { owner, repo, basehead });
+    const { status, body } = handlers.compare(owner, repo, basehead);
+    return c.json(body as object, status ?? 200);
+  });
+
+  app.post("/repos/:owner/:repo/pulls", async (c) => {
+    const owner = c.req.param("owner");
+    const repo = c.req.param("repo");
+    const body = await readJson(c);
+    record(c, { owner, repo }, body);
+    const { status, body: response } = handlers.createPull(owner, repo, body);
+    return c.json(response as object, status ?? 201);
   });
 
   app.get("/repos/:owner/:repo", (c) => {

@@ -136,6 +136,7 @@ async function loadOrgResponse(
     allowPublicArtifacts: row.allowPublicArtifacts,
     allowAnonymousImageBakes: row.allowAnonymousImageBakes,
     allowPersonalInstallations: row.allowPersonalInstallations,
+    requireSignedPullRequests: row.requireSignedPullRequests,
     compactionWindowTokens: row.compactionWindowTokens,
     plugins,
     loadedPlugins: engineHost.loadedPluginNames(),

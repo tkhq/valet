@@ -68,6 +68,9 @@ export const orgs = pgTable("orgs", {
   allowAnonymousImageBakes: boolean("allow_anonymous_image_bakes").notNull().default(false),
   /** Allow members to install the GitHub App on personal accounts. */
   allowPersonalInstallations: boolean("allow_personal_installations").notNull().default(true),
+  /** Valet opens a pull request only when GitHub shows every commit on its
+   * branch as Verified. Admin opt-in (`services/signed-pull-requests.ts`). */
+  requireSignedPullRequests: boolean("require_signed_pull_requests").notNull().default(false),
   /**
    * Context size, in tokens, that threads compact to stay under (the engine's
    * `compaction.contextBudgetTokens`). Null: the Valet default (200k). 0: no

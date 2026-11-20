@@ -984,6 +984,11 @@ WHERE r.status <> 'merged' ORDER BY l.org_id, l.subject_type, l.subject_id, l.di
     sql: 'ALTER TABLE "orgs" ADD COLUMN IF NOT EXISTS "allow_personal_installations" boolean NOT NULL DEFAULT true',
   },
   {
+    describe: "orgs.require_signed_pull_requests column",
+    probe: { kind: "column", table: "orgs", column: "require_signed_pull_requests" },
+    sql: 'ALTER TABLE "orgs" ADD COLUMN IF NOT EXISTS "require_signed_pull_requests" boolean NOT NULL DEFAULT false',
+  },
+  {
     describe: "orgs.compaction_window_tokens column",
     probe: { kind: "column", table: "orgs", column: "compaction_window_tokens" },
     sql: 'ALTER TABLE "orgs" ADD COLUMN IF NOT EXISTS "compaction_window_tokens" integer',

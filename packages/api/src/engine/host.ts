@@ -1,6 +1,7 @@
 import { hostedToolUsageSink } from "../services/external-usage.js";
 import { presenceApprovalVerifier } from "../services/passkey-approval/verify.js";
 import { signingPushNote } from "../services/signing-push-note.js";
+import { signedPullRequestRequirement } from "../services/signed-pull-requests.js";
 import { modelFetchFor } from "../lib/outbound-url.js";
 import { buildToolFocusTool, workflowToolFocus } from "../plugins/tool-focus.js";
 import { HOME_THREAD_CONTEXT, HOME_THREAD_KEY } from "../home/context.js";
@@ -1226,9 +1227,21 @@ export class EngineHost {
     return promise;
   }
 
-  /** Sign by default: the note after a successful `git push`, on every session the host builds, children included. */
-  private gitPushNoteOptions(): { gitPushNote?: ReturnType<typeof signingPushNote> } {
-    return this.opts.db ? { gitPushNote: signingPushNote(this.opts.db, publicUrlFromEnv(process.env)) } : {};
+  /**
+   * Commit signing on every session the host builds, children included: the
+   * note after a successful `git push` (sign by default), and the org rule
+   * for pull requests (`services/signed-pull-requests.ts`).
+   */
+  private commitSigningOptions(): {
+    gitPushNote?: ReturnType<typeof signingPushNote>;
+    pullRequestRequirement?: ReturnType<typeof signedPullRequestRequirement>;
+  } {
+    if (!this.opts.db) return {};
+    const publicUrl = publicUrlFromEnv(process.env);
+    return {
+      gitPushNote: signingPushNote(this.opts.db, publicUrl),
+      pullRequestRequirement: signedPullRequestRequirement(this.opts.db, publicUrl),
+    };
   }
 
   private async buildSession(sessionId: string, meta: SessionMeta): Promise<Session> {
@@ -1487,7 +1500,7 @@ export class EngineHost {
             ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
             ...this.browserOptions(sessionId),
             extractDocument: extractDocumentText,
-            ...this.gitPushNoteOptions(),
+            ...this.commitSigningOptions(),
             threadSystemContext: threadLink,
             ...this.wakeupsOptions(sessionId, () => builtSession, { orgId: meta.orgId, owner: principal }),
             ...this.leaseOptions(sessionId),
@@ -1530,7 +1543,7 @@ export class EngineHost {
           ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
           ...this.browserOptions(sessionId),
           extractDocument: extractDocumentText,
-          ...this.gitPushNoteOptions(),
+          ...this.commitSigningOptions(),
           threadSystemContext: threadLink,
           ...this.wakeupsOptions(sessionId, () => builtSession, { orgId: meta.orgId, owner: principal }),
           ...this.leaseOptions(sessionId),
@@ -3398,7 +3411,7 @@ export class EngineHost {
       ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
       ...this.browserOptions(sessionId),
       extractDocument: extractDocumentText,
-      ...this.gitPushNoteOptions(),
+      ...this.commitSigningOptions(),
       ...this.wakeupsOptions(sessionId, () => builtSession, { orgId: meta.orgId, owner: principal }),
       ...this.leaseOptions(sessionId),
       ...this.threadAccessOptions(sessionId),
@@ -4710,7 +4723,7 @@ export class EngineHost {
       ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
       ...this.browserOptions(childSessionId),
       extractDocument: extractDocumentText,
-      ...this.gitPushNoteOptions(),
+      ...this.commitSigningOptions(),
       ...this.wakeupsOptions(childSessionId, () => builtSession, { orgId: opts.orgId, owner: opts.owner }),
       ...this.leaseOptions(childSessionId),
       ...this.threadAccessOptions(),
@@ -4958,7 +4971,7 @@ export class EngineHost {
       ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
       ...this.browserOptions(sessionId),
       extractDocument: extractDocumentText,
-      ...this.gitPushNoteOptions(),
+      ...this.commitSigningOptions(),
       ...this.wakeupsOptions(sessionId, () => builtSession),
       ...this.leaseOptions(sessionId),
       ...this.threadAccessOptions(sessionId),

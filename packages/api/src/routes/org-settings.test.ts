@@ -121,6 +121,33 @@ describe("personal GitHub installations policy", () => {
   });
 });
 
+describe("signed pull request rule", () => {
+  it("defaults off and lets only an org admin change it", async () => {
+    api = await bootTestApi();
+    const read = await fetch(`${api.baseUrl}/api/org`);
+    expect(await read.json()).toMatchObject({ requireSignedPullRequests: false });
+    for (const enabled of [true, false]) {
+      const response = await fetch(`${api.baseUrl}/api/org/settings`, {
+        method: "PATCH", headers: ADMIN_HEADERS,
+        body: JSON.stringify({ requireSignedPullRequests: enabled }),
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ requireSignedPullRequests: enabled });
+      expect((await getOrgRow(api))?.requireSignedPullRequests).toBe(enabled);
+    }
+    const denied = await fetch(`${api.baseUrl}/api/org/settings`, {
+      method: "PATCH", headers: MEMBER_HEADERS,
+      body: JSON.stringify({ requireSignedPullRequests: true }),
+    });
+    expect(denied.status).toBe(403);
+    const invalid = await fetch(`${api.baseUrl}/api/org/settings`, {
+      method: "PATCH", headers: ADMIN_HEADERS,
+      body: JSON.stringify({ requireSignedPullRequests: "yes" }),
+    });
+    expect(invalid.status).toBe(400);
+  });
+});
+
 describe("anonymous image bake policy", () => {
   it("defaults off and lets only an org admin change it", async () => {
     api = await bootTestApi();

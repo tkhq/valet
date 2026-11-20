@@ -9,6 +9,8 @@ Commits you make are unsigned until the user signs them. The user's signing key 
 
 Signing is on by default. When the person who asked for the work set up commit signing, sign the commits you push for them, also when they did not ask for it. After each `git push`, the result tells you what to do: sign these commits, or tell the person once that they can set up signing. A run that no person waits on, such as a workflow run, never asks for signatures. Its commits stay unsigned.
 
+An organization can require signed commits for pull requests. Then `github.create_pull_request` and `gh pr create` refuse a branch with a commit that GitHub does not show as Verified. Sign and push first, then open the pull request. The refusal says what to do next.
+
 Most accounts sign each commit with the user's passkey. A few accounts use a signing window instead. The tools tell you which: each one answers with the other tool's name when the account uses the other mode.
 
 ## Passkey mode (default): `turnkey.sign_commits`

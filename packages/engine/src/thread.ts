@@ -165,6 +165,7 @@ import {
 } from "./compaction.js";
 import type {
   GitPushFacts,
+  GitPushTurn,
   ActiveModelState,
   AwaitResultOptions,
   BranchSummaryEntry,
@@ -7689,6 +7690,14 @@ export class Thread {
     const directChannel = this.runningItem?.author?.directChannel === true && origin !== undefined &&
       this.runningItem.channel !== undefined && this.runningItem.channel.channelType === origin.channelType;
     const thread = this;
+    const pushTurn = (): GitPushTurn => ({
+      userId: actorId,
+      orgId: session.options.orgId,
+      sessionId: session.id,
+      threadId: this.id,
+      ...(this.runningItem?.author?.externalSender ? { externalSender: true } : {}),
+      ...(this.isUnattendedTurn() ? { unattended: true } : {}),
+    });
     return {
       get toolScope() { return thread.effectiveToolScope(); },
       get toolScopeCeiling() { return thread.toolScopeCeiling(); },
@@ -7738,14 +7747,10 @@ export class Thread {
       browserPolicy: session.options.browserPolicy,
       extractDocument: session.options.extractDocument,
       ...(session.options.gitPushNote ? {
-        gitPushNote: (push: GitPushFacts) => session.options.gitPushNote!(push, {
-          userId: actorId,
-          orgId: session.options.orgId,
-          sessionId: session.id,
-          threadId: this.id,
-          ...(this.runningItem?.author?.externalSender ? { externalSender: true } : {}),
-          ...(this.isUnattendedTurn() ? { unattended: true } : {}),
-        }),
+        gitPushNote: (push: GitPushFacts) => session.options.gitPushNote!(push, pushTurn()),
+      } : {}),
+      ...(session.options.pullRequestRequirement ? {
+        pullRequestRequirement: () => session.options.pullRequestRequirement!(pushTurn()),
       } : {}),
       threadFiles: session.options.threadFiles?.({ orgId: session.options.orgId, sessionId: session.id, threadId: this.id }),
       queueItemId: this.runningItem?.id,
