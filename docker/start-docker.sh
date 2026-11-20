@@ -25,7 +25,10 @@ SOCK="$RUNTIME_DIR/docker.sock"
 LOG=/var/log/valet/dockerd.log
 DATA_ROOT=/home/dockerd/.local/share/docker
 mkdir -p "$RUNTIME_DIR" /var/log/valet "$DATA_ROOT"
-chown -R dockerd:dockerd "$RUNTIME_DIR" "$DATA_ROOT"
+chown -R dockerd:dockerd "$RUNTIME_DIR"
+# Not recursive: a data-root that survives a container restart holds nested
+# image layers owned by subordinate uids, and must keep that ownership.
+chown dockerd:dockerd "$DATA_ROOT"
 touch "$LOG"
 chown dockerd:dockerd "$LOG"
 # Make the workspace writable by the workload user. Non-recursive on
@@ -90,26 +93,42 @@ fi
 # Storage driver: probe what this environment supports, best first.
 #  - overlay2: native kernel overlayfs inside the rootless user namespace
 #    (kernel >= 5.11). Needs the data-root on a non-overlay filesystem —
-#    true on kubernetes (emptyDir volume), false on the docker backend
-#    (container rootfs IS overlay, mount returns EINVAL).
+#    true on kubernetes (emptyDir volume) and on the docker backend when
+#    VALET_DOCKER_DATA_ROOT bind-mounts a host directory there; false when
+#    the data-root is the container rootfs (overlay, mount returns EINVAL).
 #  - fuse-overlayfs: must mount and execute a binary in the rootless user
 #    namespace. Some Docker Desktop kernels permit the mount but reject
 #    execution with EINVAL. Opening /dev/fuse alone does not prove support.
-#  - vfs: always works; slow, no layer sharing. Last resort.
+#  - vfs: always works; no layer sharing, so every layer is a full copy and
+#    nested builds use many times their real size. Last resort.
+# The probes run under rootlesskit, the same way dockerd runs. A bare
+# `unshare --user` is not equivalent: hosts that restrict unprivileged user
+# namespaces (Ubuntu >= 23.10, kernel.apparmor_restrict_unprivileged_userns)
+# deny it, but allow rootlesskit through its own AppArmor profile. A probe
+# with `unshare` then fails on those hosts and wrongly selects vfs.
+probe_storage() {
+  runuser -u dockerd -- env XDG_RUNTIME_DIR="$RUNTIME_DIR" HOME=/home/dockerd \
+    rootlesskit --state-dir="$RUNTIME_DIR/probe" /bin/sh -c "$1" probe "$DATA_ROOT" >>"$LOG" 2>&1
+  local status=$?
+  rm -rf "$RUNTIME_DIR/probe" "$DATA_ROOT/.ovlprobe" 2>/dev/null || true
+  return $status
+}
 DRIVER=vfs
-if su -s /bin/sh dockerd -c "unshare --user --map-root-user --mount /bin/sh -c 'cd $DATA_ROOT && rm -rf .ovlprobe && mkdir -p .ovlprobe/l .ovlprobe/u .ovlprobe/w .ovlprobe/m && mount -t overlay overlay -olowerdir=.ovlprobe/l,upperdir=.ovlprobe/u,workdir=.ovlprobe/w .ovlprobe/m'" >>"$LOG" 2>&1; then
+if probe_storage '
+  cd "$1" && mkdir -p .ovlprobe/l .ovlprobe/u .ovlprobe/w .ovlprobe/m || exit 1
+  mount -t overlay overlay -olowerdir=.ovlprobe/l,upperdir=.ovlprobe/u,workdir=.ovlprobe/w .ovlprobe/m || exit 1
+  umount .ovlprobe/m
+'; then
   DRIVER=overlay2
-elif su -s /bin/sh dockerd -c "unshare --user --map-root-user --mount /bin/sh -c '
-  cd $DATA_ROOT || exit 1
-  rm -rf .ovlprobe && mkdir -p .ovlprobe/l .ovlprobe/u .ovlprobe/w .ovlprobe/m || exit 1
+elif probe_storage '
+  cd "$1" && mkdir -p .ovlprobe/l .ovlprobe/u .ovlprobe/w .ovlprobe/m || exit 1
   cp /bin/true .ovlprobe/l/probe || exit 1
   fuse-overlayfs -o lowerdir=.ovlprobe/l,upperdir=.ovlprobe/u,workdir=.ovlprobe/w .ovlprobe/m || exit 1
-  trap \"umount .ovlprobe/m\" EXIT
+  trap "umount .ovlprobe/m" EXIT
   .ovlprobe/m/probe
-'" >>"$LOG" 2>&1; then
+'; then
   DRIVER=fuse-overlayfs
 fi
-su -s /bin/sh dockerd -c "rm -rf '$DATA_ROOT/.ovlprobe'" 2>/dev/null || true
 echo "valet: starting rootless dockerd with storage driver: $DRIVER" >> "$LOG"
 
 su -s /bin/bash dockerd -c \

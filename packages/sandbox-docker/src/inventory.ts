@@ -11,6 +11,8 @@ export interface DockerBrowserCompanion {
   networkOwnerId?: string;
 }
 
+/** Nested Docker data-root inside a Docker-enabled sandbox (start-docker.sh). */
+export const DOCKER_DATA_ROOT = "/home/dockerd/.local/share/docker";
 export interface DockerInventoryRecord {
   version: 1;
   id: string;
@@ -26,6 +28,9 @@ export interface DockerInventoryRecord {
   imageId?: string;
   credsHostDir?: string;
   scratchHostDir?: string;
+  /** Host directory bind-mounted as the nested Docker data-root. Set only for
+   * Docker-enabled sandboxes when the provider has `dockerDataRoot`. */
+  dockerDataHostDir?: string;
   docker: boolean;
   browser?: { enabled: boolean; viewer?: boolean };
   browserCompanion?: DockerBrowserCompanion;
@@ -70,7 +75,7 @@ function parse(value: unknown): DockerInventoryRecord {
     value.state !== "released"
   )
     return invalid();
-  for (const key of ["containerId", "imageId", "credsHostDir", "scratchHostDir", "workloadStateDir"])
+  for (const key of ["containerId", "imageId", "credsHostDir", "scratchHostDir", "dockerDataHostDir", "workloadStateDir"])
     if (value[key] !== undefined && typeof value[key] !== "string")
       return invalid();
   let browser: DockerInventoryRecord["browser"];
@@ -128,6 +133,7 @@ function parse(value: unknown): DockerInventoryRecord {
     ...(typeof value.scratchHostDir === "string"
       ? { scratchHostDir: value.scratchHostDir }
       : {}),
+    ...(typeof value.dockerDataHostDir === "string" ? { dockerDataHostDir: value.dockerDataHostDir } : {}),
     ...(browser ? { browser } : {}),
     ...(browserCompanion ? { browserCompanion } : {}),
   };
@@ -248,6 +254,7 @@ export function validateDockerOwner(
     ...(!expected.browserCompanion ? [["/var/lib/valet", expected.runtimeStateDir]] : []),
     ...(expected.credsHostDir ? [["/etc/valet/creds", expected.credsHostDir]] : []),
     ...(expected.scratchHostDir ? [["/scratch", expected.scratchHostDir]] : []),
+    ...(expected.dockerDataHostDir ? [[DOCKER_DATA_ROOT, expected.dockerDataHostDir]] : []),
   ])
     if (
       !actual.mounts.some(

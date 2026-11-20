@@ -19,7 +19,7 @@
  */
 import * as k8s from "@kubernetes/client-node";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import type { SandboxProvider, SandboxResources, WakeupLimits } from "@valet/engine";
 import { isValidSandboxCpu, parseResourceQuantity, sandboxCpuRange, type ScratchCaps } from "@valet/shared";
 import { DockerSandboxProvider } from "@valet/sandbox-docker";
@@ -357,6 +357,21 @@ function resolveDockerCgroupParent(env: NodeJS.ProcessEnv): string | undefined {
   return parent;
 }
 
+/** Operator-provisioned host directory for nested Docker data-roots
+ * (`VALET_DOCKER_DATA_ROOT`). Put a size-limited filesystem there to cap the
+ * disk that nested Docker can use. */
+function resolveDockerDataRoot(env: NodeJS.ProcessEnv): string | undefined {
+  const raw = env.VALET_DOCKER_DATA_ROOT;
+  if (raw === undefined) return undefined;
+  const root = raw.trim();
+  if (!isAbsolute(root) || /\p{Cc}/u.test(raw)) {
+    throw new Error(
+      "Invalid VALET_DOCKER_DATA_ROOT. Set an absolute host directory path without control characters, or unset VALET_DOCKER_DATA_ROOT.",
+    );
+  }
+  return root;
+}
+
 /** Resolves all deployment-wide sandbox resource defaults. The Kubernetes
  * manifest merges repository declarations over this object per field. */
 export function resolveSandboxResources(env: NodeJS.ProcessEnv): SandboxResources {
@@ -605,6 +620,7 @@ export function buildSandboxProvider(
   switch (backend) {
     case "docker": {
       const cgroupParent = resolveDockerCgroupParent(env);
+      const dockerDataRoot = resolveDockerDataRoot(env);
       const cpu = resolveSandboxCpu(env);
       const memory = resolveSandboxMemory(env);
       const defaultResources: SandboxResources = {
@@ -618,6 +634,7 @@ export function buildSandboxProvider(
         ...(env.VALET_BROWSER_SECCOMP_PROFILE ? { browserSeccompProfile: env.VALET_BROWSER_SECCOMP_PROFILE } : {}),
         ...(env.VALET_BROWSER_APPARMOR_PROFILE ? { browserAppArmorProfile: env.VALET_BROWSER_APPARMOR_PROFILE } : {}),
         ...(cgroupParent !== undefined ? { cgroupParent } : {}),
+        ...(dockerDataRoot !== undefined ? { dockerDataRoot } : {}),
         ...(cpu !== undefined || memory !== undefined ? { defaultResources } : {}),
       });
     }
