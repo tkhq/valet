@@ -12,10 +12,13 @@ export function briefFromArgs(args: unknown): { headline: string; items: BriefIt
   if (typeof headline !== "string" || !Array.isArray(items)) return undefined;
   const parsed = items.flatMap((raw): BriefItem[] => {
     if (!raw || typeof raw !== "object") return [];
-    const { topic, text, state, thread_id: threadId } = raw as Record<string, unknown>;
+    const { topic, text, state, thread_id: threadId, href } = raw as Record<string, unknown>;
     if (typeof topic !== "string" || typeof text !== "string") return [];
     const known = typeof state === "string" && STATES.has(state as BriefItemState) ? state as BriefItemState : "fyi";
-    return [{ topic, text, state: known, ...(typeof threadId === "string" && threadId ? { threadId } : {}) }];
+    // A thread wins over a link. Only a web link opens, never another scheme.
+    const target = typeof threadId === "string" && threadId ? { threadId }
+      : typeof href === "string" && /^https?:\/\//i.test(href) ? { href } : {};
+    return [{ topic, text, state: known, ...target }];
   });
   return { headline, items: parsed };
 }

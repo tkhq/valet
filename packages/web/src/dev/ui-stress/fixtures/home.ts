@@ -47,10 +47,11 @@ export const stressHomeTasks: HomeTasksResponse = {
 };
 
 export const stressBrief = {
-  headline: "Morning. 4 in progress, 2 need you.",
+  headline: "Morning. 1 in progress, 3 need you.",
   items: [
     { topic: "Release report", text: "Drafted and waiting for your OK to post in #eng.", state: "needs_you" as const, threadId: "thread-home-task-1" },
     { topic: "TKAI-512", text: words("The fix is up and needs a reviewer before the freeze window starts", 220), state: "needs_you" as const },
+    { topic: "Docs review", text: "The API docs pull request needs your review.", state: "needs_you" as const, href: "https://github.com/example/app/pull/42" },
     { topic: "Recruiting dashboard", text: "Refreshing now. Done around 10.", state: "working" as const },
     { topic: "Alerts", text: "Quiet overnight.", state: "fyi" as const },
     { topic: unbroken("verylongtopic", 40), text: "Shipped.", state: "done" as const },
