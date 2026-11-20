@@ -9,10 +9,11 @@ afterEach(async () => { await api?.cleanup(); });
 async function connectOnce(wsUrl: string, sessionId: string): Promise<void> {
   const ws = new WebSocket(`${wsUrl}/api/sessions/${sessionId}/ws`);
   await new Promise<void>((resolve, reject) => {
-    const timeout = setTimeout(() => { ws.close(); reject(new Error("no queue.state frame")); }, 5_000);
+    const timeout = setTimeout(() => { ws.close(); reject(new Error("no sandbox.status frame")); }, 5_000);
     ws.onmessage = (event) => {
       const frame = JSON.parse(typeof event.data === "string" ? event.data : event.data.toString()) as WireEvent;
-      if (frame.type !== "queue.state") return;
+      // Every handshake ends with sandbox.status; an idle thread gets no queue seed.
+      if (frame.type !== "sandbox.status") return;
       clearTimeout(timeout);
       ws.close();
       resolve();

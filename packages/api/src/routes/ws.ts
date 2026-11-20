@@ -283,26 +283,43 @@ export function registerWsRoutes(
             // frame reads the in-memory turn phase. Both are chunk-style
             // (no offset), so the client applies them unconditionally and a
             // later durable replay still converges to the same state.
+            //
+            // Only threads with something to show get a seed. `init` clears
+            // the client's per-thread live state, so an idle thread with an
+            // empty queue needs no frame. A team runtime holds thousands of
+            // delivery threads, and a seed for each queued in front of the
+            // live frames (every team frame waits on a visibility check), so
+            // a new message showed nothing until the page reloaded. The
+            // queue states come from the one unsettled read above, not one
+            // store read per thread.
             for (const thread of engineSession.listThreads()) {
-              const queueState = await thread.currentQueueState();
-              if (lifecycle.closed) return;
-              deliver(ws, queueStateToWire(sessionId, thread.id, queueState));
+              const queueState = thread.queueStateFrom(unsettled);
               const agentStatus = thread.currentAgentStatus;
+              const queueIdle = queueState.status === "idle" && queueState.pending.length === 0
+                && !queueState.collectBuffer && !queueState.blockedGateId;
+              if (queueIdle && agentStatus === "idle") continue;
+              deliver(ws, queueStateToWire(sessionId, thread.id, queueState));
               if (agentStatus !== "idle") {
                 const turnStartedAt = thread.currentTurnStartedAt;
                 deliver(ws, { type: "status", threadId: thread.id, status: agentStatus, ...(turnStartedAt !== undefined ? { turnStartedAt } : {}) });
               }
             }
 
+            // Threads this socket sent a frame for before the model snapshot.
+            // Their snapshot is sent even when it is empty, because it must
+            // override a replayed model frame. Other idle threads need none.
+            const emittedThreads = new Set<string>();
+
             // Map one bus event → wire frames and push them. Durable events
             // carry `offset`; we stamp it onto each frame so clients can
             // resume. Ephemeral frames (text_delta) have no offset.
-            const emit = (busEvent: DeliveredBusEvent) => {
+            const emit =(busEvent: DeliveredBusEvent) => {
               if (busEvent.event.type === "message_start") {
                 activeMessageByThread.set(busEvent.event.threadId, busEvent.event.messageId);
               }
               const drafts = busEventToWire(busEvent);
               for (const draft of drafts) {
+                if ("threadId" in draft && typeof draft.threadId === "string") emittedThreads.add(draft.threadId);
                 if (draft.type === "text_delta" && !draft.messageId) {
                   const filled = activeMessageByThread.get(draft.threadId);
                   if (filled) draft.messageId = filled;
@@ -377,6 +394,7 @@ export function registerWsRoutes(
             for (const thread of engineSession.listThreads()) {
               const modelState = await thread.currentModelState();
               if (lifecycle.closed) return;
+              if (!modelState && !emittedThreads.has(thread.id)) continue;
               deliver(ws, modelState
                 ? {
                     type: "model.state",

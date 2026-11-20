@@ -124,6 +124,14 @@ it("streams a private Slack thread's events only to the channel's members", asyn
   const storedLookup = vi.spyOn(api.providers.engineStore, "getThread").mockImplementation((sid, id) => id === unresolved.id ? Promise.resolve(null) : getThread(sid, id));
   const shown = await session.createThread("web:shared");
   await connectSlack(api, { CSTREAM: ["USTREAM"] });
+  // An idle thread gets a model snapshot only when this connection replayed a
+  // frame for it, so give each thread one replayed event.
+  for (const thread of [unresolved, hidden, shown]) {
+    await api.providers.eventStream.append({
+      sessionId, threadId: thread.id, userId: "local-user", timestamp: Date.now(),
+      event: { type: "queue_state", threadId: thread.id, state: { threadId: thread.id, mode: "followup", status: "idle", pending: [] } },
+    }, `touch-${thread.id}`);
+  }
 
   const frames: WireEvent[] = [];
   const ws = new WebSocket(`${api.wsUrl}/api/sessions/${sessionId}/ws?fromOffset=0`);

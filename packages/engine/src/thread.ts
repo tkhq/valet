@@ -3737,8 +3737,16 @@ export class Thread {
    * Used by the `/status` and `/clear` built-ins.
    */
   async currentQueueState(): Promise<QueueState> {
-    const items = await this.session.providers.store.listUnsettledSubmissions(this.session.id);
-    return deriveQueueState(this.id, items, this.mode, this.paused, this.blockedGateId);
+    return this.queueStateFrom(await this.session.providers.store.listUnsettledSubmissions(this.session.id));
+  }
+
+  /**
+   * This thread's queue state from a session-wide list of unsettled
+   * submissions, so a caller that reads the list once can derive every
+   * thread's state without one store read per thread.
+   */
+  queueStateFrom(items: readonly QueueItem[]): QueueState {
+    return deriveQueueState(this.id, [...items], this.mode, this.paused, this.blockedGateId);
   }
 
   /** True when this thread is mid-turn (a submission is claimed and running). */
