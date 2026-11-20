@@ -50,9 +50,10 @@ export function threadPage(threads: ThreadSummary[], params: URLSearchParams): L
     } catch { throw new Error("The thread cursor is invalid. Refresh the thread list."); }
   }
   const remaining = listed.filter(t => !fixed.has(t.id) && (!after || time(t) < after.time || (time(t) === after.time && (t.createdAt < after.created || (t.createdAt === after.created && t.id.localeCompare(after.id) > 0)))));
+  const cursorAfter = (t: ThreadSummary) => Buffer.from(JSON.stringify({ time: time(t), created: t.createdAt, id: t.id })).toString("base64url");
   const page = remaining.slice(0, limit);
   const last = page.at(-1);
-  const nextCursor = remaining.length > limit && last ? Buffer.from(JSON.stringify({ time: time(last), created: last.createdAt, id: last.id })).toString("base64url") : undefined;
+  const nextCursor = remaining.length > limit && last ? cursorAfter(last) : undefined;
   if (inLine !== undefined) return { threads: page, nextCursor };
   const extras = threads.filter(t => t.id === selected || t.id === defaultThreadId || fixed.has(t.id));
   // Groups ship once, with the first page. `sorted` is newest first, so a
@@ -67,6 +68,11 @@ export function threadPage(threads: ThreadSummary[], params: URLSearchParams): L
       if (entry.preview.length < LINE_GROUP_PREVIEW) entry.preview.push(t);
       lineGroups.set(key, entry);
     }
+  }
+  // A group with more threads than its preview names where `line=` paging continues.
+  for (const { group, preview } of lineGroups.values()) {
+    const tail = preview.at(-1);
+    if (group.threadCount > preview.length && tail) group.nextCursor = cursorAfter(tail);
   }
   const previews = [...lineGroups.values()].flatMap(entry => entry.preview);
   return {

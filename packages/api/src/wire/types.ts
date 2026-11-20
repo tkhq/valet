@@ -1348,6 +1348,9 @@ export interface ThreadLineGroup {
   /** The line's name. "Deleted line" when the line no longer exists. */
   name: string;
   threadCount: number;
+  /** Set when the group has more threads than the first page shipped:
+   * pass it as `cursor` with `line=<key>` to read the rest. */
+  nextCursor?: string;
 }
 
 export interface CreateThreadRequest {

@@ -56,7 +56,7 @@ describe("line groups", () => {
   it("takes grouped threads out of the page and ships each group's newest ten", () => {
     const page = threadPage(all, new URLSearchParams("limit=10&groups=lines"));
     expect(page.lineGroups).toEqual([
-      { key: "sub:r1", kind: "subscription", ruleId: "r1", name: "", threadCount: 12 },
+      { key: "sub:r1", kind: "subscription", ruleId: "r1", name: "", threadCount: 12, nextCursor: expect.any(String) },
       { key: "schedule:s1", kind: "schedule", ruleId: "s1", name: "", threadCount: 1 },
     ]);
     const ids = page.threads.map(t => t.id);
@@ -71,6 +71,12 @@ describe("line groups", () => {
     const second = threadPage(all, new URLSearchParams({ limit: "2", groups: "lines", cursor: first.nextCursor! }));
     expect(second.lineGroups).toBeUndefined();
     expect(second.threads.map(t => t.id).slice(0, 2)).toEqual(["w1", "w2"]);
+  });
+
+  it("continues a group after its preview", () => {
+    const group = threadPage(all, new URLSearchParams("limit=10&groups=lines")).lineGroups?.[0];
+    const rest = threadPage(all, new URLSearchParams({ limit: "10", line: "sub:r1", cursor: group!.nextCursor! }));
+    expect(rest.threads.map(t => t.id)).toEqual(["a10", "a11"]);
   });
 
   it("pages one group with a cursor", () => {
