@@ -559,6 +559,26 @@ function ExistingAppCard() {
  * healthy webhook-live org never trips it. */
 const STALE_AFTER_MS = 4 * 6 * 60 * 60_000;
 
+/** One org setting on the App card: a label, a hint, and a switch. */
+function SettingSwitch({ id, label, hint, checked, disabled, onCheckedChange }: {
+  id: string;
+  label: string;
+  hint: string;
+  checked: boolean;
+  disabled: boolean;
+  onCheckedChange: (checked: boolean) => void;
+}) {
+  return (
+    <div className="flex items-start justify-between gap-4">
+      <div className="min-w-0">
+        <label htmlFor={id} className="text-sm font-medium text-ink">{label}</label>
+        <p className="mt-0.5 text-xs leading-relaxed text-muted">{hint}</p>
+      </div>
+      <Switch id={id} checked={checked} disabled={disabled} onCheckedChange={onCheckedChange} aria-label={label} />
+    </div>
+  );
+}
+
 function ConfiguredCard({
   data,
   checkedAt,
@@ -672,21 +692,22 @@ function ConfiguredCard({
         onConfirm={() => deleteApp.mutate(undefined, { onSuccess: () => setConfirmRemove(false) })}
       />
 
-      <div className="flex items-start justify-between gap-4 border-t border-line pt-4">
-        <div className="min-w-0">
-          <label htmlFor="gh-personal-installations" className="text-sm font-medium text-ink">
-            Allow personal installations
-          </label>
-          <p className="mt-0.5 text-xs leading-relaxed text-muted">
-            Allow members to install the GitHub App on personal accounts.
-          </p>
-        </div>
-        <Switch
+      <div className="space-y-4 border-t border-line pt-4">
+        <SettingSwitch
           id="gh-personal-installations"
+          label="Allow personal installations"
+          hint="Allow members to install the GitHub App on personal accounts."
           checked={orgQ.data?.allowPersonalInstallations ?? true}
           disabled={patchSettings.isPending}
           onCheckedChange={(allowPersonalInstallations) => patchSettings.mutate({ allowPersonalInstallations })}
-          aria-label="Allow personal installations"
+        />
+        <SettingSwitch
+          id="gh-require-signed-pull-requests"
+          label="Require signed commits for pull requests"
+          hint="Valet opens a pull request only when GitHub shows every commit on the branch as Verified. Members set up commit signing under Integrations. Workflow and team runs cannot sign, so they cannot open pull requests."
+          checked={orgQ.data?.requireSignedPullRequests ?? false}
+          disabled={patchSettings.isPending}
+          onCheckedChange={(requireSignedPullRequests) => patchSettings.mutate({ requireSignedPullRequests })}
         />
       </div>
 

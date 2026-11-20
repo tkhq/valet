@@ -4423,6 +4423,8 @@ export interface OrgSettingsResponse {
   allowAnonymousImageBakes?: boolean;
   /** Whether members can install the GitHub App on personal accounts. */
   allowPersonalInstallations: boolean;
+  /** Valet opens a pull request only when every commit on its branch is Verified on GitHub. */
+  requireSignedPullRequests: boolean;
   /**
    * Context size, in tokens, that threads compact to stay under. Null: the
    * Valet default (200k). 0: no cap; threads compact only near the model's
@@ -4437,6 +4439,7 @@ export interface PatchOrgSettingsRequest {
   allowPublicArtifacts?: boolean;
   allowAnonymousImageBakes?: boolean;
   allowPersonalInstallations?: boolean;
+  requireSignedPullRequests?: boolean;
   /** A token count from 50,000 to 1,000,000, 0 for no cap, or null for the Valet default. */
   compactionWindowTokens?: number | null;
 }
@@ -5013,6 +5016,9 @@ export interface OrgResponse {
   allowAnonymousImageBakes?: boolean;
   /** Absent on older APIs. Defaults to true. */
   allowPersonalInstallations?: boolean;
+  /** Valet opens a pull request only when every commit on its branch is
+   * Verified on GitHub. Absent on older APIs. Defaults to false. */
+  requireSignedPullRequests?: boolean;
   /**
    * Context size, in tokens, that threads compact to stay under. Null: the
    * Valet default (200k). 0: no cap; threads compact only near the model's

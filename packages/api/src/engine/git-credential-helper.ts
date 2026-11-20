@@ -27,6 +27,9 @@
 /** Path (relative to the API base) of the credential-minting route. */
 const ROUTE_PATH = "/api/sandbox/git-credential";
 
+/** Path of the org's signed pull request rule (`routes/sandbox-pull-requests.ts`). */
+const PULL_REQUEST_RULE_PATH = "/api/sandbox/pull-request-requirement";
+
 /**
  * The sandbox token, read at call time: the creds mount first (rotated in
  * place on backends that have one), then `$VALET_SANDBOX_TOKEN`. Every
@@ -138,9 +141,16 @@ printf 'password=%s\\n' "\$password"
  * strictly best-effort and never blocks the command. No token material is
  * embedded; the sandbox token is read from the creds mount
  * (`/etc/valet/creds/token`) first, then from `$VALET_SANDBOX_TOKEN`.
+ *
+ * With a Valet-resolved token, `gh pr create` (and `gh pr new`) first asks
+ * Valet for the org's signed pull request rule. When the org has one, the
+ * shim compares the branch on GitHub and refuses unless every commit is
+ * Verified (`services/signed-pull-requests.ts`). Caller auth skips the
+ * check, so it is a guardrail for the agent, not a boundary.
  */
 export function ghWrapperScript(apiUrl: string): string {
   const url = `${apiUrl}${ROUTE_PATH}`;
+  const ruleUrl = `${apiUrl}${PULL_REQUEST_RULE_PATH}`;
   return `#!/bin/sh
 # gh (Valet shim, also installed as valet-gh) — runs the real 'gh' with a
 # Valet-resolved GH_TOKEN when you have not authenticated yourself; your own
@@ -182,6 +192,45 @@ if [ -n "\$tok" ]; then
     -H "Content-Type: application/json" \\
     -d "{\\"host\\":\\"github.com\\",\\"owner\\":\\"\$owner\\",\\"repo\\":\\"\$repo\\",\\"purpose\\":\\"api\\"}" 2>/dev/null) || resp=
   token=\$(printf '%s' "\$resp" | sed -n 's/.*"password"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p')
+fi
+
+# Signed pull requests: when the organization requires them, 'gh pr create'
+# runs only when GitHub shows every commit on the branch as Verified. Valet
+# answers 204 for no rule, or the instruction for the agent as plain text.
+# Any other answer refuses: a failed lookup must not skip the check.
+if [ -n "\$token" ] && [ "\${1:-}" = pr ] && { [ "\${2:-}" = create ] || [ "\${2:-}" = new ]; }; then
+  ruleFile=\$(mktemp)
+  code=\$(curl --max-time 10 -sS -o "\$ruleFile" -w '%{http_code}' -X POST "${ruleUrl}" -H "x-valet-sandbox: \$tok" 2>/dev/null) || code=000
+  rule=\$(cat "\$ruleFile")
+  rm -f "\$ruleFile"
+  case "\$code" in
+    204) rule= ;;
+    200) ;;
+    *)
+      echo "Pull request not opened. Valet could not read the organization's pull request rule (HTTP \$code). Try again." >&2
+      exit 1 ;;
+  esac
+  if [ -n "\$rule" ]; then
+    head= base= nwo= prev=
+    for a in "\$@"; do
+      case "\$prev" in -H|--head) head=\$a ;; -B|--base) base=\$a ;; -R|--repo) nwo=\$a ;; esac
+      case "\$a" in --head=*) head=\${a#--head=} ;; --base=*) base=\${a#--base=} ;; --repo=*) nwo=\${a#--repo=} ;; esac
+      prev=\$a
+    done
+    export GH_TOKEN="\$token"
+    [ -n "\$nwo" ] || nwo=\$("\$real" repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null)
+    [ -n "\$head" ] || head=\$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
+    [ -n "\$base" ] || base=\$("\$real" repo view "\$nwo" --json defaultBranchRef --jq .defaultBranchRef.name 2>/dev/null)
+    unsigned=\$("\$real" api "repos/\$nwo/compare/\$base...\$head" --jq 'if .total_commits > (.commits | length) then "more than \\(.commits | length) commits" else [.commits[] | select(.commit.verification.verified | not) | .sha[0:7]] | join(" ") end' 2>&1) || {
+      echo "Pull request not opened. Valet could not check the commits from \$base to \$head: \$unsigned" >&2
+      exit 1
+    }
+    if [ -n "\$unsigned" ]; then
+      echo "Pull request not opened. Commits on \$head not Verified on GitHub: \$unsigned" >&2
+      printf '%s\\n' "\$rule" >&2
+      exit 1
+    fi
+  fi
 fi
 
 if [ -n "\$token" ]; then

@@ -1576,3 +1576,56 @@ describe("step labels", () => {
     expect(findAction("github.search_code").label?.({ q: "retryDelay repo:acme/widgets" })).toBe("Searched GitHub code for “retryDelay repo:acme/widgets”");
   });
 });
+
+describe("github.create_pull_request signed commits rule", () => {
+  const RULE = "This organization requires signed commits for pull requests. Sign the commits.";
+  const ARGS = { owner: "acme", repo: "widgets", title: "Add a widget", head: "feature", base: "main" };
+  const commit = (sha: string, verified: boolean) => ({ sha, commit: { verification: { verified, reason: verified ? "valid" : "unsigned" } } });
+
+  it("opens the pull request without a comparison when the org has no rule", async () => {
+    const server = useFixture();
+    const result = await findAction("github.create_pull_request").execute(ARGS, fakeActionContext("test-token"));
+    expect(result.success).toBe(true);
+    expect(server.calls.map((c) => `${c.method} ${c.path}`)).toEqual(["POST /repos/acme/widgets/pulls"]);
+  });
+
+  it("opens the pull request when every commit is Verified", async () => {
+    const server = useFixture({
+      compare: () => ({ body: { total_commits: 2, commits: [commit("aaaaaaa1", true), commit("bbbbbbb2", true)] } }),
+    });
+    const result = await findAction("github.create_pull_request").execute(ARGS, {
+      ...fakeActionContext("test-token"),
+      pullRequestRequirement: async () => RULE,
+    });
+    expect(result.success).toBe(true);
+    expect(server.calls.map((c) => `${c.method} ${c.path}`)).toEqual([
+      "GET /repos/acme/widgets/compare/main...feature",
+      "POST /repos/acme/widgets/pulls",
+    ]);
+  });
+
+  it("refuses with the unsigned commits and the rule, and opens nothing", async () => {
+    const server = useFixture({
+      compare: () => ({ body: { total_commits: 2, commits: [commit("aaaaaaa1", true), commit("bbbbbbb2", false)] } }),
+    });
+    const result = await findAction("github.create_pull_request").execute(ARGS, {
+      ...fakeActionContext("test-token"),
+      pullRequestRequirement: async () => RULE,
+    });
+    expect(result).toEqual({
+      success: false,
+      error: `Pull request not opened. 1 of 2 commits on feature are not Verified on GitHub: bbbbbbb. ${RULE}`,
+    });
+    expect(server.calls.some((c) => c.method === "POST")).toBe(false);
+  });
+
+  it("refuses a branch with more commits than one comparison lists", async () => {
+    useFixture({ compare: () => ({ body: { total_commits: 300, commits: [commit("aaaaaaa1", true)] } }) });
+    const result = await findAction("github.create_pull_request").execute(ARGS, {
+      ...fakeActionContext("test-token"),
+      pullRequestRequirement: async () => RULE,
+    });
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("feature has 300 commits, more than Valet can check (250). Squash the branch.");
+  });
+});

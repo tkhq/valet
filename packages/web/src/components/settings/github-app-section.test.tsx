@@ -14,7 +14,7 @@ const saveCredentialMutateAsync = vi.fn();
 const refreshMutate = vi.fn();
 const deleteAppMutate = vi.fn();
 const patchOrgSettingsMutate = vi.fn();
-let orgData = { allowPersonalInstallations: true };
+let orgData = { allowPersonalInstallations: true, requireSignedPullRequests: false };
 /** Clears like the real `reset()`: a stub that only records the call cannot
  * tell a working clear from a dead one. */
 const deleteAppReset = vi.fn(() => {
@@ -69,7 +69,7 @@ describe("GithubAppSection", () => {
     isError = false;
     saveCredentialError = null;
     deleteAppError = null;
-    orgData = { allowPersonalInstallations: true };
+    orgData = { allowPersonalInstallations: true, requireSignedPullRequests: false };
     vi.stubGlobal("confirm", confirmSpy);
   });
 
@@ -318,12 +318,28 @@ describe("GithubAppSection", () => {
       webhook: { mode: "manual" },
       installationsCheckedAt: null,
     };
-    orgData = { allowPersonalInstallations: false };
+    orgData = { allowPersonalInstallations: false, requireSignedPullRequests: false };
     render(<GithubAppSection />);
     const toggle = screen.getByRole("switch", { name: "Allow personal installations" });
     expect(toggle.getAttribute("aria-checked")).toBe("false");
     fireEvent.click(toggle);
     expect(patchOrgSettingsMutate).toHaveBeenCalledWith({ allowPersonalInstallations: true });
+  });
+
+  it("configured: reads and writes the signed pull request rule", () => {
+    githubAppData = {
+      configured: true,
+      app: { appId: "42", appSlug: "valet", htmlUrl: "https://github.example/apps/valet", installUrl: "https://github.example/apps/valet/installations/new" },
+      installations: [],
+      webhook: { mode: "manual" },
+      installationsCheckedAt: null,
+    };
+    orgData = { allowPersonalInstallations: true, requireSignedPullRequests: true };
+    render(<GithubAppSection />);
+    const toggle = screen.getByRole("switch", { name: "Require signed commits for pull requests" });
+    expect(toggle.getAttribute("aria-checked")).toBe("true");
+    fireEvent.click(toggle);
+    expect(patchOrgSettingsMutate).toHaveBeenCalledWith({ requireSignedPullRequests: false });
   });
 
   it("configured: renders the app card, installations table, and webhook badge", () => {

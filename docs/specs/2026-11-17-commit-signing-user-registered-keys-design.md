@@ -161,6 +161,19 @@ The guidance sits where the agent decides, not only in the skill: a skill or des
 
 A push is the hook because every branch the agent publishes goes through it, and git reports the branch and head there. The card can then link each commit on GitHub. When the key is not on GitHub yet, `turnkey.sign_commits` answers that the commits stay unsigned and the person is told once, so the turn does not stop. A failed note lookup is logged, and the push result returns without a note.
 
+### Signed pull requests (org setting)
+
+An org admin can turn on "Require signed commits for pull requests" in Organization settings, GitHub (`orgs.require_signed_pull_requests`, off by default). Valet then opens a pull request only when GitHub shows every commit from the base to the head as Verified. The check reads GitHub's verification, so commits signed with a person's own key also pass.
+
+Two paths check the rule:
+
+- `github.create_pull_request` calls `ToolContext.pullRequestRequirement`, which the host binds to the turn (`CreateSessionOptions.pullRequestRequirement`). When the org has the rule, the action reads the compare endpoint and refuses before it creates anything.
+- The sandbox `gh` shim asks `POST /api/sandbox/pull-request-requirement` before `gh pr create`. When the org has the rule, it compares the branch with `gh api` and exits with the refusal. Any answer other than 204 or 200 also refuses, so a failed lookup never skips the check.
+
+The refusal names the commits that are not Verified and tells the agent what to do next: sign and push, then try again; or, when the person did not set up signing, tell them where to set it up and do not open the pull request. A run with no person to sign (a workflow, a team or org session, a channel sender with no account) is told to report the branch instead. With the rule on, such runs cannot open pull requests.
+
+Both checks are guardrails for the agent, not a boundary. The sandbox holds a GitHub token, and the shim skips the check when the caller brings their own auth. A GitHub ruleset that requires signed commits is the boundary GitHub enforces.
+
 ### Session mode: the shipped window
 
 A deployment can set `VALET_TURNKEY_SIGNING_ASSURANCE=session`. Enrollment then also creates the `valet-agent` user, its signing policy, and a parent grant for `CREATE_API_KEYS_V2` and `DELETE_API_KEYS` whose condition names the `valet-agent` user id through `activity.params.user_id`. `CREATE_PRIVATE_KEYS_V2` is not granted: keys are made at enrollment.

@@ -87,6 +87,7 @@ import { commitSigningRouter, orgAllowedSignersRouter } from "./routes/commit-si
 import { reposRouter } from "./routes/repos.js";
 import { sourcesRouter } from "./routes/sources.js";
 import { sandboxGitCredentialRouter } from "./routes/sandbox-git-credential.js";
+import { sandboxPullRequestsRouter } from "./routes/sandbox-pull-requests.js";
 import { sandboxActionsRouter } from "./routes/sandbox-actions.js";
 import { fileUploadRouter } from "./routes/sandbox-file-upload.js";
 import { browserRouter } from "./routes/browser.js";
@@ -474,6 +475,7 @@ export function createApp(
   app.route("/api/org/sources", sourcesRouter);
   app.route("/api/repos", reposRouter);
   app.route("/api/sandbox", sandboxGitCredentialRouter);
+  app.route("/api/sandbox", sandboxPullRequestsRouter);
   app.route("/api/sandbox", sandboxActionsRouter);
   // Mounted at /api (not /api/events) because the router carries both the
   // /events* and /event-subscriptions* path families. Placed after every

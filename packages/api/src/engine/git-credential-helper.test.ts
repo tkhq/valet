@@ -154,6 +154,45 @@ if [ -n "$tok" ]; then
   token=$(printf '%s' "$resp" | sed -n 's/.*"password"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p')
 fi
 
+# Signed pull requests: when the organization requires them, 'gh pr create'
+# runs only when GitHub shows every commit on the branch as Verified. Valet
+# answers 204 for no rule, or the instruction for the agent as plain text.
+# Any other answer refuses: a failed lookup must not skip the check.
+if [ -n "$token" ] && [ "\${1:-}" = pr ] && { [ "\${2:-}" = create ] || [ "\${2:-}" = new ]; }; then
+  ruleFile=$(mktemp)
+  code=$(curl --max-time 10 -sS -o "$ruleFile" -w '%{http_code}' -X POST "http://valet-api.example.com/api/sandbox/pull-request-requirement" -H "x-valet-sandbox: $tok" 2>/dev/null) || code=000
+  rule=$(cat "$ruleFile")
+  rm -f "$ruleFile"
+  case "$code" in
+    204) rule= ;;
+    200) ;;
+    *)
+      echo "Pull request not opened. Valet could not read the organization's pull request rule (HTTP $code). Try again." >&2
+      exit 1 ;;
+  esac
+  if [ -n "$rule" ]; then
+    head= base= nwo= prev=
+    for a in "$@"; do
+      case "$prev" in -H|--head) head=$a ;; -B|--base) base=$a ;; -R|--repo) nwo=$a ;; esac
+      case "$a" in --head=*) head=\${a#--head=} ;; --base=*) base=\${a#--base=} ;; --repo=*) nwo=\${a#--repo=} ;; esac
+      prev=$a
+    done
+    export GH_TOKEN="$token"
+    [ -n "$nwo" ] || nwo=$("$real" repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null)
+    [ -n "$head" ] || head=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
+    [ -n "$base" ] || base=$("$real" repo view "$nwo" --json defaultBranchRef --jq .defaultBranchRef.name 2>/dev/null)
+    unsigned=$("$real" api "repos/$nwo/compare/$base...$head" --jq 'if .total_commits > (.commits | length) then "more than \\(.commits | length) commits" else [.commits[] | select(.commit.verification.verified | not) | .sha[0:7]] | join(" ") end' 2>&1) || {
+      echo "Pull request not opened. Valet could not check the commits from $base to $head: $unsigned" >&2
+      exit 1
+    }
+    if [ -n "$unsigned" ]; then
+      echo "Pull request not opened. Commits on $head not Verified on GitHub: $unsigned" >&2
+      printf '%s\\n' "$rule" >&2
+      exit 1
+    fi
+  fi
+fi
+
 if [ -n "$token" ]; then
   exec env GH_TOKEN="$token" "$real" "$@"
 fi
@@ -202,6 +241,118 @@ exec "$real" "$@"
   });
 });
 
+
+describe("gh shim signed pull request check", () => {
+  const RULE = "This organization requires signed commits for pull requests. Sign the commits.";
+
+  /** Runs the shim with stand-ins for curl, git, and the real gh. */
+  function runShim(args: string[], opts: { rule?: string; ruleCode?: string; unsigned?: string; compareFails?: boolean } = {}) {
+    const dir = mkdtempSync(join(tmpdir(), "valet-gh-shim-"));
+    const bin = join(dir, "bin");
+    const realDir = join(dir, "real");
+    const log = join(dir, "log");
+    try {
+      spawnSync("mkdir", ["-p", bin, realDir]);
+      writeFileSync(join(bin, "curl"), `#!/bin/sh
+echo "curl $*" >> "$TEST_LOG"
+case "$*" in
+  *pull-request-requirement*)
+    [ "$TEST_RULE_CODE" = fail ] && exit 7
+    out= prev=
+    for a in "$@"; do [ "$prev" = "-o" ] && out=$a; prev=$a; done
+    printf '%s' "$TEST_RULE" > "$out"
+    if [ -n "$TEST_RULE_CODE" ]; then printf '%s' "$TEST_RULE_CODE"; elif [ -n "$TEST_RULE" ]; then printf 200; else printf 204; fi ;;
+  *git-credential*) printf '%s' '{"username":"x-access-token","password":"fake-token"}' ;;
+esac
+`, { mode: 0o755 });
+      writeFileSync(join(bin, "git"), `#!/bin/sh
+case "$*" in
+  "config --get remote.origin.url") echo https://github.com/acme/app.git ;;
+  "rev-parse --abbrev-ref HEAD") echo feature ;;
+esac
+`, { mode: 0o755 });
+      writeFileSync(join(realDir, "gh"), `#!/bin/sh
+case "$1 $2" in
+  "repo view") case "$*" in *nameWithOwner*) echo acme/app ;; *) echo main ;; esac ;;
+  "api "*) echo "compare $2" >> "$TEST_LOG"
+    if [ -n "$TEST_COMPARE_FAILS" ]; then echo "HTTP 404: Not Found"; exit 1; fi
+    printf '%s\\n' "$TEST_UNSIGNED" ;;
+  *) echo "ran $* with $GH_TOKEN" ;;
+esac
+`, { mode: 0o755 });
+      const shim = join(dir, "gh.sh");
+      writeFileSync(shim, ghWrapperScript(API_URL));
+      const result = spawnSync("/bin/sh", [shim, ...args], {
+        encoding: "utf8",
+        env: {
+          PATH: `${bin}:${realDir}:/usr/bin:/bin`,
+          HOME: dir,
+          VALET_SANDBOX_TOKEN: "fake-sandbox-token",
+          TEST_LOG: log,
+          TEST_RULE: opts.rule ?? "",
+          TEST_RULE_CODE: opts.ruleCode ?? "",
+          TEST_UNSIGNED: opts.unsigned ?? "",
+          TEST_COMPARE_FAILS: opts.compareFails ? "1" : "",
+        },
+      });
+      const calls = spawnSync("cat", [log], { encoding: "utf8" }).stdout;
+      return { ...result, calls };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it("opens the pull request when the org has no rule", () => {
+    const r = runShim(["pr", "create", "--fill"]);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toBe("ran pr create --fill with fake-token\n");
+    expect(r.calls).not.toContain("compare");
+  });
+
+  it("opens the pull request when every commit is Verified", () => {
+    const r = runShim(["pr", "create", "--fill"], { rule: RULE });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toBe("ran pr create --fill with fake-token\n");
+    expect(r.calls).toContain("compare repos/acme/app/compare/main...feature");
+  });
+
+  it("refuses with the commits and the rule when a commit is not Verified", () => {
+    const r = runShim(["pr", "create", "--fill"], { rule: RULE, unsigned: "abc1234 def5678" });
+    expect(r.status).toBe(1);
+    expect(r.stdout).toBe("");
+    expect(r.stderr).toContain("Pull request not opened. Commits on feature not Verified on GitHub: abc1234 def5678");
+    expect(r.stderr).toContain(RULE);
+  });
+
+  it("compares the base, head, and repository the flags name", () => {
+    const r = runShim(["pr", "new", "-R", "acme/other", "--base", "dev", "--head=topic"], { rule: RULE });
+    expect(r.status).toBe(0);
+    expect(r.calls).toContain("compare repos/acme/other/compare/dev...topic");
+  });
+
+  it("refuses when the comparison fails", () => {
+    const r = runShim(["pr", "create", "--fill"], { rule: RULE, compareFails: true });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("Valet could not check the commits from main to feature: HTTP 404: Not Found");
+  });
+
+  it.each([
+    { label: "an error status", ruleCode: "500", shown: "HTTP 500" },
+    { label: "a failed request", ruleCode: "fail", shown: "HTTP 000" },
+  ])("refuses when the rule lookup returns $label", ({ ruleCode, shown }) => {
+    const r = runShim(["pr", "create", "--fill"], { ruleCode });
+    expect(r.status).toBe(1);
+    expect(r.stdout).toBe("");
+    expect(r.stderr).toContain(`Pull request not opened. Valet could not read the organization's pull request rule (${shown}). Try again.`);
+    expect(r.calls).not.toContain("compare");
+  });
+
+  it("asks for the rule only for gh pr create", () => {
+    const r = runShim(["pr", "list"], { rule: RULE });
+    expect(r.status).toBe(0);
+    expect(r.calls).not.toContain("pull-request-requirement");
+  });
+});
 
 describe("git credential helper execution", () => {
   function runHelper(mountToken: string, mountFails: boolean, envToken: string, expectedToken: string) {

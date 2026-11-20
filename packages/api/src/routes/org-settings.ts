@@ -1,7 +1,8 @@
 /**
  * `PATCH /api/org/settings` — org-level toggles: bare-skill-commands
  * (slash-commands plan, Task 3) and the public-artifact opt-in
- * (artifacts design). Org-admin gated via `requireOrgAdmin`.
+ * (artifacts design), and the signed pull request requirement
+ * (`services/signed-pull-requests.ts`). Org-admin gated via `requireOrgAdmin`.
  *
  * Accepts boolean settings, including `allowAnonymousImageBakes`, and
  * `compactionWindowTokens`: a token count from 50,000 to 1,000,000, 0 for no
@@ -20,7 +21,7 @@ import type { OrgSettingsResponse } from "../wire/types.js";
 
 export const orgSettingsRouter = new Hono<AppEnv>();
 
-const PATCH_FIELDS = new Set(["bareSkillCommands", "allowPublicArtifacts", "allowAnonymousImageBakes", "allowPersonalInstallations", "compactionWindowTokens"]);
+const PATCH_FIELDS = new Set(["bareSkillCommands", "allowPublicArtifacts", "allowAnonymousImageBakes", "allowPersonalInstallations", "requireSignedPullRequests", "compactionWindowTokens"]);
 
 /** Smallest and largest compaction window an org can set (0 turns the cap off). */
 const MIN_COMPACTION_WINDOW = 50_000;
@@ -50,6 +51,7 @@ orgSettingsRouter.patch("/", async (c) => {
     allowPublicArtifacts?: boolean;
     allowAnonymousImageBakes?: boolean;
     allowPersonalInstallations?: boolean;
+    requireSignedPullRequests?: boolean;
     compactionWindowTokens?: number | null;
   } = {};
 
@@ -81,6 +83,13 @@ orgSettingsRouter.patch("/", async (c) => {
     update.allowPersonalInstallations = raw.allowPersonalInstallations;
   }
 
+  if ("requireSignedPullRequests" in raw) {
+    if (typeof raw.requireSignedPullRequests !== "boolean") {
+      return c.json({ error: "requireSignedPullRequests must be a boolean. Send true or false." }, 400);
+    }
+    update.requireSignedPullRequests = raw.requireSignedPullRequests;
+  }
+
   if ("compactionWindowTokens" in raw) {
     const value = raw.compactionWindowTokens;
     const valid = value === null || value === 0 || (typeof value === "number" && Number.isInteger(value)
@@ -108,7 +117,7 @@ orgSettingsRouter.patch("/", async (c) => {
     targetType: "org_settings",
     targetId: user.orgId,
     targetName: row.name,
-    changes: before ? diffFields(before, row, ["bareSkillCommands", "allowPublicArtifacts", "allowAnonymousImageBakes", "allowPersonalInstallations", "compactionWindowTokens"]) : update,
+    changes: before ? diffFields(before, row, ["bareSkillCommands", "allowPublicArtifacts", "allowAnonymousImageBakes", "allowPersonalInstallations", "requireSignedPullRequests", "compactionWindowTokens"]) : update,
   });
   if ("compactionWindowTokens" in update) {
     c.var.providers.engineHost.setOrgCompactionWindow(user.orgId, row.compactionWindowTokens);
@@ -119,6 +128,7 @@ orgSettingsRouter.patch("/", async (c) => {
     allowPublicArtifacts: row.allowPublicArtifacts,
     allowAnonymousImageBakes: row.allowAnonymousImageBakes,
     allowPersonalInstallations: row.allowPersonalInstallations,
+    requireSignedPullRequests: row.requireSignedPullRequests,
     compactionWindowTokens: row.compactionWindowTokens,
   };
   return c.json(resp);

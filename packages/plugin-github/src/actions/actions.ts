@@ -16,6 +16,7 @@ import {
 } from "@valet/engine";
 import type { Octokit } from "octokit";
 import { parseJobLog } from "./parse-job-log.js";
+import { unsignedCommitsRefusal } from "./signed-commits.js";
 import {
   collectDirectoryEntries,
   contentsKind,
@@ -1439,6 +1440,11 @@ const createPullRequest = action(Type.Object({
   execute: async (args, ctx) => {
     const octokit = await getOctokit(ctx);
     try {
+      const requirement = await ctx.pullRequestRequirement?.();
+      if (requirement !== undefined) {
+        const refusal = await unsignedCommitsRefusal(octokit, args, requirement);
+        if (refusal !== undefined) return { success: false, error: refusal };
+      }
       const { data: pr } = await octokit.request("POST /repos/{owner}/{repo}/pulls", {
         owner: args.owner,
         repo: args.repo,

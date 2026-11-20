@@ -887,7 +887,8 @@ export interface GitPushFacts {
   headSha?: string;
 }
 
-/** The turn a `git push` ran in, for `CreateSessionOptions.gitPushNote`. */
+/** The turn a `git push` ran in, for `CreateSessionOptions.gitPushNote`
+ * and `CreateSessionOptions.pullRequestRequirement`. */
 export interface GitPushTurn {
   userId: string;
   orgId: string;
@@ -967,6 +968,13 @@ export interface ToolContext {
    * context built by hand.
    */
   gitPushNote?: (push: GitPushFacts) => Promise<string | undefined>;
+  /**
+   * The organization's rule for pull requests this turn opens. Undefined: no
+   * rule. A string: the organization requires every commit on the branch to
+   * be Verified on GitHub, and the string tells the model what to do when
+   * one is not. Absent on a context built by hand.
+   */
+  pullRequestRequirement?: () => Promise<string | undefined>;
   /**
    * True when this skill's body, at this version, is already in the
    * thread's live context from an earlier skill read: it is not covered by
@@ -3193,6 +3201,12 @@ export interface CreateSessionOptions {
    * in `buildToolContext` as `ToolContext.gitPushNote`. Absent === no note.
    */
   gitPushNote?: (push: GitPushFacts, turn: GitPushTurn) => Promise<string | undefined>;
+  /**
+   * The organization's rule for pull requests, for the turn. Bound in
+   * `buildToolContext` as `ToolContext.pullRequestRequirement`. Absent ===
+   * no rule.
+   */
+  pullRequestRequirement?: (turn: GitPushTurn) => Promise<string | undefined>;
   /**
    * Threaded onto `ToolContext.extractDocument` via `buildToolContext`.
    * Absent === plugin actions get no document extraction.
