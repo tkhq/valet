@@ -84,7 +84,7 @@ export function detectSecrets(text: string): SecretCandidate[] {
 }
 
 /** `text` with each candidate replaced by its replacement. */
-export function replaceSecrets(text: string, replacements: { candidate: SecretCandidate; with: string }[]): string {
+export function replaceSecrets(text: string, replacements: { candidate: { start: number; end: number }; with: string }[]): string {
   let out = text;
   for (const { candidate, with: replacement } of [...replacements].sort((a, b) => b.candidate.start - a.candidate.start)) {
     out = out.slice(0, candidate.start) + replacement + out.slice(candidate.end);

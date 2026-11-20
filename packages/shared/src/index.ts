@@ -39,3 +39,5 @@ export * from "./tool-intent.js";
 export * from './service-display-name.js';
 export * from './action-label.js';
 export * from "./secret-detect.js";
+export * from "./secret-candidates.js";
+export * from "./secret-intake-prompt.js";

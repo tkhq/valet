@@ -1207,6 +1207,7 @@ export function Composer({
             target={secretTarget}
             onReplace={setText}
             onKeep={() => secretGuard.keep(secretGuard.pending[0]!.value)}
+            position={{ index: 0, total: secretGuard.pending.length }}
           />
         )}
         <ComposerImageErrors
