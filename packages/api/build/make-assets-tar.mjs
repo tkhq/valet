@@ -13,15 +13,35 @@
 // asset path here is < 100 bytes, so plain USTAR name fields suffice (no
 // GNU/PAX long-name extension needed).
 //
-//   node build/make-assets-tar.mjs
-import { readdirSync, statSync, readFileSync, writeFileSync } from "node:fs";
+// The archive is built for ONE compile target, because sharp's native addon and
+// libvips differ per platform. It holds dist/assets plus the `@img` packages for
+// that target from dist/sharp-native/<platform>/, and the build fails if the
+// result lacks them or carries another platform's.
+//
+//   node build/make-assets-tar.mjs                       # host platform
+//   node build/make-assets-tar.mjs --target bun-linux-arm64
+import { existsSync, readdirSync, statSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { sharpPackagesFor, sharpPlatformFor } from "./sharp-platforms.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const apiRoot = resolve(here, ".."); // packages/api
 const assetsDir = resolve(apiRoot, "dist/assets");
 const outFile = resolve(apiRoot, "dist/assets.tar");
+const nativeDir = resolve(apiRoot, "dist/sharp-native");
+
+/** Read `--target <t>` / `--target=<t>` from argv, else undefined (host build). */
+function parseTarget(argv) {
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === "--target") return argv[i + 1];
+    if (argv[i].startsWith("--target=")) return argv[i].slice("--target=".length);
+  }
+  return undefined;
+}
+const target = parseTarget(process.argv.slice(2));
+const sharpPlatform = sharpPlatformFor(target);
+const SHARP_IMG = "sharp/node_modules/@img/";
 
 /** Recursively collect every regular file under `dir` (absolute paths). */
 function walk(dir) {
@@ -66,11 +86,45 @@ function header(name, size) {
   return buf;
 }
 
-const files = walk(assetsDir).sort(); // sort → deterministic ordering
+const entries = walk(assetsDir).map((full) => ({ full, rel: relative(assetsDir, full).split(sep).join("/") }));
+for (const pkg of sharpPackagesFor(sharpPlatform)) {
+  const pkgDir = resolve(nativeDir, sharpPlatform, pkg);
+  if (!existsSync(pkgDir)) {
+    throw new Error(`make-assets-tar: ${pkg} missing at ${pkgDir} — run build:assets first (VALET_SHARP_STAGE=all stages every target)`);
+  }
+  for (const full of walk(pkgDir)) {
+    entries.push({ full, rel: SHARP_IMG + pkg.slice("@img/".length) + "/" + relative(pkgDir, full).split(sep).join("/") });
+  }
+}
+entries.sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0)); // deterministic ordering
+
+// A binary that embeds another platform's sharp starts, then fails at the first
+// image operation (or at boot). Fail the build instead.
+const imgPackages = new Set();
+for (const { rel } of entries) {
+  // `@img/colour` is platform-neutral JS; only the sharp addon and libvips vary.
+  const name = rel.startsWith(SHARP_IMG) ? rel.slice(SHARP_IMG.length).split("/")[0] : "";
+  if (name.startsWith("sharp-")) imgPackages.add(name);
+}
+const wantPackages = sharpPackagesFor(sharpPlatform).map((n) => n.slice("@img/".length));
+const sameSet = imgPackages.size === wantPackages.length && wantPackages.every((n) => imgPackages.has(n));
+if (!sameSet) {
+  throw new Error(
+    `make-assets-tar: sharp packages for ${target ?? "host"} must be exactly [${wantPackages}] but the archive has [${[...imgPackages]}]`,
+  );
+}
+for (const n of wantPackages) {
+  if (!entries.some((e) => e.rel === `${SHARP_IMG}${n}/package.json`)) {
+    throw new Error(`make-assets-tar: ${n} has no package.json in the archive`);
+  }
+}
+if (!entries.some((e) => e.rel.startsWith(`${SHARP_IMG}sharp-${sharpPlatform}/lib/`) && e.rel.endsWith(".node"))) {
+  throw new Error(`make-assets-tar: sharp-${sharpPlatform} has no .node addon in the archive`);
+}
+
 const chunks = [];
 let count = 0;
-for (const full of files) {
-  const rel = relative(assetsDir, full).split(sep).join("/"); // POSIX separators
+for (const { full, rel } of entries) {
   if (Buffer.byteLength(rel, "utf8") > 100) {
     throw new Error(`make-assets-tar: path too long for USTAR (>100 bytes): ${rel}`);
   }
@@ -85,4 +139,4 @@ for (const full of files) {
 chunks.push(Buffer.alloc(1024));
 
 writeFileSync(outFile, Buffer.concat(chunks));
-console.log(`make-assets-tar: ${count} files -> ${outFile}`);
+console.log(`make-assets-tar: ${count} files (sharp ${sharpPlatform}) -> ${outFile}`);

@@ -1,17 +1,18 @@
 // Compiles the embedded-asset Bun wrapper (build/compile-entry.mjs) into a
 // self-contained single-file `valet` binary via `bun build --compile`.
 //
-// Assumes the bundle (dist/valet-api.mjs) and the asset tar (dist/assets.tar)
-// already exist — the `build:binary` npm script runs build:assets → build:bundle
-// → make-assets-tar first.
+// Assumes the bundle (dist/valet-api.mjs) and the staged assets (dist/assets,
+// dist/sharp-native) already exist — the `build:binary` npm script runs
+// build:assets → build:bundle first. This script writes dist/assets.tar itself,
+// once per target, so each binary embeds the sharp addon for its own platform.
 //
 // Usage:
 //   node build/compile-binary.mjs                 # host platform
 //   node build/compile-binary.mjs --target bun-linux-x64
 //
-// Bun cross-compiles JS + embeds the asset tar for the target (the embedded
-// assets — PGlite's platform-agnostic wasm/data + the static web SPA — are the
-// same across platforms, so cross-compilation is safe). Output is named
+// Bun cross-compiles JS + embeds the asset tar for the target. PGlite's wasm/data
+// and the web SPA are the same across platforms; sharp's native packages are not,
+// so the tar is rebuilt per target. Output is named
 // `dist/valet-<os>-<arch>` derived from the target (or the host when unset).
 import { spawnSync } from "node:child_process";
 import { dirname, resolve } from "node:path";
@@ -21,15 +22,15 @@ import { existsSync } from "node:fs";
 const here = dirname(fileURLToPath(import.meta.url));
 const apiRoot = resolve(here, "..");
 const entry = resolve(here, "compile-entry.mjs");
-const tar = resolve(apiRoot, "dist/assets.tar");
 const bundle = resolve(apiRoot, "dist/valet-api.mjs");
 
 for (const [label, p] of [
   ["bundle", bundle],
-  ["asset tar", tar],
+  ["staged assets", resolve(apiRoot, "dist/assets")],
+  ["staged sharp packages", resolve(apiRoot, "dist/sharp-native")],
 ]) {
   if (!existsSync(p)) {
-    throw new Error(`compile-binary: ${label} missing at ${p} — run build:assets/build:bundle/make-assets-tar first`);
+    throw new Error(`compile-binary: ${label} missing at ${p} — run build:assets and build:bundle first`);
   }
 }
 
@@ -59,6 +60,13 @@ const outOs = outSuffixFor(target).split("-")[0];
 if (outOs === "darwin" && process.platform !== "darwin") {
   throw new Error("compile-binary: macOS binaries need codesign. Compile darwin targets on a macOS host.");
 }
+
+const tarRes = spawnSync(process.execPath, [resolve(here, "make-assets-tar.mjs"), ...(target ? [`--target=${target}`] : [])], {
+  stdio: "inherit",
+  cwd: apiRoot,
+});
+if (tarRes.error) throw tarRes.error;
+if (tarRes.status !== 0) process.exit(tarRes.status ?? 1);
 
 // compile-entry.mjs loads Sharp from the extracted assets with a bare
 // `require("sharp")`. Resolving a package's "main" needs its package.json.
