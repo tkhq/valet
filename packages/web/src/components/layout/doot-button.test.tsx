@@ -46,7 +46,6 @@ describe("DootButton", () => {
     };
     const gain = { gain: { setValueAtTime: vi.fn(), exponentialRampToValueAtTime: vi.fn() }, connect: vi.fn() };
     osc.connect.mockReturnValue(gain);
-    gain.connect.mockReturnValue(undefined);
     const ctor = vi.fn(function () {
       return { state: "running", currentTime: 0, destination: {}, createOscillator: () => osc, createGain: () => gain };
     });
