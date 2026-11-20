@@ -10,6 +10,7 @@ import { useResponsiveOverlay } from "~/hooks/use-responsive-overlay";
 import { cn } from "~/lib/cn";
 import { useLastSeenCheckpoint } from "~/lib/changelog-read-state";
 import { useSidebarControls } from "./app-shell";
+import { DootButton } from "./doot-button";
 import { NotificationsBell } from "./notifications-bell";
 
 
@@ -216,6 +217,7 @@ export function TopNav() {
           <Sparkles className="h-4 w-4" aria-hidden />
           Ask Valet
         </button>
+        <DootButton />
         <NotificationsBell />
       </div>
 
