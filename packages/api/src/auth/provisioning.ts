@@ -40,6 +40,13 @@ function domainOf(email: string): string | undefined {
  *      no subdomain match) → member
  *   4. otherwise → denied
  *
+ * Rules 1 (matched by email) and 3 trust the email address, so they apply
+ * only when `proof.emailVerified` is true: the deployment's SSO, or Google or
+ * GitHub with a verified email. A password sign-up proves nothing about the
+ * address. It needs an invite matched by code, or unrestricted signup with no
+ * allow-list. Without this, anyone could sign up as any address in an allowed
+ * domain.
+ *
  * No rule makes the first user an admin: on a reachable host that would be
  * whoever signs up first. The first admin comes from an invite, either a
  * config-declared admin or the one-time link `ensureBootstrapAdminInvite`
@@ -54,9 +61,11 @@ export async function evaluateAdmission(
   db: AppQueryable,
   cfg: AuthConfig,
   email: string,
-  inviteCode?: string,
+  inviteCode: string | undefined,
+  proof: { emailVerified: boolean },
 ): Promise<Admission> {
-  const invite = (inviteCode && (await findValidInviteByCode(db, inviteCode))) || (await findValidInviteByEmail(db, email));
+  const invite = (inviteCode && (await findValidInviteByCode(db, inviteCode)))
+    || (proof.emailVerified ? await findValidInviteByEmail(db, email) : undefined);
   if (invite) {
     return { allowed: true, role: invite.role, inviteId: invite.id };
   }
@@ -66,7 +75,7 @@ export async function evaluateAdmission(
   }
 
   const domain = domainOf(email);
-  if (domain && cfg.allowedEmailDomains.includes(domain)) {
+  if (proof.emailVerified && domain && cfg.allowedEmailDomains.includes(domain)) {
     return { allowed: true, role: "member" };
   }
 
@@ -238,7 +247,8 @@ export function buildAuthHooks(deps: ProvisioningDeps): {
       if (await isReservedAdminEmail(db, cfg, email) && (!code || (await findValidInviteByCode(db, code))?.role !== "admin")) {
         throw new APIError("FORBIDDEN", { message: ADMIN_EMAIL_RESERVED_MESSAGE });
       }
-      const admission = await evaluateAdmission(db, cfg, email, code);
+      // A password sign-up does not prove the person owns `email`.
+      const admission = await evaluateAdmission(db, cfg, email, code, { emailVerified: false });
       if (!admission.allowed) {
         throw new APIError("FORBIDDEN", { message: INVITE_REQUIRED_MESSAGE });
       }
@@ -265,10 +275,10 @@ export function buildAuthHooks(deps: ProvisioningDeps): {
       (isSsoPath(path) || (isSocialPath(path) && user.emailVerified === true));
     if (isSsoPath(path)) {
       // SSO always passes regardless of admission's verdict (see roleFromAdmission).
-      admission = await evaluateAdmission(db, cfg, user.email);
+      admission = await evaluateAdmission(db, cfg, user.email, undefined, { emailVerified: true });
       if (verifiedAdmin) admission = adminAdmission(admission);
     } else if (isSocialPath(path)) {
-      admission = await evaluateAdmission(db, cfg, user.email);
+      admission = await evaluateAdmission(db, cfg, user.email, undefined, { emailVerified: user.emailVerified === true });
       if (verifiedAdmin) admission = adminAdmission(admission);
       if (!admission.allowed) return false;
     } else {
@@ -276,7 +286,8 @@ export function buildAuthHooks(deps: ProvisioningDeps): {
       // context (trusted caller) — re-run the same rule, with the invite code
       // from this request's body if one is available, to resolve the role to
       // stamp and to hand the matched invite (if any) to `.after`.
-      admission = await evaluateAdmission(db, cfg, user.email, readInviteCode(context?.body));
+      // A null context is a trusted internal caller; a password sign-up is not.
+      admission = await evaluateAdmission(db, cfg, user.email, readInviteCode(context?.body), { emailVerified: path !== "/sign-up/email" });
     }
 
     if (admission.allowed) {

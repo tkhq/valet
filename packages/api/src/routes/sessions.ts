@@ -1,11 +1,12 @@
 import { scrubSessionInput } from "../services/secret-store/inbound-scrub.js";
+import { clientWorkspacePath, clientWorkspaceRoot, workspaceRealpathRefusal } from "../lib/workspace-roots.js";
 import { cancelChildDelivery } from "../orchestrator/child-delivery.js";
 import { isLegacyAssistantRuntime } from "../services/legacy-runtime.js";
 import { visibleWorkOrigin } from "../services/work-origin.js";
 import { Hono, type Context } from "hono";
 import { and, count, desc, eq, inArray, notExists, or, sql } from "drizzle-orm";
 import { mkdir, stat } from "node:fs/promises";
-import { isAbsolute } from "node:path";
+import { dirname, isAbsolute } from "node:path";
 import { parseAssistantSessionId, type Principal, type SessionStore } from "@valet/engine";
 import { validateCredentialDecls } from "@valet/shared";
 import { writeHibernated } from "../engine/hibernation-hooks.js";
@@ -307,6 +308,15 @@ sessionsRouter.post("/", async (c) => {
   if (!isAbsolute(body.workspace)) {
     return c.json({ error: "workspace must be an absolute path" }, 400);
   }
+  // The server builds the working directory under the caller's own root from
+  // the requested path's last segment (`lib/workspace-roots.ts`).
+  let workspaceRoot: string;
+  try {
+    workspaceRoot = clientWorkspaceRoot();
+  } catch (err) {
+    return c.json({ error: (err as Error).message }, 500);
+  }
+  const workspace = clientWorkspacePath(workspaceRoot, user.id, body.workspace);
   if (body.profile !== undefined && body.profile !== "headless" && body.profile !== "full") {
     return c.json({ error: "profile must be 'headless' or 'full'" }, 400);
   }
@@ -579,20 +589,22 @@ sessionsRouter.post("/", async (c) => {
   // Auto-create the workspace dir if it doesn't exist; reject if the path
   // exists but is a file (Docker bind-mount needs a directory).
   try {
-    const st = await stat(body.workspace);
+    const st = await stat(workspace);
     if (!st.isDirectory()) {
-      return c.json({ error: `workspace exists but is not a directory: ${body.workspace}` }, 400);
+      return c.json({ error: `workspace exists but is not a directory: ${workspace}` }, 400);
     }
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
       return c.json({ error: `cannot access workspace: ${(err as Error).message}` }, 400);
     }
     try {
-      await mkdir(body.workspace, { recursive: true });
+      await mkdir(workspace, { recursive: true });
     } catch (mkErr) {
       return c.json({ error: `cannot create workspace: ${(mkErr as Error).message}` }, 400);
     }
   }
+  const linkedOut = await workspaceRealpathRefusal(workspace, dirname(workspace));
+  if (linkedOut) return c.json({ error: linkedOut }, 400);
 
   // Dynamic config (M-F1) + setup-page overrides (`/security/new`): a security
   // review reads the repo's `.valet/security.yml` through the GitHub contents
@@ -726,7 +738,7 @@ sessionsRouter.post("/", async (c) => {
         id,
         userId: user.id,
         orgId: user.orgId,
-        workspace: body.workspace,
+        workspace,
         title: sessionTitle,
         status: "active",
         ownerType: owner.type,
@@ -917,7 +929,7 @@ sessionsRouter.post("/", async (c) => {
 
   const detail: CreateSessionResponse = {
     id,
-    workspace: body.workspace,
+    workspace,
     status: "active",
     kind,
     ...deriveRunFields({ status: "active", updatedAt: now, lastActivityAt: now }, unsettled),

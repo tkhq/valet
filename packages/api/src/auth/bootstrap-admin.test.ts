@@ -54,8 +54,8 @@ describe("ensureAdminAccess", () => {
     const first = lines.join("\n").match(/https:\/\/valet\.example\.test\/signup\?invite=[0-9a-f]{32}/)?.[0];
     expect(first).toBeDefined();
     const second = await ensureBootstrapAdminInvite(db, { log });
-    expect(await evaluateAdmission(db, config(), "a@x.test", codeOf(first!))).toEqual({ allowed: false });
-    expect(await evaluateAdmission(db, config(), "a@x.test", codeOf(second))).toMatchObject({ allowed: true, role: "admin" });
+    expect(await evaluateAdmission(db, config(), "a@x.test", codeOf(first!), { emailVerified: true })).toEqual({ allowed: false });
+    expect(await evaluateAdmission(db, config(), "a@x.test", codeOf(second), { emailVerified: true })).toMatchObject({ allowed: true, role: "admin" });
   });
 
   it("stops boot when SSO is on, no admin exists, and nobody is declared", async () => {

@@ -248,3 +248,17 @@ it("refuses SSO sign-in when no OIDC provider is configured", async () => {
   });
   expect(res.status).toBe(403);
 });
+
+it("refuses a password sign-up that only claims an allowed email domain", async () => {
+  // An allowed domain admits verified identities. A password sign-up does not
+  // prove the address, so it needs an invite code.
+  vi.stubEnv("AUTH_ALLOWED_EMAIL_DOMAINS", "corp.test");
+  api = await bootTestApi({ auth: true });
+  await api.providers.db.insert(users).values({ id: "existing-admin", email: "owner@corp.test", name: "Owner", role: "admin" });
+  const response = await fetch(`${api.baseUrl}/api/auth/sign-up/email`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: "Probe", email: "probe@corp.test", password: "valid-password-for-test" }),
+  });
+  expect(response.status).toBe(403);
+  expect(await api.providers.db.select().from(users).where(eq(users.email, "probe@corp.test"))).toEqual([]);
+});
