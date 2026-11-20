@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { hostWorkspaceRefusal } from "./host-workspace.js";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { promises as fs } from "node:fs";
@@ -1393,6 +1394,11 @@ export interface DockerSandboxProviderOptions {
   browserEnabled?: boolean;
   /** Stock browser-capable image for Docker-enabled session companions. */
   browserImage?: string;
+  /**
+   * Host paths a working directory must keep clear of, besides the inventory
+   * root (`host-workspace.ts`): Valet's data directory and its private stores.
+   */
+  workspaceGuards?: { privatePaths?: string[]; dataRoots?: string[]; allowedRoots?: string[] };
 }
 export class DockerSandboxProvider implements SandboxProvider {
   readonly backend = "docker";
@@ -1404,7 +1410,13 @@ export class DockerSandboxProvider implements SandboxProvider {
   private readonly browserImage?: string;
   private readonly cgroupParent?: string;
   private readonly defaultResources?: SandboxResources;
+  private readonly workspaceGuards: { privatePaths: string[]; dataRoots: string[]; allowedRoots?: string[] };
   constructor(options: DockerSandboxProviderOptions = {}) {
+    this.workspaceGuards = {
+      privatePaths: (options.workspaceGuards?.privatePaths ?? []).map((path) => resolve(path)),
+      dataRoots: (options.workspaceGuards?.dataRoots ?? []).map((path) => resolve(path)),
+      ...(options.workspaceGuards?.allowedRoots ? { allowedRoots: options.workspaceGuards.allowedRoots.map((path) => resolve(path)) } : {}),
+    };
     this.cgroupParent = options.cgroupParent;
     this.defaultResources = options.defaultResources;
     this.browserEnabled = options.browserEnabled === true;
@@ -1558,7 +1570,13 @@ export class DockerSandboxProvider implements SandboxProvider {
     if (!(await fs.stat(workspace)).isDirectory()) throw new Error("The Docker working directory is not a directory. Select an existing directory.");
     await fs.mkdir(this.inventory.root, { recursive: true, mode: 0o700 });
     const privateRoot = await fs.realpath(this.inventory.root);
-    if (workspace === privateRoot || workspace.startsWith(privateRoot + "/") || privateRoot.startsWith(workspace + "/")) throw new Error("The working directory overlaps private Docker session state. Select a separate working directory before creating this sandbox.");
+    const realOrSelf = async (path: string) => fs.realpath(path).catch(() => path);
+    const refusal = hostWorkspaceRefusal(workspace, {
+      privatePaths: [privateRoot, ...(await Promise.all(this.workspaceGuards.privatePaths.map(realOrSelf)))],
+      dataRoots: await Promise.all(this.workspaceGuards.dataRoots.map(realOrSelf)),
+      ...(this.workspaceGuards.allowedRoots ? { allowedRoots: await Promise.all(this.workspaceGuards.allowedRoots.map(realOrSelf)) } : {}),
+    });
+    if (refusal) throw new Error(refusal);
     const id = opts.sessionId ? `dsb-${createHash("sha256").update(opts.sessionId).digest("hex").slice(0, 32)}` : `dsb-${randomUUID()}`;
     const image = dockerOpts.image ?? DEFAULT_IMAGE;
     const providerId = await this.providerId();

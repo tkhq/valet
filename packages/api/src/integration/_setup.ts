@@ -225,6 +225,9 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   // authMiddleware. Never set this outside the test bootstrap (see
   // packages/api/src/middleware/auth.ts).
   process.env.VALET_TEST_AUTH_HEADER = "1";
+  // Test-only root for working directories `POST /api/sessions` builds
+  // (`lib/workspace-roots.ts`), kept out of the developer's ~/.valet.
+  process.env.VALET_WORKSPACE_ROOT ??= join(tmpdir(), "valet-test-workspaces");
 
   const prevAuthSecret = process.env.BETTER_AUTH_SECRET;
   const prevLocalAuth = process.env.VALET_LOCAL_AUTH;

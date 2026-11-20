@@ -83,39 +83,39 @@ describe("evaluateAdmission", () => {
 
   it("never admits the first user as admin for being first", async () => {
     // Zero users: no invite means no admission, and open signup or an allowed domain gives member only.
-    expect(await evaluateAdmission(db, baseConfig(), "anyone@nowhere.test")).toEqual({ allowed: false });
-    expect(await evaluateAdmission(db, baseConfig({ allowSignup: true }), "anyone@nowhere.test")).toEqual({ allowed: true, role: "member" });
-    expect(await evaluateAdmission(db, baseConfig({ allowedEmailDomains: ["nowhere.test"] }), "anyone@nowhere.test"))
+    expect(await evaluateAdmission(db, baseConfig(), "anyone@nowhere.test", undefined, { emailVerified: true })).toEqual({ allowed: false });
+    expect(await evaluateAdmission(db, baseConfig({ allowSignup: true }), "anyone@nowhere.test", undefined, { emailVerified: true })).toEqual({ allowed: true, role: "member" });
+    expect(await evaluateAdmission(db, baseConfig({ allowedEmailDomains: ["nowhere.test"] }), "anyone@nowhere.test", undefined, { emailVerified: true }))
       .toEqual({ allowed: true, role: "member" });
   });
 
   it("admits unrestricted signups as members only when explicitly enabled", async () => {
     await seedUser(db, "existing", "existing@example.test");
-    expect(await evaluateAdmission(db, baseConfig({ allowSignup: true }), "new@other.test")).toEqual({ allowed: true, role: "member" });
-    expect(await evaluateAdmission(db, baseConfig(), "new@other.test")).toEqual({ allowed: false });
+    expect(await evaluateAdmission(db, baseConfig({ allowSignup: true }), "new@other.test", undefined, { emailVerified: true })).toEqual({ allowed: true, role: "member" });
+    expect(await evaluateAdmission(db, baseConfig(), "new@other.test", undefined, { emailVerified: true })).toEqual({ allowed: false });
     // A configured domain allow-list still fences signup.
     const fenced = baseConfig({ allowSignup: true, allowedEmailDomains: ["corp.test"] });
-    expect(await evaluateAdmission(db, fenced, "new@other.test")).toEqual({ allowed: false });
-    expect(await evaluateAdmission(db, fenced, "new@corp.test")).toEqual({ allowed: true, role: "member" });
+    expect(await evaluateAdmission(db, fenced, "new@other.test", undefined, { emailVerified: true })).toEqual({ allowed: false });
+    expect(await evaluateAdmission(db, fenced, "new@corp.test", undefined, { emailVerified: true })).toEqual({ allowed: true, role: "member" });
   });
 
   it("admits a matching email domain as member (case-insensitive, exact domain)", async () => {
     await seedUser(db, "u1", "existing@x.test");
     const cfg = baseConfig({ allowedEmailDomains: ["example.com"] });
-    expect(await evaluateAdmission(db, cfg, "New@Example.COM")).toEqual({ allowed: true, role: "member" });
+    expect(await evaluateAdmission(db, cfg, "New@Example.COM", undefined, { emailVerified: true })).toEqual({ allowed: true, role: "member" });
   });
 
   it("does NOT match a subdomain of an allowed domain", async () => {
     await seedUser(db, "u1", "existing@x.test");
     const cfg = baseConfig({ allowedEmailDomains: ["example.com"] });
-    expect(await evaluateAdmission(db, cfg, "user@sub.example.com")).toEqual({ allowed: false });
+    expect(await evaluateAdmission(db, cfg, "user@sub.example.com", undefined, { emailVerified: true })).toEqual({ allowed: false });
   });
 
   it("admits a valid invite by code with the invite's role", async () => {
     await seedUser(db, "u1", "existing@x.test");
     const cfg = baseConfig();
     const { invite, code } = await createInvite(db, { role: "admin", createdBy: "admin1" });
-    expect(await evaluateAdmission(db, cfg, "whoever@nowhere.test", code)).toEqual({
+    expect(await evaluateAdmission(db, cfg, "whoever@nowhere.test", code, { emailVerified: true })).toEqual({
       allowed: true,
       role: "admin",
       inviteId: invite.id,
@@ -126,24 +126,35 @@ describe("evaluateAdmission", () => {
     await seedUser(db, "u1", "existing@x.test");
     const cfg = baseConfig();
     const { invite } = await createInvite(db, { email: "invitee@nowhere.test", role: "member", createdBy: "admin1" });
-    expect(await evaluateAdmission(db, cfg, "invitee@nowhere.test")).toEqual({
+    expect(await evaluateAdmission(db, cfg, "invitee@nowhere.test", undefined, { emailVerified: true })).toEqual({
       allowed: true,
       role: "member",
       inviteId: invite.id,
     });
   });
 
+  it("does not let an unverified email use the domain rule or an email-matched invite", async () => {
+    const cfg = baseConfig({ allowedEmailDomains: ["corp.test"] });
+    expect(await evaluateAdmission(db, cfg, "probe@corp.test", undefined, { emailVerified: false })).toEqual({ allowed: false });
+    const { invite, code } = await createInvite(db, { email: "invitee@corp.test", role: "member", createdBy: "admin1" });
+    expect(await evaluateAdmission(db, cfg, "invitee@corp.test", undefined, { emailVerified: false })).toEqual({ allowed: false });
+    expect(await evaluateAdmission(db, cfg, "invitee@corp.test", code, { emailVerified: false }))
+      .toEqual({ allowed: true, role: "member", inviteId: invite.id });
+    expect(await evaluateAdmission(db, baseConfig({ allowSignup: true }), "anyone@open.test", undefined, { emailVerified: false }))
+      .toEqual({ allowed: true, role: "member" });
+  });
+
   it("denies when nothing matches", async () => {
     await seedUser(db, "u1", "existing@x.test");
     const cfg = baseConfig();
-    expect(await evaluateAdmission(db, cfg, "nobody@nowhere.test")).toEqual({ allowed: false });
+    expect(await evaluateAdmission(db, cfg, "nobody@nowhere.test", undefined, { emailVerified: true })).toEqual({ allowed: false });
   });
 
   it("admits the first user as admin only through an admin invite", async () => {
     const cfg = baseConfig({ allowedEmailDomains: ["example.com"] });
     const { invite } = await createInvite(db, { email: "first@nowhere.test", role: "member", createdBy: "admin1" });
     // Zero users: a member invite stays a member invite.
-    expect(await evaluateAdmission(db, cfg, "first@nowhere.test")).toEqual({ allowed: true, role: "member", inviteId: invite.id });
+    expect(await evaluateAdmission(db, cfg, "first@nowhere.test", undefined, { emailVerified: true })).toEqual({ allowed: true, role: "member", inviteId: invite.id });
   });
 
   it("precedence: an admin invite beats an allowlisted domain (invite role wins, inviteId set)", async () => {
@@ -152,7 +163,7 @@ describe("evaluateAdmission", () => {
     const { invite } = await createInvite(db, { email: "person@example.com", role: "admin", createdBy: "admin1" });
     // The invite rule runs before the domain rule, so a declared admin whose
     // domain is also allowlisted is admitted as admin, not downgraded to member.
-    const result = await evaluateAdmission(db, cfg, "person@example.com");
+    const result = await evaluateAdmission(db, cfg, "person@example.com", undefined, { emailVerified: true });
     expect(result).toEqual({ allowed: true, role: "admin", inviteId: invite.id });
     // evaluateAdmission never mutates — the invite stays unaccepted until acceptInvite runs.
     const rows = await db.select().from(invites).where(eq(invites.id, invite.id)).limit(1);
@@ -163,14 +174,14 @@ describe("evaluateAdmission", () => {
     await seedUser(db, "u1", "existing@x.test");
     const cfg = baseConfig({ allowedEmailDomains: ["example.com"] });
     // No invite for this email — the domain rule is the fallback and grants member.
-    expect(await evaluateAdmission(db, cfg, "nobody@example.com")).toEqual({ allowed: true, role: "member" });
+    expect(await evaluateAdmission(db, cfg, "nobody@example.com", undefined, { emailVerified: true })).toEqual({ allowed: true, role: "member" });
   });
 
   it("a non-allowlisted email with an invite gets the invite's role (domain rule irrelevant)", async () => {
     await seedUser(db, "u1", "existing@x.test");
     const cfg = baseConfig({ allowedEmailDomains: ["example.com"] });
     const { invite } = await createInvite(db, { email: "outsider@other.test", role: "member", createdBy: "admin1" });
-    expect(await evaluateAdmission(db, cfg, "outsider@other.test")).toEqual({
+    expect(await evaluateAdmission(db, cfg, "outsider@other.test", undefined, { emailVerified: true })).toEqual({
       allowed: true,
       role: "member",
       inviteId: invite.id,
@@ -181,7 +192,7 @@ describe("evaluateAdmission", () => {
     await seedUser(db, "u1", "existing@x.test");
     const cfg = baseConfig();
     const { invite } = await createInvite(db, { email: "person@nowhere.test", role: "member", createdBy: "admin1" });
-    expect(await evaluateAdmission(db, cfg, "person@nowhere.test", "not-a-real-code")).toEqual({
+    expect(await evaluateAdmission(db, cfg, "person@nowhere.test", "not-a-real-code", { emailVerified: true })).toEqual({
       allowed: true,
       role: "member",
       inviteId: invite.id,
@@ -261,12 +272,13 @@ describe("buildAuthHooks", () => {
         .resolves.not.toThrow();
     });
 
-    it("does not throw when the domain admits the signup", async () => {
+    it("throws for a password sign-up that only claims an allowed domain", async () => {
+      // A password sign-up does not prove the address, so the domain rule does not admit it.
       const cfg = baseConfig({ allowedEmailDomains: ["example.com"] });
       const { beforeHook } = buildAuthHooks({ db, cfg, credentialStore });
       await expect(
         beforeHook(middlewareCtx({ path: "/sign-up/email", body: { email: "person@example.com" } })),
-      ).resolves.not.toThrow();
+      ).rejects.toThrow(INVITE_REQUIRED_MESSAGE);
     });
 
     it("ignores non-signup paths entirely", async () => {
@@ -322,7 +334,7 @@ describe("buildAuthHooks", () => {
       const { invite } = await createInvite(db, { email: "invitee@nowhere.test", role: "admin", createdBy: "admin1" });
       const { databaseHooks } = buildAuthHooks({ db, cfg, credentialStore });
       const result = await databaseHooks!.user!.create!.before!(
-        makeUser({ email: "invitee@nowhere.test" }),
+        makeUser({ email: "invitee@nowhere.test", emailVerified: true }),
         dbHookCtx({ path: "/callback/google" }),
       );
       expect(result).not.toBe(false);
@@ -388,7 +400,7 @@ describe("buildAuthHooks", () => {
       const { invite } = await createInvite(db, { email: "invitee@nowhere.test", role: "admin", createdBy: "admin1" });
       const { databaseHooks } = buildAuthHooks({ db, cfg, credentialStore });
 
-      const user = makeUser({ id: "u-invitee", email: "invitee@nowhere.test" });
+      const user = makeUser({ id: "u-invitee", email: "invitee@nowhere.test", emailVerified: true });
       const before = await databaseHooks!.user!.create!.before!(user, dbHookCtx({ path: "/callback/google" }));
       expect(before).not.toBe(false);
       const stampedRole = (before as { data: { role: string } }).data.role;

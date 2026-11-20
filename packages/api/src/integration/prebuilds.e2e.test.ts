@@ -233,11 +233,13 @@ describeDocker("Sandbox images v2 (prebuilds) — full API loop e2e (docker)", (
       });
       expect(boundCreateRes.status).toBe(201);
       const boundSession = (await boundCreateRes.json()) as CreateSessionResponse;
+      // The server builds the working directory (`lib/workspace-roots.ts`); read it back.
+      const [boundCreated] = await api.providers.db.select({ workspace: agentSessions.workspace }).from(agentSessions).where(eq(agentSessions.id, boundSession.id));
 
       const engineSession = await api.providers.engineHost.sessionFor(boundSession.id, {
         userId: "local-user",
         orgId: "local-org",
-        workspace: join(tmp, "bound-workspace"),
+        workspace: boundCreated!.workspace,
         repos: [{ host: "github", fullName: REPO_FULL_NAME, cloneUrl: CLONE_URL, auth: "auto", targetDir: "Hello-World" }],
       });
       await engineSession.attachment.ensureReady({ timeoutMs: 60_000 });
@@ -266,11 +268,12 @@ describeDocker("Sandbox images v2 (prebuilds) — full API loop e2e (docker)", (
       });
       expect(unboundCreateRes.status).toBe(201);
       const unboundSession = (await unboundCreateRes.json()) as CreateSessionResponse;
+      const [unboundCreated] = await api.providers.db.select({ workspace: agentSessions.workspace }).from(agentSessions).where(eq(agentSessions.id, unboundSession.id));
 
       const unboundEngineSession = await api.providers.engineHost.sessionFor(unboundSession.id, {
         userId: "local-user",
         orgId: "local-org",
-        workspace: join(tmp, "unbound-workspace"),
+        workspace: unboundCreated!.workspace,
       });
       await unboundEngineSession.attachment.ensureReady({ timeoutMs: 60_000 });
 
