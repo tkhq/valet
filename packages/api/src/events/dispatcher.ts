@@ -630,6 +630,8 @@ export class EventDispatcher {
         }
         let body: string;
         let channelBody = "";
+        // The message as a person reads it. A new thread's title uses it.
+        let readableText = "";
         if (origin) {
           // `actor` is untyped jsonb, owned by ingest (NormalizedEvent.actor is
           // `{ externalId, login? }`) — same narrowing convention as `refs`.
@@ -644,6 +646,7 @@ export class EventDispatcher {
           // message carries no text of its own (e.g. a file-only post).
           body = (normalized.text || event.summary).slice(0, MAX_BODY_EXCERPT_CHARS);
           channelBody = normalized.text;
+          readableText = normalized.text;
           const sender = normalized.senderName ?? actor?.login ?? actor?.externalId;
           if (sender) attributes.sender = sender;
         } else {
@@ -655,6 +658,7 @@ export class EventDispatcher {
           const readable = event.service === "slack" && this.deps.normalizeChannelMessage
             ? (await this.deps.normalizeChannelMessage(event.service, { text: channelText(event.payload) ?? "", payload: event.payload })).text
             : "";
+          readableText = readable;
           const excerpt = JSON.stringify(event.payload).slice(0, MAX_BODY_EXCERPT_CHARS);
           body = readable
             ? `${event.summary}\n\n${readable.slice(0, MAX_BODY_EXCERPT_CHARS)}\n\n${excerpt}`
@@ -721,7 +725,7 @@ export class EventDispatcher {
         // (`PinUnavailableError`).
         const fallback = stamp?.kind === "target" && stamp.reason !== "policy_existing"
           && !(await isDeliverableTarget({ db }, event.orgId, owner, stamp));
-        const destination = stamp && !fallback ? stamp : await this.unstampedDestination(sub, target, delivery.id, event, origin);
+        const destination = stamp && !fallback ? stamp : await this.unstampedDestination(sub, target, delivery.id, event, origin, readableText);
         const inbound = origin
           ? inboundSlackMessage(origin.threadKey, origin.messageTs, attributes.sender, channelBody)
           : parsedComment && destination.kind === "target" && destination.reason === "conversation_pull_request"
@@ -1241,6 +1245,7 @@ export class EventDispatcher {
     deliveryId: string,
     event: typeof events.$inferSelect,
     origin: ChannelOrigin | null,
+    text: string,
   ): Promise<Destination> {
     const bindingEvent = { key: event.eventKey, payload: event.payload };
     const found = await conversationBinding(this.deps.db, event.orgId, { type: sub.ownerType, id: sub.ownerId }, bindingEvent, origin);
@@ -1259,6 +1264,7 @@ export class EventDispatcher {
         deliveryId,
         ...(origin !== null ? { conversationKey: origin.threadKey } : {}),
         summary: event.summary,
+        ...(text ? { text } : {}),
         naturalSubject,
         conversational: isConversationalEvent(bindingEvent, origin, found),
       },
