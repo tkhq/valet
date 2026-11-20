@@ -169,7 +169,7 @@ oauthConsentRouter.post("/", async (c) => {
     id: randomUUID(), identifier: consentIdentifier(code), value: pending.userId, expiresAt,
   });
   // The lasting record that this person approved this app. `/mcp` refuses a
-  // token without one (`hasMcpConsent`), and Agent access deletes it.
+  // token without one (`hasMcpConsent`), and Settings > Access deletes it.
   const now = new Date();
   await c.var.providers.db.delete(oauthConsent)
     .where(and(eq(oauthConsent.clientId, pending.clientId), eq(oauthConsent.userId, pending.userId)));

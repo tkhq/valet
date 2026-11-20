@@ -6,6 +6,7 @@ import { useWorkspaceOptions, type WorkspaceOption } from "~/components/layout/w
 import { cn } from "~/lib/cn";
 import { useWorkspaceScope } from "~/lib/workspace-scope";
 import { CHROME_BUTTON, HOVER_CHROME, NESTED_IDLE, NESTED_ROW, SELECTED_ROW, SIDEBAR_LABEL, TOP_ROW } from "./sidebar-rows";
+import { spaceSettingsTarget } from "~/lib/space-settings";
 
 type SpacePage = {
   label: string;
@@ -210,14 +211,13 @@ export function SpacePagesMenu({ option, children }: { option: WorkspaceOption; 
 }
 
 /**
- * A link to a space's settings home: the team's settings page, or your own
- * workspace's Integrations. Settings pins the scope from the URL, so the
- * link carries no `?workspace=`.
+ * A link to a space's settings home (`spaceSettingsTarget`): the team's
+ * settings page, or your own workspace's Integrations. Settings pins the
+ * scope from the URL, so the link carries no `?workspace=`.
  */
 function SpaceSettingsLink({ option, ...props }: { option: WorkspaceOption } & Omit<ComponentProps<typeof Link>, "to" | "params" | "search">) {
-  return option.isTeam
-    ? <Link {...props} to="/settings/teams/$teamId" params={{ teamId: option.key }} />
-    : <Link {...props} to="/settings/integrations" />;
+  const target = spaceSettingsTarget(option.key);
+  return <Link {...props} to={target.to} params={target.params} />;
 }
 
 function SpacePageItem({ option, page }: { option: WorkspaceOption; page: SpacePage }) {

@@ -1,4 +1,4 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { Navigate, createFileRoute } from "@tanstack/react-router";
 import { ApiError } from "~/api/client";
 import {
   useJoinSuggestedTeam,
@@ -11,9 +11,12 @@ import { TeamsPanel } from "~/components/settings/teams-panel";
 import { errorText } from "~/lib/error-text";
 
 /**
- * Organization members manage their current teams and explicitly join teams
- * suggested from their latest identity-provider group claim. The server owns
- * eligibility and checks it again when Join runs.
+ * Organization members create teams, open each team's settings page, and
+ * explicitly join teams suggested from their latest identity-provider group
+ * claim. The server owns eligibility and checks it again when Join runs.
+ *
+ * `?teamId=` opens that team's settings page. Saved review notifications
+ * and older assistant answers link here that way.
  */
 export const Route = createFileRoute("/settings/organization/teams")({
   validateSearch: (search: Record<string, unknown>) => ({ teamId: typeof search.teamId === "string" ? search.teamId : undefined }),
@@ -23,6 +26,7 @@ export const Route = createFileRoute("/settings/organization/teams")({
 export function OrganizationTeamsPage() {
   const directoryQ = useOrgDirectory();
   const { teamId } = Route.useSearch();
+  if (teamId) return <Navigate to="/settings/teams/$teamId" params={{ teamId }} replace />;
 
   return (
     <Section title="Teams" description="Group members for scoped thread access.">
@@ -34,7 +38,7 @@ export function OrganizationTeamsPage() {
         ) : (
           <ErrorRow>Failed to load the member directory. Reload the page to try again.</ErrorRow>
         ))}
-      {directoryQ.data && <TeamsPanel orgMembers={directoryQ.data.users} teamId={teamId} />}
+      {directoryQ.data && <TeamsPanel orgMembers={directoryQ.data.users} />}
     </Section>
   );
 }

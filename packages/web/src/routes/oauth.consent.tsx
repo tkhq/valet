@@ -124,7 +124,7 @@ export function ConsentPage({ code }: { code: string | undefined }) {
               </Button>
             </div>
             <p className="text-center text-xs text-muted">
-              Code goes to {info.data.redirect_origin}. You can disconnect the app any time in Settings &gt; Agent access.
+              Code goes to {info.data.redirect_origin}. You can disconnect the app any time in Settings &gt; Access.
             </p>
             <NotYou account={info.data.account} />
           </div>

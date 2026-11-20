@@ -58,7 +58,7 @@ agentAccessRouter.delete("/mcp/:clientId", async (c) => {
     .where(and(eq(oauthAccessToken.userId, userId), eq(oauthAccessToken.clientId, clientId)))
     .returning({ id: oauthAccessToken.id });
   await db.delete(oauthConsent).where(and(eq(oauthConsent.userId, userId), eq(oauthConsent.clientId, clientId)));
-  if (removed.length === 0) return c.json({ error: "That app is not connected. Reload Settings > Agent access." }, 404);
+  if (removed.length === 0) return c.json({ error: "That app is not connected. Reload Settings > Access." }, 404);
   return c.json({ ok: true });
 });
 
@@ -66,6 +66,6 @@ agentAccessRouter.delete("/cli/:id", async (c) => {
   const removed = await c.var.providers.db.delete(cliTokens)
     .where(and(eq(cliTokens.id, c.req.param("id")), eq(cliTokens.userId, c.var.user.id)))
     .returning({ id: cliTokens.id });
-  if (removed.length === 0) return c.json({ error: "That CLI is not signed in. Reload Settings > Agent access." }, 404);
+  if (removed.length === 0) return c.json({ error: "That CLI is not signed in. Reload Settings > Access." }, 404);
   return c.json({ ok: true });
 });

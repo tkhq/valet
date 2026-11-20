@@ -129,7 +129,7 @@ vi.mock("~/lib/workspace-scope", async (importOriginal) => {
 });
 
 import { PALETTE_CHOICES } from "~/lib/theme";
-import { ApiKeysPage } from "./settings.api-keys";
+import { ApiKeysPage } from "./settings.access";
 import { AppearancePage } from "~/components/settings/appearance-section";
 import { ThreadDefaultsPage } from "~/components/settings/thread-defaults-section";
 import { NotificationsPage } from "./settings.notifications";

@@ -164,7 +164,7 @@ describe("team deletion requests", () => {
     await addMember(api.providers.db, { teamId: team.id, userId: member, role: "member" });
     const response = await call(`/teams/${team.id}/deletion-requests`, "POST", { resourceType: "team", resourceId: team.id });
     expect(response.status).toBe(201);
-    const href = `/settings/organization/teams?teamId=${team.id}`;
+    const href = `/settings/teams/${team.id}`;
     const before = await api.providers.db.select().from(notifications).where(eq(notifications.href, href));
     expect(before.length).toBeGreaterThan(0);
     expect(before.every((n) => n.readAt === null)).toBe(true);
@@ -176,7 +176,7 @@ describe("team deletion requests", () => {
   it("deletes a team's requests with the team", async () => {
     await submit("skill", await resource("skill"));
     const requestId = await submit("team", teamId);
-    const href = `/settings/organization/teams?teamId=${teamId}`;
+    const href = `/settings/teams/${teamId}`;
     const before = await api.providers.db.select().from(notifications).where(eq(notifications.href, href));
     expect(before.filter((n) => n.readAt === null).length).toBeGreaterThanOrEqual(2);
     expect((await call(`/teams/${teamId}`, "DELETE")).status).toBe(403);

@@ -83,6 +83,10 @@ vi.mock("~/components/settings/grants-section", () => ({ GrantsSection: () => <S
 vi.mock("~/components/settings/team-policy-overrides", () => ({
   TeamPolicyOverrides: ({ teamId, canEdit }: { teamId: string; canEdit: boolean }) => <p>{`team policies: ${teamId}, ${canEdit ? "editable" : "read-only"}`}</p>,
 }));
+vi.mock("~/components/settings/agent-access-section", () => ({
+  AgentAccessSection: () => <p>connected agents list</p>,
+  AgentSetupCard: () => <h3>Connect Valet tools</h3>,
+}));
 vi.mock("~/components/settings/model-combobox", () => ({ ModelCombobox: () => <span>model picker</span> }));
 vi.mock("~/components/settings/reasoning-select", () => ({ ReasoningSelect: () => <span>reasoning picker</span> }));
 
@@ -90,7 +94,7 @@ import { WorkspaceScopeProvider } from "~/lib/workspace-scope";
 import { SettingsLayout } from "./settings";
 import { Route as PreferencesRoute } from "./settings.preferences";
 import { Route as PoliciesRoute } from "./settings.policies";
-import { Route as ApiKeysRoute } from "./settings.api-keys";
+import { Route as AccessRoute } from "./settings.access";
 import { Route as McpServersRoute } from "./settings.mcp-servers";
 import { Route as ModelComparisonRoute } from "./settings.model-comparison";
 import { TeamSettingsShell } from "./settings.teams.$teamId";
@@ -131,7 +135,7 @@ async function mount(initial: string) {
       child("profile", stub("Profile page")),
       child("preferences", componentOf(PreferencesRoute)),
       child("policies", componentOf(PoliciesRoute)),
-      child("api-keys", componentOf(ApiKeysRoute)),
+      child("access", componentOf(AccessRoute)),
       child("mcp-servers", componentOf(McpServersRoute)),
       child("model-comparison", componentOf(ModelComparisonRoute)),
       team.addChildren([
@@ -139,7 +143,7 @@ async function mount(initial: string) {
         createRoute({ getParentRoute: () => team, path: "access", component: componentOf(TeamAccessRoute) }),
         createRoute({ getParentRoute: () => team, path: "policies", component: componentOf(TeamPoliciesRoute) }),
       ]),
-      org.addChildren([orgChild("/"), orgChild("members"), orgChild("teams"), orgChild("linear"), orgChild("slack")]),
+      org.addChildren([orgChild("/"), orgChild("members"), orgChild("teams"), orgChild("linear"), orgChild("slack"), orgChild("usage")]),
     ]),
   ]);
   const router = createRouter({ routeTree: tree, history: createMemoryHistory({ initialEntries: [initial] }) });
@@ -181,6 +185,24 @@ describe("personal pages", () => {
     expect(within(content()).getByText("grants: personal")).toBeTruthy();
     expect(within(content()).queryByText(/team policies/)).toBeNull();
     expect(within(content()).getByRole("heading", { name: "Policies" })).toBeTruthy();
+    expect(document.title).toBe("Personal · Valet");
+  });
+});
+
+describe("personal Access", () => {
+  it("holds connected agents, one coding-tool setup, API keys, and proxy, in that order", async () => {
+    await mount("/settings/access");
+    const page = content();
+    await within(page).findByRole("heading", { name: "Connected agents" });
+    const headings = within(page).getAllByRole("heading", { level: 2 }).map((h) => h.textContent);
+    expect(headings).toEqual(["Access", "Connected agents", "Set up a coding tool", "API keys", "Proxy"]);
+    // One setup entry point: the MCP prompt and the proxy flow are its two parts.
+    expect(within(page).getAllByRole("heading", { name: "Set up a coding tool" })).toHaveLength(1);
+    expect(within(page).getByRole("heading", { name: "Connect Valet tools" })).toBeTruthy();
+    expect(within(page).getByRole("heading", { name: "Send model requests through Valet" })).toBeTruthy();
+    expect(within(page).getAllByRole("radiogroup", { name: "Coding tool" })).toHaveLength(1);
+    const rail = screen.getByRole("navigation", { name: "Settings" });
+    expect(within(rail).getByRole("link", { name: "Access" }).getAttribute("aria-current")).toBe("page");
     expect(document.title).toBe("Personal · Valet");
   });
 });
@@ -234,13 +256,16 @@ describe("while organizations are off", () => {
 });
 
 describe("a team's settings tabs", () => {
-  it("API keys and proxy renders that team's keys and proxy", async () => {
+  it("Access renders that team's setup, keys and proxy, without connected agents", async () => {
     await mount("/settings/teams/t2/access");
     const page = content();
     expect(await within(page).findByText("t2 shared key")).toBeTruthy();
     expect(within(page).getByRole("heading", { name: "Proxy" })).toBeTruthy();
     expect(within(page).getByText(/through support for spend tracking/)).toBeTruthy();
-    expect(within(page).getByRole("link", { name: "API keys and proxy" }).getAttribute("aria-current")).toBe("page");
+    expect(within(page).getByRole("link", { name: "Access" }).getAttribute("aria-current")).toBe("page");
+    expect(within(page).queryByRole("heading", { name: "Connected agents" })).toBeNull();
+    expect(within(page).queryByRole("heading", { name: "Connect Valet tools" })).toBeNull();
+    expect(within(page).getByRole("heading", { name: "Set up a coding tool" })).toBeTruthy();
     expect(document.title).toBe("support · Valet");
   });
 
@@ -274,6 +299,22 @@ describe("Organization tabs", () => {
     const tabs = await within(content()).findByRole("navigation", { name: "General" });
     expect(within(tabs).getByRole("link", { name: "General" }).getAttribute("aria-current")).toBe("page");
     expect(within(tabs).getByRole("link", { name: "Members" }).getAttribute("aria-current")).toBeNull();
+  });
+
+  it("hold the organization's Usage under Models and usage for an admin", async () => {
+    await mount("/settings/organization/usage");
+    const tabs = await within(content()).findByRole("navigation", { name: "Models and usage" });
+    expect(within(tabs).getAllByRole("link").map((link) => link.textContent)).toEqual(["Models", "Proxy", "Usage"]);
+    expect(within(tabs).getByRole("link", { name: "Usage" }).getAttribute("aria-current")).toBe("page");
+    expect(within(content()).getByText("org page usage")).toBeTruthy();
+    expect(content().className).not.toContain("max-w-3xl");
+  });
+
+  it("refuse the organization's Usage to a member", async () => {
+    orgRole = "member";
+    await mount("/settings/organization/usage");
+    expect(await within(content()).findByText("Organization settings are managed by your org admins")).toBeTruthy();
+    expect(within(content()).queryByText("org page usage")).toBeNull();
   });
 
   it("are hidden from a member, who reaches Teams alone", async () => {

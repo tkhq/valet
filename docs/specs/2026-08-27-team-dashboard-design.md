@@ -100,8 +100,9 @@ a plain member's export carries the team's turns with the user_id column
 blank.
 
 The `/usage` page follows the workspace switcher (PR #435): a team
-workspace pins the page to that team's scope, and the me/org toggle
-renders only in the personal workspace.
+workspace pins the page to that team's scope. Since 2026-11-17 the
+personal page shows only the viewer's spend, and an org admin reads the
+organization's spend on `/settings/organization/usage`.
 
 ### 3. Artifacts owner filter
 

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 /**
- * Proxy settings section (`/settings/api-keys` and team access). Mocks `~/api/proxy-usage`,
+ * Proxy parts of the Access page (`/settings/access` and a team's Access tab). Mocks `~/api/proxy-usage`,
  * `~/api/settings`, and `~/api/api-keys` to assert:
  *   - the Create proxy key button is present (OnboardingPanel rendered);
  *   - in single-user mode (`features.organizations` false/absent), ProxyGovernance
@@ -410,8 +410,8 @@ describe("who may create a proxy key", () => {
     // Team settings pin the team, so the switcher cannot reach a personal
     // key from here: the copy names the personal page and links it.
     expect(help?.textContent).not.toContain("switcher");
-    expect(help?.textContent).toContain("To create your own key, open Personal → API keys and proxy.");
-    expect(screen.getByRole("link", { name: "Personal → API keys and proxy" }).getAttribute("href")).toBe("/settings/api-keys");
+    expect(help?.textContent).toContain("To create your own key, open Personal → Access.");
+    expect(screen.getByRole("link", { name: "Personal → Access" }).getAttribute("href")).toBe("/settings/access");
     expect(help?.textContent).toContain("Team key names are in the API keys section on this tab.");
   });
 

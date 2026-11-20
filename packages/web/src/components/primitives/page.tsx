@@ -47,7 +47,8 @@ export function PageHeader({ title, clause, description, actions, back, classNam
   );
 }
 
-const BACK_LINK_CLASS = "inline-flex min-h-11 items-center text-xs text-muted hover:text-ink sm:min-h-0";
+/** The style of a `BackLink`, for a back link that is a plain anchor. */
+export const BACK_LINK_CLASS = "inline-flex min-h-11 items-center text-xs text-muted hover:text-ink sm:min-h-0";
 
 /**
  * A "← label" link to the parent page. It takes the props of `Link`, so the

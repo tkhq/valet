@@ -56,7 +56,7 @@ const USER_CODE_ALPHABET = "BCDFGHJKLMNPQRSTVWXZ";
 /** What a CLI sign-in can do, shown on the web page. */
 const CLI_ACCESS = [
   "Act as you in Valet from that computer's terminal: start and continue threads, run workflows, and use your connected integrations",
-  "Stay signed in while the CLI is in use. It signs out after 30 days without use, or when you disconnect it in Settings > Agent access",
+  "Stay signed in while the CLI is in use. It signs out after 30 days without use, or when you disconnect it in Settings > Access",
 ];
 
 /** What a CLI token cannot do, shown below the access list. */

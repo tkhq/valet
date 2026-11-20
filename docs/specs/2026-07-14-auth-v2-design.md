@@ -178,7 +178,7 @@ The auth middleware sends a `vltc_` value to `verifyCliAccessToken` instead of b
 
 ### Agent access
 
-Settings > Agent access (`routes/agent-access.ts`, `GET /api/me/agent-access`) lists the MCP apps that hold OAuth tokens for the person and the CLIs signed in with `valet login`. Disconnect deletes the app's `oauthAccessToken` and `oauthConsent` rows, or the CLI's `cli_tokens` row, so it stops working at once. An agent credential cannot disconnect anything.
+Settings > Access, under Connected agents (`routes/agent-access.ts`, `GET /api/me/agent-access`), lists the MCP apps that hold OAuth tokens for the person and the CLIs signed in with `valet login`. Disconnect deletes the app's `oauthAccessToken` and `oauthConsent` rows, or the CLI's `cli_tokens` row, so it stops working at once. An agent credential cannot disconnect anything.
 
 ## Sandbox auth (`auth/sandbox-tokens.ts`)
 

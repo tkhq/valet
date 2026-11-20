@@ -1,33 +1,36 @@
+import type { ReactNode } from "react";
 import { useProxySettings } from "~/api/proxy-usage";
 import { useCreateTeamApiKey, useTeamApiKeys } from "~/api/api-keys";
 import { useOrg, useTeams } from "~/api/settings";
 import { ErrorRow, LoadingRow } from "~/components/primitives";
 import { Section } from "~/components/settings/section";
+import { ProxyAccessLayout } from "~/components/proxy/proxy-access-layout";
 import { ProxyGovernance } from "~/components/proxy/proxy-governance";
 import { OnboardingPanel, type OnboardingPanelProps } from "~/components/usage/OnboardingPanel";
 
 /** Access failures unmount the flow even when queries retain cached data. */
-export function TeamProxySettings({ teamId }: { teamId: string }) {
+export function TeamProxySettings({ teamId, setupIntro, children }: { teamId: string; setupIntro?: ReactNode; children?: ReactNode }) {
   const teamsQ = useTeams();
   const orgQ = useOrg();
   const keysQ = useTeamApiKeys(teamId);
   const settingsQ = useProxySettings();
+  const layout = (setup: ReactNode, proxy: ReactNode = null) => (
+    <ProxyAccessLayout setupIntro={setupIntro} setup={setup} proxy={proxy}>{children}</ProxyAccessLayout>
+  );
   if (teamsQ.error || orgQ.error || keysQ.error || settingsQ.error) {
-    return <ErrorRow>Could not verify team proxy access. Reload this page to try again.</ErrorRow>;
+    return layout(<ErrorRow>Could not verify team proxy access. Reload this page to try again.</ErrorRow>);
   }
   if (!teamsQ.data || !orgQ.data || !keysQ.data || !settingsQ.data) {
-    return <LoadingRow label="Loading team proxy settings…" />;
+    return layout(<LoadingRow label="Loading team proxy settings…" />);
   }
   const team = teamsQ.data.teams.find((candidate) => candidate.id === teamId);
-  if (!team) return <ErrorRow>You are not a member of this team. Choose a team under Your teams.</ErrorRow>;
+  if (!team) return layout(<ErrorRow>You are not a member of this team. Choose a team under Your teams.</ErrorRow>);
   const canCreate = team.callerRole === "admin" || orgQ.data.callerRole === "admin";
-  return (
-    <div className="min-w-0 max-w-full space-y-10">
-      <Section title="Proxy" description={`Route Claude Code, Codex, or OpenCode traffic through ${team.name} for spend tracking and recording.`}>
-        <ProxyGovernance editable={false} />
-      </Section>
-      <TeamOnboarding key={`${teamId}:${canCreate}`} teamId={teamId} canCreate={canCreate} settingsQuery={settingsQ} />
-    </div>
+  return layout(
+    <TeamOnboarding key={`${teamId}:${canCreate}`} teamId={teamId} canCreate={canCreate} settingsQuery={settingsQ} />,
+    <Section title="Proxy" description={`Route Claude Code, Codex, or OpenCode traffic through ${team.name} for spend tracking and recording.`}>
+      <ProxyGovernance editable={false} />
+    </Section>,
   );
 }
 

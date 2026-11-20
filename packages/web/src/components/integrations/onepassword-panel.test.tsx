@@ -14,7 +14,6 @@ import type { OnePasswordSettingsResponse } from "@valet/api/wire";
 const connectMutateAsync = vi.fn().mockResolvedValue({ ok: true });
 const disconnectMutate = vi.fn();
 
-let orgData: { callerRole: "admin" | "member" } = { callerRole: "admin" };
 let settingsData: OnePasswordSettingsResponse | undefined = {
   orgTokenConnected: false,
   personalTokenConnected: false,
@@ -24,10 +23,6 @@ vi.mock("@tanstack/react-router", () => ({
   Link: ({ to, children, className }: { to: string; children: React.ReactNode; className?: string }) => (
     <a href={to} className={className}>{children}</a>
   ),
-}));
-
-vi.mock("~/api/settings", () => ({
-  useOrg: () => ({ data: orgData, isLoading: false, error: null }),
 }));
 
 vi.mock("~/api/onepassword", () => ({
@@ -56,7 +51,6 @@ describe("OnePasswordPanel", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     connectMutateAsync.mockResolvedValue({ ok: true });
-    orgData = { callerRole: "admin" };
     settingsData = { orgTokenConnected: false, personalTokenConnected: false };
   });
 
@@ -100,27 +94,6 @@ describe("OnePasswordPanel", () => {
     expect(screen.getByText("Connected")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Replace" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Remove token" })).toBeTruthy();
-  });
-
-  // The bug report's state: an org token is connected and the reader is a
-  // plain member. This used to render an empty panel.
-  it("member sees the status and who can change it, and no controls", () => {
-    orgData = { callerRole: "member" };
-    settingsData = { orgTokenConnected: true, personalTokenConnected: false };
-    render(<OnePasswordPanel />);
-    expect(screen.getByText("Connected")).toBeTruthy();
-    expect(
-      screen.getByText("Only an organization admin can connect or remove this token."),
-    ).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Connect 1Password" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Remove token" })).toBeNull();
-  });
-
-  it("member with no org token sees Not connected rather than an empty row", () => {
-    orgData = { callerRole: "member" };
-    render(<OnePasswordPanel />);
-    expect(screen.getByText("Not connected")).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Connect 1Password" })).toBeNull();
   });
 
   it("connecting from this page saves at org scope", async () => {

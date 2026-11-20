@@ -145,7 +145,7 @@ export async function submitDeletionRequest(db: AppDb, a: RequestActor, resource
     if (!request) throw new Error("Deletion request insert failed.");
     // Web only. Never invoke provider channel delivery from this flow.
     await routeAttention({ db: tx }, { kind: "review", owner: { type: "team", id: a.teamId }, dedupeKey: request.id,
-      title: `Review deletion of ${resourceLabel}`, href: `/settings/organization/teams?teamId=${encodeURIComponent(a.teamId)}` });
+      title: `Review deletion of ${resourceLabel}`, href: `/settings/teams/${encodeURIComponent(a.teamId)}` });
     return { request, created: true };
   });
 }
