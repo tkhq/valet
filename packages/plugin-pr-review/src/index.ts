@@ -101,3 +101,40 @@ export { githubClient, GitHubError, type GitHubClient } from "./github.js";
 export { isMentionEvent, MENTION_EVENTS, mentionCommand, reviewRequest, type CommentSurface, type ReviewRequest } from "./mention.js";
 export { parseFindings, renderFinding, renderSummary, type PostedFinding } from "./render.js";
 export { classifyOutcome, FINDINGS_COLLECTION, recordKey, type FindingOutcome, type FindingPlacement, type FindingRecord } from "./records.js";
+export {
+  acceptsDependencyEvent,
+  changedDependencyFiles,
+  createDependencyReviewHandler,
+  DEPENDENCY_COLLECTION,
+  DEPENDENCY_HANDLER,
+  DependencySettingsSchema,
+  withReachability,
+  type DependencyPointer,
+  type DependencyPullState,
+  type DependencySettings,
+} from "./deps/handler.js";
+export { compareVersions, dependencyChanges, MAX_CHANGES, type ChangedFile, type PackageChange, type PackageLocation } from "./deps/diff.js";
+export { dependencyFindings, lowerSeverity, type ChangeFacts, type DependencyFinding, type DependencyFindingKind } from "./deps/findings.js";
+export { lookupAdvisories, toAdvisory, type Advisory, type OsvQuery, type OsvVuln } from "./deps/osv.js";
+export {
+  dependencyFile,
+  normalizePypi,
+  parseCargoToml,
+  parseDependencyFile,
+  parseGoMod,
+  parseGoSum,
+  parsePackageJson,
+  parsePackageLock,
+  parsePnpmLock,
+  parsePyproject,
+  parseRequirements,
+  parseTomlPackages,
+  parseYarnLock,
+  type DependencyFile,
+  type Ecosystem,
+  type PackageEntry,
+} from "./deps/parse.js";
+export { buildReachabilityPrompt, REACHABILITY_ROLE, ReachabilitySchema, type ReachabilityVerdict } from "./deps/reachability.js";
+export { packageFacts, REGISTRY_URLS, type PackageFacts, type RegistryUrls } from "./deps/registry.js";
+export { editDistanceAtMostOne, licenseClass, sameLicense, typosquatOf } from "./deps/signals.js";
+export { renderDependencySummary, renderResolvedComment, SUMMARY_MARKER as DEPENDENCY_SUMMARY_MARKER } from "./deps/render.js";

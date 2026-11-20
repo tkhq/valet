@@ -33,6 +33,8 @@ export interface Comparison {
 export interface PullFile {
   filename: string;
   status: string;
+  /** The path before a rename (`status` is `renamed`). */
+  previous_filename?: string;
   additions: number;
   deletions: number;
   /** Absent for binary files and for diffs GitHub will not render. */
