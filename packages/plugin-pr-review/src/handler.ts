@@ -1196,7 +1196,7 @@ const PUSH_ROLES = new Set(["admin", "maintain", "write"]);
  * private org member as `CONTRIBUTOR`, so the author's role decides when the
  * association does not show access.
  */
-async function untrustedFork(gh: GitHubClient, pr: PullRequest): Promise<boolean> {
+export async function untrustedFork(gh: Pick<GitHubClient, "permission">, pr: PullRequest): Promise<boolean> {
   if (pr.head.repo?.full_name === pr.base.repo.full_name) return false;
   if (TRUSTED_FORK_AUTHORS.has(pr.author_association ?? "")) return false;
   const role = pr.user ? await gh.permission(pr.user.login) : undefined;
@@ -1220,7 +1220,8 @@ export function renderAlreadyReviewed(head: string, handle: string): string {
 /** Whether `path` matches one of the exclude globs (see `matchesGlob`). */
 export const excluded = matchesGlob;
 
-async function forEachLimit<T>(items: T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
+/** Run `fn` over `items` with at most `limit` calls in flight. */
+export async function forEachLimit<T>(items: T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
   let next = 0;
   await Promise.all(
     Array.from({ length: Math.min(limit, items.length) }, async () => {

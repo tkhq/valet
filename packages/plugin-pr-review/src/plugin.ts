@@ -3,6 +3,8 @@ import { CHILD_ANSWER_NOTE, createReviewHandler, focusRole, REVIEWER_ROLE, VERIF
 import { FOCUS_PROMPTS, REVIEW_FOCUSES, REVIEWER_SYSTEM_PROMPT } from "./prompt.js";
 import { VERIFIER_SYSTEM_PROMPT } from "./verify.js";
 import { LEARNED_DIR, LEARNER_ROLE, LEARNER_SYSTEM_PROMPT } from "./learn.js";
+import { createDependencyReviewHandler } from "./deps/handler.js";
+import { REACHABILITY_ROLE, REACHABILITY_SYSTEM_PROMPT } from "./deps/reachability.js";
 
 const plugin: ValetPlugin = {
   name: "pr-review",
@@ -39,8 +41,15 @@ const plugin: ValetPlugin = {
       content: `${LEARNER_SYSTEM_PROMPT}\n\n${CHILD_ANSWER_NOTE("submit_lessons")}`,
       source: "plugin",
     },
+    {
+      name: REACHABILITY_ROLE,
+      description: "Judges whether a repository's code calls the vulnerable part of each new dependency advisory and answers with verdicts JSON.",
+      content: `${REACHABILITY_SYSTEM_PROMPT}\n\n${CHILD_ANSWER_NOTE("submit_verdicts")}`,
+      source: "plugin",
+    },
   ],
-  eventHandlers: [createReviewHandler()],
+  // Two handlers, each turned on by its own line: the general review, and the dependency review.
+  eventHandlers: [createReviewHandler(), createDependencyReviewHandler()],
 };
 
 export default plugin;
