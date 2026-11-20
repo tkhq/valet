@@ -35,3 +35,6 @@ export const HOVER_CHROME = "[@media(hover:hover)]:opacity-0 group-hover:opacity
 
 /** A small square button for row chrome. */
 export const CHROME_BUTTON = "inline-flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted hover:bg-ink-wash hover:text-ink focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-line disabled:opacity-50 max-md:min-h-11 max-md:min-w-11";
+
+/** Hides a row control on a phone. */
+export const PHONE_HIDDEN = "max-md:hidden";

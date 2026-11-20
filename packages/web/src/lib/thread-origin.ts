@@ -1,20 +1,10 @@
 /**
- * Thread origin bucketing for the chat sidebar (V2 counterpart of
- * V1's `thread-origin-buckets.ts`). V2 encodes origin in the engine thread
- * KEY convention rather than persisted origin_* columns:
- *
- *   web:{nonce}              → chat    (created from the web UI)
- *   default / web:default    → chat    (the session's default thread)
- *   events                   → auto    (event-subscription + schedule deliveries)
- *   signal:workflow:{runId}  → auto    (workflow orchestrator/llm nodes)
- *   telegram:* / slack:* …   → channel (channel-transport conversations)
- *   signal:{senderId} / rest → other   (cross-orchestrator, unknown)
- *
- * Threads with NO key (older API responses) fall back to `chat` — the
- * conservative bucket, since the UI's own threads dominated before
- * automation existed.
+ * Thread origin bucketing for the chat sidebar. The origin comes from the
+ * engine thread key (`threadOrigin` in @valet/shared, which the server's
+ * thread list also uses).
  */
 import type { ThreadSummary } from "@valet/api/wire";
+import { CHANNEL_THREAD_KEY_PREFIXES, threadOrigin } from "@valet/shared";
 
 export type ThreadOriginBucket = "all" | "chat" | "auto" | "channel" | "other";
 
@@ -26,14 +16,8 @@ export const THREAD_ORIGIN_FILTERS: readonly { id: ThreadOriginBucket; label: st
   { id: "other", label: "Other agents" },
 ];
 
-const CHANNEL_KEY_PREFIXES = ["telegram:", "slack:", "discord:", "email:", "sms:"];
-
 export function threadOriginBucket(thread: Pick<ThreadSummary, "key">): Exclude<ThreadOriginBucket, "all"> {
-  const key = thread.key;
-  if (!key || key === "default" || key.startsWith("web:")) return "chat";
-  if (key === "events" || key.startsWith("signal:workflow:")) return "auto";
-  if (CHANNEL_KEY_PREFIXES.some((p) => key.startsWith(p))) return "channel";
-  return "other";
+  return threadOrigin(thread.key);
 }
 
 /** The channel a channel-owned thread lives in (`slack`, `telegram`, …),
@@ -41,7 +25,7 @@ export function threadOriginBucket(thread: Pick<ThreadSummary, "key">): Exclude<
 export function threadChannelType(thread: Pick<ThreadSummary, "key">): string | undefined {
   const key = thread.key;
   if (!key) return undefined;
-  const prefix = CHANNEL_KEY_PREFIXES.find((p) => key.startsWith(p));
+  const prefix = CHANNEL_THREAD_KEY_PREFIXES.find((p) => key.startsWith(p));
   return prefix?.slice(0, -1);
 }
 

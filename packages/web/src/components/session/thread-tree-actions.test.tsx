@@ -22,6 +22,7 @@ import type {
   GetModelTiersResponse,
   ModelInfo,
   ChildWorkSummary,
+  ThreadLineGroup,
   ThreadSummary,
   WorkflowDefinitionSummary,
 } from "@valet/api/wire";
@@ -34,6 +35,10 @@ const renameMutateAsync = vi.fn().mockResolvedValue({ id: "thread-1" });
 const duplicateMutateAsync = vi.fn();
 
 let threads: ThreadSummary[] = [];
+let lineGroups: ThreadLineGroup[] | undefined;
+/** The threads a line folder's Show more reads, and what it asked for. */
+let moreLineThreads: ThreadSummary[] = [];
+const lineReads: Array<{ groupKey: string; after: string | undefined; enabled: boolean }> = [];
 let searchMatches: ThreadSummary[] = [];
 let archivedThreads: ThreadSummary[] = [];
 let children: ChildWorkSummary[] = [];
@@ -95,7 +100,12 @@ vi.mock("~/api/queries", async (importOriginal) => {
   return {
     ...actual,
     useThreadSearch: () => ({ data: { threads: searchMatches }, isFetching: false, isError: false }),
-    useSidebarThreads: () => ({ data: { threads }, fixedReady, isLoading: false, error: threadPageError ? new Error("network") : null,
+    useLineGroupThreads: (_id: string, groupKey: string, opts: { after: string | undefined; enabled: boolean }) => {
+      lineReads.push({ groupKey, after: opts.after, enabled: opts.enabled });
+      const on = opts.enabled && opts.after !== undefined;
+      return { data: on ? { pages: [{ threads: moreLineThreads }] } : undefined, hasNextPage: false, isFetching: false, error: null, fetchNextPage: vi.fn(), refetch: vi.fn() };
+    },
+    useSidebarThreads: () => ({ data: { threads, lineGroups }, fixedReady, isLoading: false, error: threadPageError ? new Error("network") : null,
       hasNextPage: hasMoreThreads, fetchNextPage: fetchMoreThreads, isFetchNextPageError: threadPageError, isError: threadPageError, isFetching: false }),
     useSession: () => ({
       data: sessionModel ? { model: sessionModel } : undefined,
@@ -219,6 +229,9 @@ beforeEach(() => {
   renameMutateAsync.mockClear();
   duplicateMutateAsync.mockReset();
   threads = [thread()];
+  lineGroups = undefined;
+  moreLineThreads = [];
+  lineReads.length = 0;
   archivedThreads = [];
   searchMatches = [];
   children = [];
@@ -1297,5 +1310,80 @@ describe("ThreadTree: Recents length", () => {
     renderTree();
     expect(recentTitles()).toHaveLength(8);
     expect(screen.queryByRole("button", { name: "Show more" })).toBeNull();
+  });
+});
+
+describe("ThreadTree — Presence line folders", () => {
+  // The newest thread is open when the URL names none, so the working thread is newest.
+  const working = () => thread({ id: "work-1", key: "web:1", title: "Plan the launch", createdAt: 1_000, lastUserActivityAt: 1_000 });
+  const alert = (n: number) => thread({ id: `alert-${n}`, key: `sub:line-1:slack:C1:${n}`, title: `IDX alerts · Deploy ${n} failed`, createdAt: 100 + n, lastUserActivityAt: 100 + n });
+  const group = (overrides: Partial<ThreadLineGroup> = {}): ThreadLineGroup => ({ key: "sub:line-1", kind: "subscription", ruleId: "line-1", name: "IDX alerts", threadCount: 2, ...overrides });
+
+  it("shows a line's threads in a closed folder named for the line, outside Recents", async () => {
+    threads = [alert(1), alert(2), working()];
+    lineGroups = [group()];
+    renderTree();
+    const folder = screen.getByRole("region", { name: "Presence line: IDX alerts" });
+    const toggle = within(folder).getByRole("button", { name: /^IDX alerts/ });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(within(folder).getByText("2")).toBeTruthy();
+    expect(within(folder).queryByText("IDX alerts · Deploy 1 failed")).toBeNull();
+    const recents = screen.getByRole("region", { name: "Recents" });
+    expect(within(recents).getByText("Plan the launch")).toBeTruthy();
+    expect(within(recents).queryByText(/IDX alerts/)).toBeNull();
+    await userEvent.click(toggle);
+    expect(within(folder).getByText("IDX alerts · Deploy 1 failed")).toBeTruthy();
+    expect(within(folder).getByText("IDX alerts · Deploy 2 failed")).toBeTruthy();
+  });
+
+  it("remembers an open folder", async () => {
+    threads = [alert(1), working()];
+    lineGroups = [group({ threadCount: 1 })];
+    const { unmount } = renderTree();
+    await userEvent.click(within(screen.getByRole("region", { name: "Presence line: IDX alerts" })).getByRole("button", { name: /^IDX alerts/ }));
+    unmount();
+    renderTree();
+    expect(within(screen.getByRole("region", { name: "Presence line: IDX alerts" })).getByText("IDX alerts · Deploy 1 failed")).toBeTruthy();
+  });
+
+  it("opens the folder that holds the open thread", () => {
+    // With no thread in the URL, the newest thread is open.
+    threads = [alert(1)];
+    lineGroups = [group({ threadCount: 1 })];
+    renderTree();
+    const folder = screen.getByRole("region", { name: "Presence line: IDX alerts" });
+    expect(within(folder).getByRole("button", { name: /^IDX alerts/ }).getAttribute("aria-expanded")).toBe("true");
+  });
+
+  it("keeps a line thread that needs approval in Recents", () => {
+    threads = [alert(1), alert(2), working()];
+    lineGroups = [group()];
+    pendingGates = { g1: gate("g1", "alert-1") };
+    renderTree();
+    expect(within(screen.getByRole("region", { name: "Recents" })).getByText("IDX alerts · Deploy 1 failed")).toBeTruthy();
+  });
+
+  it("reads the rest of a folder from the group's cursor", async () => {
+    threads = [alert(1), working()];
+    lineGroups = [group({ threadCount: 2, nextCursor: "after-1" })];
+    moreLineThreads = [alert(0)];
+    renderTree();
+    const folder = screen.getByRole("region", { name: "Presence line: IDX alerts" });
+    await userEvent.click(within(folder).getByRole("button", { name: /^IDX alerts/ }));
+    expect(within(folder).queryByText("IDX alerts · Deploy 0 failed")).toBeNull();
+    await userEvent.click(within(folder).getByRole("button", { name: "Show more" }));
+    expect(lineReads.at(-1)).toEqual({ groupKey: "sub:line-1", after: "after-1", enabled: true });
+    expect(within(folder).getByText("IDX alerts · Deploy 0 failed")).toBeTruthy();
+  });
+
+  it("links the folder to its line and shows no link for a deleted line", async () => {
+    threads = [alert(1), working(), thread({ id: "old-1", key: "schedule:gone:1", title: "Old digest", createdAt: 1, lastUserActivityAt: 1 })];
+    lineGroups = [group({ threadCount: 1 }), { key: "schedule:gone", kind: "schedule", ruleId: "gone", name: "Deleted line", threadCount: 1 }];
+    renderTree();
+    await userEvent.click(screen.getByRole("button", { name: "Line menu: IDX alerts" }));
+    expect(screen.getByRole("menuitem", { name: "Open line" }).getAttribute("to")).toBe("/presence/rules/$id");
+    await userEvent.keyboard("{Escape}");
+    await userEvent.click(screen.getByRole("button", { name: "Line menu: Deleted line" }));
+    expect(screen.queryByRole("menuitem", { name: "Open line" })).toBeNull();
   });
 });
