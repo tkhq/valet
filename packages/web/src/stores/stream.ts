@@ -352,6 +352,9 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       next.sessionError = undefined;
       next.statusByThread = {};
       next.activeModelByThread = {};
+      // The server seeds queue state only for threads with something
+      // queued or running, so a queue from before a reconnect is cleared here.
+      next.queueByThread = {};
       next.serverClockOffset = Date.now() - ev.ts;
       // Compacting is transient too: the engine balances the start/end pair
       // in-process, but an api crash mid-compaction orphans the start frame
