@@ -75,6 +75,8 @@ const APP_TABLES = [
   "workflow_signals",
   "credentials",
   "action_invocations",
+  "authorization_decisions",
+  "authorization_execution_attempts",
   "llm_providers",
   "session_repos",
   "github_installations",
@@ -1048,6 +1050,19 @@ describe("pg app schema + migrations", () => {
       await db.query("INSERT INTO session_config_invalidations (session_id, token) VALUES ($1, $2)", ["stale-session", "token"]);
       await applyAppMigrations(db);
       expect((await db.query("SELECT token FROM session_config_invalidations WHERE session_id = $1", ["stale-session"])).rows).toEqual([{ token: "token" }]);
+      expect(await missingSchemaRepairs(db)).toEqual([]);
+    });
+
+    it("repairs the authorization audit tables on an already-migrated database", async () => {
+      await db.query('DROP TABLE "authorization_execution_attempts"');
+      await db.query('DROP TABLE "authorization_decisions"');
+      expect((await missingSchemaRepairs(db)).map(repair => repair.describe)).toEqual(expect.arrayContaining([
+        "authorization decisions table",
+        "authorization execution attempts table",
+        "authorization_decisions_subject index",
+        "authorization_execution_attempts_decision_started index",
+      ]));
+      await applyAppMigrations(db);
       expect(await missingSchemaRepairs(db)).toEqual([]);
     });
 
