@@ -81,6 +81,8 @@ export interface SummaryInput {
   incrementFrom?: string;
   /** A force-push or rebase dropped `incrementFrom`: the review covered the files whose changes differ. */
   incrementRewritten?: boolean;
+  /** Set when the line sizes reviews: the depth this review ran at and why. */
+  depth?: { depth: "light" | "standard" | "deep"; reason: string };
   summary: string;
   confidence: number;
   /** Open findings with an inline comment. */
@@ -112,7 +114,7 @@ export function renderSummary(s: SummaryInput): string {
     "",
     s.summary.trim(),
     "",
-    `**Merge confidence: ${s.confidence}/5** · Reviewed \`${s.head.slice(0, 7)}\` (${scope})`,
+    `**Merge confidence: ${s.confidence}/5** · Reviewed \`${s.head.slice(0, 7)}\` (${scope})${s.depth ? ` · ${s.depth.depth} review: ${s.depth.reason}` : ""}`,
   ];
   if (open.length > 0) {
     lines.push("", `### Open findings (${open.length})`, "");
@@ -169,7 +171,7 @@ function oneLine(s: string): string {
 }
 
 /** A review recorded in the plugin thread only. Nothing of it is on GitHub. */
-export function renderShadowReview(r: { slug: string; commit: string; summary: string; confidence: number; findings: Finding[]; hidden: number; rules?: string[] }): string {
+export function renderShadowReview(r: { slug: string; commit: string; summary: string; confidence: number; findings: Finding[]; hidden: number; rules?: string[]; depth?: SummaryInput["depth"] }): string {
   const sorted = [...r.findings].sort((a, b) => SEVERITIES.indexOf(a.severity) - SEVERITIES.indexOf(b.severity));
   const lines = [
     `## Shadow review of ${r.slug} at \`${r.commit.slice(0, 7)}\``,
@@ -178,7 +180,7 @@ export function renderShadowReview(r: { slug: string; commit: string; summary: s
     "",
     r.summary.trim(),
     "",
-    `**Merge confidence: ${r.confidence}/5** · ${sorted.length} finding(s)`,
+    `**Merge confidence: ${r.confidence}/5** · ${sorted.length} finding(s)${r.depth ? ` · ${r.depth.depth} review: ${r.depth.reason}` : ""}`,
   ];
   for (const f of sorted) {
     lines.push("", `### ${label(f.severity)} · \`${f.path}:${f.line}\`${f.side === "LEFT" ? " (deleted line)" : ""}`, "", `**${oneLine(f.title)}**`, "", f.body.trim());

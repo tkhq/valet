@@ -7,7 +7,8 @@ import { gatherContext, type PackMemory } from "./context/gather.js";
 import { packRules, type ContextPack } from "./context/pack.js";
 import { rankPatch } from "./context/rank.js";
 import { gitFileAt, localRunner } from "./context/repo.js";
-import { git } from "./git.js";
+import { allocateReview, type Allocation } from "./allocate.js";
+import { changedFiles, diffPullRequest, git } from "./git.js";
 import { commentableLines } from "./linemap.js";
 import { createReviewerSpec, type ReviewerSpecOptions } from "./review.js";
 import type { ReviewFocus } from "./prompt.js";
@@ -59,6 +60,8 @@ export interface PipelineResult {
   context?: ContextPack;
   /** What the consolidate stage dropped from `draft`, and why. */
   consolidation?: Consolidation["dropped"];
+  /** The depth `allocate` chose, when it was set. */
+  allocation?: Allocation;
 }
 
 export interface PipelineOptions extends ReviewerSpecOptions {
@@ -86,6 +89,26 @@ export interface PipelineOptions extends ReviewerSpecOptions {
   dedupe?: boolean;
   /** provider/model for the dedupe stage. Unset: the reviewer's model. */
   dedupeModel?: string;
+  /**
+   * Size the review to the change (see `allocateReview`). `model` is the
+   * standard depth's model; `focuses` above is the standard depth's focuses.
+   * The verifiers keep `verifyModel`. Unset: every review runs as configured.
+   */
+  allocate?: { model: string; lightModel?: string; deepModel?: string; riskPaths?: string[] };
+}
+
+/** The depth for this checkout's change, counted the way the live handler counts it. */
+async function allocateFor(opts: PipelineOptions, allocate: NonNullable<PipelineOptions["allocate"]>): Promise<Allocation> {
+  const files = await changedFiles(opts.workspace, opts.base, opts.head);
+  const diff = await diffPullRequest(opts.workspace, opts.base, opts.head, opts.diffBudgetChars ?? DIFF_BUDGET);
+  return allocateReview(files, {
+    model: allocate.model,
+    ...(opts.focuses !== undefined ? { focuses: opts.focuses } : {}),
+    ...(allocate.lightModel !== undefined ? { lightModel: allocate.lightModel } : {}),
+    ...(allocate.deepModel !== undefined ? { deepModel: allocate.deepModel } : {}),
+    ...(allocate.riskPaths !== undefined ? { riskPaths: allocate.riskPaths } : {}),
+    truncated: (diff.dropped ?? []).some((d) => d.reason === "budget"),
+  });
 }
 
 /** Whether a finding clears the confidence threshold. */
@@ -130,7 +153,10 @@ export function mergeFindings(passes: Finding[][], accepted: (f: Finding) => boo
 export async function runReviewPipeline(input: PipelineOptions, run: AgentRunner): Promise<PipelineResult> {
   // Review what GitHub shows: the change since the merge-base. A two-dot
   // diff from a base branch that moved on shows its later commits reversed.
-  const opts = { ...input, base: await mergeBase(input.workspace, input.base, input.head) };
+  const based = { ...input, base: await mergeBase(input.workspace, input.base, input.head) };
+  const allocation = based.allocate ? await allocateFor(based, based.allocate) : undefined;
+  const opts = allocation ? { ...based, focuses: allocation.focuses } : based;
+  const passModel = allocation ? { model: allocation.model } : {};
   // Gather once, before any pass: every pass reads the same pack.
   const context = await gatherPipelineContext(opts);
   const withContext = { ...opts, ...(context ? { contextPack: context.text } : {}) };
@@ -145,7 +171,7 @@ export async function runReviewPipeline(input: PipelineOptions, run: AgentRunner
   const passes = await Promise.all(
     plan.map(async ({ label, focus }) => {
       const reviewer = await createReviewerSpec({ ...withContext, ...(focus ? { focus } : {}) });
-      const result = await run({ ...reviewer, label });
+      const result = await run({ ...reviewer, ...passModel, label });
       return { result, focus, review: result.outcome === "completed" ? reviewer.review() : undefined };
     }),
   );
@@ -166,7 +192,7 @@ export async function runReviewPipeline(input: PipelineOptions, run: AgentRunner
     consolidated = { kept: deduped.kept, dropped: [...consolidated.dropped, ...deduped.dropped] };
   }
   const draft: Review | undefined = merged && consolidated ? { ...merged, findings: consolidated.kept } : merged;
-  const stages = { ...(context ? { context } : {}), ...(consolidated ? { consolidation: consolidated.dropped } : {}) };
+  const stages = { ...(context ? { context } : {}), ...(consolidated ? { consolidation: consolidated.dropped } : {}), ...(allocation ? { allocation } : {}) };
   if (reviewRun.outcome !== "completed" || draft === undefined) {
     return {
       outcome: reviewRun.outcome === "completed" ? "no_review" : reviewRun.outcome,

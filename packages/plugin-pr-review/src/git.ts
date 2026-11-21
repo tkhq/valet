@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { parseNumstat, type ChangedFile } from "./allocate.js";
 import { rankPatch, type DroppedFile } from "./context/rank.js";
 
 const run = promisify(execFile);
@@ -17,6 +18,11 @@ export interface PullRequestDiff {
   files: string[];
   /** Files the budget left out, and why. */
   dropped?: DroppedFile[];
+}
+
+/** The files BASE..HEAD changes, with line counts and renames. */
+export async function changedFiles(cwd: string, base: string, head: string): Promise<ChangedFile[]> {
+  return parseNumstat(await git(cwd, ["diff", "--numstat", "-M", base, head]));
 }
 
 /** Diff BASE..HEAD, keeping whole files until the character budget runs out. */

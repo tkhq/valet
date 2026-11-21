@@ -92,7 +92,7 @@ class FakeGitHub {
   refuseInline = false;
   state: "open" | "closed" = "open";
   /** Files compare(BASE...<sha>) lists, by target sha. Default: a.ts. */
-  filesAt: Record<string, { filename: string; status: string; patch?: string }[]> = {};
+  filesAt: Record<string, { filename: string; status: string; additions?: number; deletions?: number; patch?: string }[]> = {};
   /** Commits a force-push dropped: compare answers 404 for them. */
   gone = new Set<string>();
   compared: string[] = [];
@@ -191,7 +191,7 @@ class FakeGitHub {
       const to = path.slice("/compare/".length).split("...")[1];
       this.compared.push(`${from}...${to}`);
       if (this.gone.has(from) || this.gone.has(to)) return new Response(JSON.stringify({ message: "Not Found" }), { status: 404 });
-      if (from === BASE) return ok({ status: "ahead", merge_base_commit: { sha: BASE }, files: this.filesAt[to] ?? [{ filename: "a.ts" }] });
+      if (from === BASE) return ok({ status: "ahead", merge_base_commit: { sha: BASE }, files: this.filesAt[to] ?? [{ filename: "a.ts", status: "modified", additions: 20, deletions: 3 }] });
       return ok({ status: this.incrementStatus, merge_base_commit: { sha: from }, files: this.incrementFiles.map((filename) => ({ filename })) });
     }
     const commitMatch = /^\/commits\/([0-9a-f]{40})$/.exec(path);
@@ -1266,6 +1266,26 @@ describe("review-pull-request handler", () => {
     expect(body).toContain("Close error fails open");
     expect(body).not.toContain("Same spot as the general finding");
     expect(body).not.toContain("Unsure guess");
+  });
+
+  it("sizes the review to the change when allocate is on", async () => {
+    const run = async (extraFiles: FakeGitHub["extraFiles"]) => {
+      const gh = new FakeGitHub();
+      gh.extraFiles = extraFiles;
+      gh.filesAt[H1] = [{ filename: "a.ts", status: "modified", additions: 20, deletions: 3 }, ...extraFiles];
+      const threads = new FakeThreads(() => reviewOf([]));
+      await createReviewHandler({ fetch: gh.fetch }).handle(event("ev1"), context(threads, new FakeStore(), { shadow: true, contextBudget: 0, allocate: true, lightModel: "s", deepModel: "l" }));
+      return threads;
+    };
+    const light = await run([]);
+    expect(light.spawned.map((c) => [c.req.role, c.req.model])).toEqual([["pr-reviewer", "s"]]);
+    expect(light.records[0].body).toContain("· light review: 23 changed lines of code");
+
+    const deep = await run([{ filename: "src/auth/session.ts", status: "modified", additions: 4, deletions: 1, patch: "@@ -1,1 +1,4 @@\n+a\n+b\n+c\n+d" }]);
+    expect(deep.spawned.map((c) => `${c.req.role} ${c.req.model}`).sort()).toEqual(
+      [`pr-reviewer l`, `${focusRole("failure")} l`, `${focusRole("concurrency")} l`, `${focusRole("tests")} l`].sort(),
+    );
+    expect(deep.records[0].body).toContain("· deep review: touches `src/auth/session.ts`");
   });
 
   it("records the general review when a focused child cannot start", async () => {

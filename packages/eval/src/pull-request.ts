@@ -202,6 +202,7 @@ async function reviewInWorkspace(
       ...(opts.reviewPasses !== undefined ? { passes: opts.reviewPasses } : {}),
       ...(opts.reviewFocus !== undefined ? { focuses: opts.reviewFocus } : {}),
       ...(opts.focusMinConfidence !== undefined ? { focusMinConfidence: opts.focusMinConfidence } : {}),
+      ...(opts.allocate !== undefined ? { allocate: { model: modelSpec, ...opts.allocate } } : {}),
       ...(opts.minConfidence !== undefined ? { minConfidence: opts.minConfidence } : {}),
       ...(opts.reviewDedupe ? { dedupe: true } : {}),
       ...(opts.contextBudget ? { contextBudget: opts.contextBudget * 4 } : {}),
@@ -223,6 +224,7 @@ async function reviewInWorkspace(
       ...(pipeline.verdicts.length > 0 ? { verdicts: pipeline.verdicts } : {}),
       ...(pipeline.context !== undefined ? { context: pipeline.context } : {}),
       ...(pipeline.consolidation !== undefined && pipeline.consolidation.length > 0 ? { consolidation: pipeline.consolidation } : {}),
+      ...(pipeline.allocation !== undefined ? { allocation: pipeline.allocation } : {}),
       ...(reasoning !== undefined ? { reasoning } : {}),
     },
   };
