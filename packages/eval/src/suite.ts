@@ -66,6 +66,8 @@ export interface SuiteOptions {
   reviewFocus?: ReviewFocus[];
   /** Drop focused-pass findings rated below this confidence (0-1). */
   focusMinConfidence?: number;
+  /** Size each code review to its change: light and deep models for small and risky changes (see `allocateReview`). */
+  allocate?: { lightModel?: string; deepModel?: string };
   /** Drop code-review findings rated below this confidence (0-1). */
   minConfidence?: number;
   /** Merge code-review findings that report the same defect at nearby lines (one model call per review). */
@@ -203,6 +205,7 @@ export async function runSuite(cases: EvalCase[], opts: SuiteOptions): Promise<S
                 ...(opts.reviewPasses !== undefined ? { reviewPasses: opts.reviewPasses } : {}),
                 ...(opts.reviewFocus !== undefined ? { reviewFocus: opts.reviewFocus } : {}),
                 ...(opts.focusMinConfidence !== undefined ? { focusMinConfidence: opts.focusMinConfidence } : {}),
+                ...(opts.allocate !== undefined ? { allocate: opts.allocate } : {}),
                 ...(opts.minConfidence !== undefined ? { minConfidence: opts.minConfidence } : {}),
                 ...(opts.reviewDedupe ? { reviewDedupe: true } : {}),
                 ...(opts.contextBudget !== undefined ? { contextBudget: opts.contextBudget } : {}),

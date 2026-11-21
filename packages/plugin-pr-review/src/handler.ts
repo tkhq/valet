@@ -14,6 +14,7 @@ import { cutPatch, type PullRequestDiff } from "./git.js";
 import { githubClient, GitHubError, type GitHubClient, type PullFile, type PullRequest, type ReviewComment, type ReviewThread } from "./github.js";
 import { matchesGlob } from "./context/glob.js";
 import { consolidateFindings } from "./consolidate.js";
+import { allocateReview, type Allocation } from "./allocate.js";
 import { confidentEnough, mergeFindings } from "./pipeline.js";
 import { gatherForReview, noteBestEffort, renderConsolidation, type StageOutcome } from "./stages.js";
 import { sameIssue } from "./incremental.js";
@@ -77,6 +78,18 @@ export const ReviewSettingsSchema = Type.Object(
     model: Type.String({
       default: "anthropic/claude-sonnet-5-5",
       description: "provider/model for the reviewer and verifier children.",
+    }),
+    allocate: Type.Boolean({
+      default: false,
+      description: "Size each review to the change. A docs-only or small change gets `lightModel` and no focused children. A change that touches a risky path, or is too large for the diff budget, gets `deepModel` and all focused children. Other changes get `model` and `focuses`.",
+    }),
+    lightModel: Type.String({
+      default: "",
+      description: "Model for a light review when `allocate` is on: a size tier such as `s`, or a provider/model. Empty: `model`.",
+    }),
+    deepModel: Type.String({
+      default: "",
+      description: "Model for a deep review when `allocate` is on: a size tier such as `l`, or a provider/model. Empty: `model`.",
     }),
     riskPaths: Type.Array(Type.String({ minLength: 1 }), {
       default: [],
@@ -409,14 +422,18 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
   });
 
   // 2. Review the PR, or only the new commits, told what is already open.
+  const diff = rewritten
+    ? prDiffFor(prDiff, reviewed.filter((f) => changedSince?.has(f.filename)), mergeBase, head, settings.riskPaths)
+    : from !== undefined ? await incrementDiff(gh, from, head, reviewed, settings.riskPaths) : prDiffFor(prDiff, reviewed, mergeBase, head, settings.riskPaths);
+  const allocation = settings.allocate ? allocateFor(settings, reviewed, diff) : undefined;
+  if (allocation) log(slug, `${allocation.depth} review (${allocation.model}${allocation.focuses.length > 0 ? ` + ${allocation.focuses.join(", ")}` : ""}): ${allocation.reason}`);
   const rules = new Set<string>();
   const review = (async () => runReviewers(ctx, thread, {
     onRules: (paths) => paths.forEach((p) => rules.add(p)),
     onPack: (text) => { packText ??= text; packSeen(); },
-    slug, repoName, pr, base: mergeBase, head, settings,
-    diff: rewritten
-      ? prDiffFor(prDiff, reviewed.filter((f) => changedSince?.has(f.filename)), mergeBase, head, settings.riskPaths)
-      : from !== undefined ? await incrementDiff(gh, from, head, reviewed, settings.riskPaths) : prDiffFor(prDiff, reviewed, mergeBase, head, settings.riskPaths),
+    slug, repoName, pr, base: mergeBase, head,
+    settings: allocation ? { ...settings, model: allocation.model, focuses: allocation.focuses } : settings,
+    diff,
     ...(from !== undefined ? { incrementFrom: from, ...(rewritten ? { incrementRewritten: true } : {}) } : {}),
     knownFindings: [...open.live, ...open.dismissed.filter(hasTitle)].map((f) => ({ path: f.path, line: f.line, title: f.title })),
     dispatchId: dispatch("review"),
@@ -514,6 +531,7 @@ async function reviewPullRequestEvent(event: PluginEvent, ctx: PluginEventContex
     renderSummary({
       head,
       ...(from !== undefined ? { incrementFrom: from, ...(rewritten ? { incrementRewritten: true } : {}) } : {}),
+      ...(allocation ? { depth: { depth: allocation.depth, reason: allocation.reason } } : {}),
       summary: draft.summary,
       confidence: draft.confidence,
       inline: [...stillOpen.filter((f) => f.commentId !== undefined), ...reopened, ...inline],
@@ -1024,10 +1042,14 @@ async function shadowReview(
   const reviewed = files.filter((f) => !excluded(f.filename, settings.excludePaths));
   const prDiff = (await gh.compareDiff(mergeBase, checkout)) ?? undefined;
   const rules = new Set<string>();
+  const diff = prDiffFor(prDiff, reviewed, mergeBase, checkout, settings.riskPaths);
+  const allocation = settings.allocate ? allocateFor(settings, reviewed, diff) : undefined;
+  if (allocation) log(slug, `${allocation.depth} review (${allocation.model}${allocation.focuses.length > 0 ? ` + ${allocation.focuses.join(", ")}` : ""}): ${allocation.reason}`);
   const draft = await runReviewers(ctx, thread, {
     onRules: (paths) => paths.forEach((p) => rules.add(p)),
-    slug, repoName, pr, base: mergeBase, head: checkout, settings,
-    diff: prDiffFor(prDiff, reviewed, mergeBase, checkout, settings.riskPaths),
+    slug, repoName, pr, base: mergeBase, head: checkout,
+    settings: allocation ? { ...settings, model: allocation.model, focuses: allocation.focuses } : settings,
+    diff,
     knownFindings: [],
     dispatchId: dispatch("shadow-review"),
     context: { readTrusted: (path: string) => gh.fileText(path, mergeBase), patch: prDiff !== undefined ? onlyFiles(prDiff, new Set(reviewed.map((f) => f.filename))) : undefined },
@@ -1038,7 +1060,7 @@ async function shadowReview(
   ctx.signal.throwIfAborted();
   await ctx.threads.record(
     thread,
-    renderShadowReview({ slug, commit: checkout, summary: draft.summary, confidence: draft.confidence, findings: shown, hidden: draft.findings.length - shown.length, rules: [...rules].sort() }),
+    renderShadowReview({ slug, commit: checkout, summary: draft.summary, confidence: draft.confidence, findings: shown, hidden: draft.findings.length - shown.length, rules: [...rules].sort(), ...(allocation ? { depth: { depth: allocation.depth, reason: allocation.reason } } : {}) }),
     { dispatchId: dispatch("shadow-record") },
   );
   // A shadow line on an open pull request records what it would have posted, so its outcomes compare with the live line's.
@@ -1107,6 +1129,15 @@ async function readableText(gh: GitHubClient, path: string, ref: string): Promis
     console.warn(`pr-review: cannot read ${path} at ${ref.slice(0, 7)}; checks treat it as unreadable`, err instanceof Error ? err.message : err);
     return undefined;
   }
+}
+
+/** The review depth for the files this review covers: the ones in `diff`, counted from the PR's file list. */
+export function allocateFor(settings: ReviewSettings, files: PullFile[], diff: PullRequestDiff): Allocation {
+  const inDiff = new Set(diff.files);
+  return allocateReview(
+    files.filter((f) => inDiff.has(f.filename)).map((f) => ({ path: f.filename, ...(f.previous_filename ? { previousPath: f.previous_filename } : {}), additions: f.additions, deletions: f.deletions })),
+    { model: settings.model, focuses: settings.focuses, lightModel: settings.lightModel, deepModel: settings.deepModel, riskPaths: settings.riskPaths, truncated: (diff.dropped ?? []).some((d) => d.reason === "budget") },
+  );
 }
 
 /** The PR diff limited to the reviewed files, cut to the budget. */

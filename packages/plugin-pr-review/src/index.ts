@@ -101,3 +101,4 @@ export { githubClient, GitHubError, type GitHubClient } from "./github.js";
 export { isMentionEvent, MENTION_EVENTS, mentionCommand, reviewRequest, type CommentSurface, type ReviewRequest } from "./mention.js";
 export { parseFindings, renderFinding, renderSummary, type PostedFinding } from "./render.js";
 export { classifyOutcome, FINDINGS_COLLECTION, recordKey, type FindingOutcome, type FindingPlacement, type FindingRecord } from "./records.js";
+export { allocateReview, parseNumstat, DEEP_MIN_LINES, LIGHT_MAX_LINES, type Allocation, type AllocationOptions, type ChangedFile, type ReviewDepth } from "./allocate.js";

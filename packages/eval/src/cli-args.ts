@@ -48,6 +48,8 @@ export interface CliOptions {
   reviewFocus?: ReviewFocus[];
   /** Drop focused-pass findings rated below this confidence (0-1). */
   focusMinConfidence?: number;
+  /** Size each code review to its change: light and deep models for small and risky changes (see `allocateReview`). */
+  allocate?: { lightModel?: string; deepModel?: string };
   /** Drop code-review findings rated below this confidence (0-1). */
   minConfidence?: number;
   /** Merge code-review findings that report the same defect at nearby lines (one model call per review). */
@@ -83,6 +85,9 @@ export function parseCliArgs(argv: string[]): CliOptions {
       "review-passes": { type: "string" },
       "review-focus": { type: "string" },
       "focus-min-confidence": { type: "string" },
+      allocate: { type: "boolean", default: false },
+      "light-model": { type: "string" },
+      "deep-model": { type: "string" },
       "min-confidence": { type: "string" },
       "review-dedupe": { type: "boolean", default: false },
       "context-budget": { type: "string" },
@@ -186,6 +191,7 @@ export function parseCliArgs(argv: string[]): CliOptions {
     ...(reviewPasses !== undefined ? { reviewPasses } : {}),
     ...(reviewFocus !== undefined ? { reviewFocus } : {}),
     ...(focusMinConfidence !== undefined ? { focusMinConfidence } : {}),
+    ...(values.allocate ? { allocate: { ...(values["light-model"] !== undefined ? { lightModel: values["light-model"] } : {}), ...(values["deep-model"] !== undefined ? { deepModel: values["deep-model"] } : {}) } } : {}),
     ...(minConfidence !== undefined ? { minConfidence } : {}),
     ...(values["review-dedupe"] ? { reviewDedupe: true } : {}),
     ...(contextBudget !== undefined ? { contextBudget } : {}),

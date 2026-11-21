@@ -35,6 +35,8 @@ export interface PullFile {
   status: string;
   additions: number;
   deletions: number;
+  /** The path before a rename. */
+  previous_filename?: string;
   /** Absent for binary files and for diffs GitHub will not render. */
   patch?: string;
 }

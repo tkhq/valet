@@ -184,6 +184,63 @@ private history suite caught 11 of 20 human-raised issues, against 8 in two
 baseline runs. Martian F1 fell from 53.5 to 48.7. Turn focuses on per
 repository, and measure them in shadow mode first.
 
+## Review allocation
+
+With `allocate` on, the handler sizes each review to the change before any
+child starts. It counts the files this review covers, from the pull request's
+file list. Lockfiles, generated, vendored and binary files do not count.
+
+| Depth | When | Model | Focused children |
+| --- | --- | --- | --- |
+| light | only docs and tests change, or at most 40 changed lines of other code | `lightModel`, or `model` when empty | none |
+| deep | a risky path changes, the diff is over the review budget, or more than 1000 lines change | `deepModel`, or `model` when empty | `focuses`, or all three when `focuses` is empty |
+| standard | anything else | `model` | `focuses` |
+
+A risky path for allocation is a source file whose path names auth, secrets,
+keys, signing, access control, payments, webhooks or migrations, or any file
+that matches the line's `riskPaths` globs. Tests and docs are never risky by
+name. This list is narrower than the diff ranking's risk words: on the private
+history suite those made half of all reviews deep, mostly through UI session
+components and schemas.
+
+The models accept a size tier or a provider/model. A tier resolves through the
+org's tier map, like any child model. The summary names the depth and the
+reason, for example "deep review: touches `db/migrations/0042.sql`", and the
+log line names the model and focused children. Rechecks and verifiers keep
+`model`. The eval runs the same rules with `--allocate`, `--light-model` and
+`--deep-model`.
+
+### Benchmark (2026-11-20)
+
+The live history suite has 104 cases. The rules make 10 light, 42 standard
+and 52 deep. The benchmark ran each depth's cases with each candidate setup,
+three runs per case, and compared it to today's review (the medium model, no
+focused children) with `review-compare`. The escaped-bug suite adds 10 deep
+cases where the review missed a bug that shipped.
+
+| Depth | Candidate | Recall | False findings per review | Cost per review |
+| --- | --- | --- | --- | --- |
+| light | small model | 53% to 20% (-33, interval -67 to -8) | 1.08x | $0.075 to $0.004 |
+| deep | large model | 43% to 45% (+2, interval -9 to +13) | 1.32x | 3.0x ($0.33 to $0.98) |
+| deep | medium model + 3 focused children | 43% to 57% (+14, interval +6 to +23) | 2.38x | 3.5x ($0.33 to $1.14) |
+| escaped | large model | 31% to 33% (+3, interval -10 to +22) | 1.62x | 3.3x |
+| escaped | medium model + 3 focused children | 31% to 31% (0) | 2.80x | 3.1x |
+
+Results:
+
+- The small model loses most findings on small changes, and the medium
+  model costs less than $0.08 there. A light review saves almost nothing.
+- The large model adds cost and false findings but no measurable recall.
+- Focused children are the one lever that finds more on risky changes. They
+  do not find more of the bugs that shipped, and they more than double the
+  false findings.
+
+So `lightModel` and `deepModel` default to the line's model, and `allocate`
+stays off. With `allocate` on, a line gets focused children only on deep
+changes. That is the cheaper way to run focused children on a line that
+wants them, since about half of the suite is not deep. No setup passes the
+ship rule, which limits the rise in false findings to 10%.
+
 ## Learning from review feedback
 
 When a reviewed pull request closes (`github.pull_request.closed`), the handler

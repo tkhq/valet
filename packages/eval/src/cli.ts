@@ -16,6 +16,9 @@
  *   --review-passes <n>  independent code-review passes per case (default 1)
  *   --review-focus <list> extra focused code-review passes: failure,concurrency,tests
  *   --focus-min-confidence <x> drop focused-pass findings rated below x (0-1)
+ *   --allocate           size each code review to its change (light/standard/deep)
+ *   --light-model <spec> light-review model with --allocate (default: --model)
+ *   --deep-model <spec>  deep-review model with --allocate (default: --model)
  *   --min-confidence <x> drop code-review findings rated below x (0-1)
  *   --review-dedupe      merge code-review findings that report the same defect
  *   --context-budget <tokens>  context pack built before each code review (default 0: none)
@@ -122,6 +125,7 @@ async function main(): Promise<number> {
     ...(opts.reviewPasses !== undefined ? { reviewPasses: opts.reviewPasses } : {}),
     ...(opts.reviewFocus !== undefined ? { reviewFocus: opts.reviewFocus } : {}),
     ...(opts.focusMinConfidence !== undefined ? { focusMinConfidence: opts.focusMinConfidence } : {}),
+    ...(opts.allocate !== undefined ? { allocate: opts.allocate } : {}),
     ...(opts.minConfidence !== undefined ? { minConfidence: opts.minConfidence } : {}),
     ...(opts.reviewDedupe ? { reviewDedupe: true } : {}),
     ...(opts.contextBudget !== undefined ? { contextBudget: opts.contextBudget } : {}),
