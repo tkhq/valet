@@ -500,11 +500,11 @@ describe("PlacePage", () => {
 
   it("shows the server's refusal when the read fails", async () => {
     const { ApiError } = await import("~/api/client");
-    const text = "Valet is not present in that place in this workspace. Open Places to see where it is.";
+    const text = "Valet is not present in that place in this workspace. Open Presence to see where it is.";
     getPresencePlace.mockRejectedValue(new ApiError(404, text, { error: text }));
     renderPage("github:acme/nothing");
     expect((await screen.findByRole("alert")).textContent).toBe(
-      "Valet is not present in that place in this workspace. Open Places to see where it is.",
+      "Valet is not present in that place in this workspace. Open Presence to see where it is.",
     );
   });
 });

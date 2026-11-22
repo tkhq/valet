@@ -438,8 +438,14 @@ Pass criterion: all steps, in one run, from a clean start.
       filter in words>`, `the sender is not allowed`, `the line was off`,
       `another line claimed it`, or the skip text the api recorded, with
       its leading `Skipped,` removed so the word appears once. `on`
-      precedes a GitHub place and `in` a Slack or Linear place. `Show
-      earlier` loads the next page. The timeline polls every 30 seconds
+      precedes a GitHub place and `in` a Slack or Linear place. A place
+      token opens the place page when the place is on the places list;
+      otherwise it is a token with no link. A skipped entry can name a
+      place Valet is not in: its page answers 404 with `Valet is not
+      present in that place in this workspace. Open Presence to see where
+      it is.`, and Activity lists no event for it, because an event no
+      line matched leaves only a receipt. `Show earlier` loads the next
+      page. The timeline polls every 30 seconds
       while at most one loaded page holds entries. When a page is empty and a cursor
       follows, the page fetches the next one itself, at most three times,
       then reads `Nothing in the newest entries. To look further back,
