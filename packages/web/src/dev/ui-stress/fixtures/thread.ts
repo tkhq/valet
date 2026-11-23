@@ -37,7 +37,7 @@ function message(i: number, fields: Pick<Message, "role" | "content" | "parts"> 
 /** A finished turn as the engine writes it: one message per agent step,
  * most of them tool calls only, so the transcript folds them into one work
  * line. It has reasoning, plugin calls with the agent's own purpose line,
- * an agent it started and messaged, a failed push, and a reply. */
+ * an agent it started and messaged, a failed push, a reply, and a brief. */
 function turnMessage(i: number, fields: Pick<Message, "role" | "content" | "parts"> & Partial<Message>): Message {
   return { ...message(i, fields), id: `turn-${i}`, createdAt: NOW - (40 - i) * MINUTE };
 }
@@ -99,6 +99,17 @@ export const workTurnMessages: Message[] = [
   ] }),
   turnMessage(8, { role: "assistant", content: "", parts: [
     { kind: "text", text: `Here is where each goal stands.\n\n${PROSE_TABLE}\n\nThe two open items:\n\n${LINK_TABLE}\n\nAnd the open pull requests:\n\n${WIDE_TABLE}` },
+  ] }),  turnMessage(9, { role: "user", content: "What needs me this week?", parts: [], author: { id: stressMe.id, name: stressMe.name } }),
+  turnMessage(10, { role: "assistant", content: "", parts: [
+    { kind: "tool_call", callId: "turn-brief", toolName: "show_brief", status: done, args: {
+      headline: "This week: 1 in progress, 2 need you, 1 done.",
+      items: [
+        { topic: "Retry fix", text: "The push failed with a 403. Give me write access or push it yourself.", state: "needs_you" },
+        { topic: "API docs", text: "The docs pull request waits for your review.", state: "needs_you", href: "https://github.com/example/app/pull/42" },
+        { topic: "Retry coverage", text: "A child agent is reviewing the cooldown tests.", state: "working", thread_id: "child-review" },
+        { topic: "Pricing notes", text: "Saved from last week's two calls.", state: "done" },
+      ],
+    }, result: { text: "Brief shown: This week: 1 in progress, 2 need you, 1 done. (4 items)." } },
   ] }),
 ];
 

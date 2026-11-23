@@ -17,7 +17,7 @@ function sources(dir: string): string[] {
 }
 
 /** Constants a tool def uses for its name, found next to the def. */
-const CONSTANT_NAMES: Record<string, string> = { SKILL_TOOL_NAME: "skill", SKILL_SCRIPT_TOOL_NAME: "skill_script", WIDGET_TOOL_NAME: "show_widget" };
+const CONSTANT_NAMES: Record<string, string> = { SKILL_TOOL_NAME: "skill", SKILL_SCRIPT_TOOL_NAME: "skill_script", WIDGET_TOOL_NAME: "show_widget", BRIEF_TOOL_NAME: "show_brief" };
 /** Native tools with no `defineTool` call: the engine builds them in place. */
 const EXTRA = ["list_tools", "search_tools", "describe_tool", "find_replace", "call_tool", "file_attach"];
 
