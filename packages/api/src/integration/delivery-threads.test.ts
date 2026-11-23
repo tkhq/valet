@@ -29,7 +29,7 @@ import { and, eq, sql } from "drizzle-orm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { linkIdentity } from "../channels/identity-links.js";
 import { __resetSlackWebhookThrottle } from "../channels/slack-inbox.js";
-import { summaryTitle } from "../events/destination.js";
+import { lineThreadTitle } from "../events/destination.js";
 import { findFollowedThread } from "../events/followed-threads.js";
 import {
   eventDeliveries,
@@ -501,7 +501,7 @@ describe("api integration: delivery threads acceptance scenario", () => {
       const landed = await landingOf(api, delivery);
       expect(landed.key).toBe(`sub:${r4}:${delivery.id}`);
       const [event] = await p.db.select().from(events).where(eq(events.id, delivery.eventId));
-      expect(landed.title).toBe(summaryTitle(event?.summary ?? ""));
+      expect(landed.title).toBe(lineThreadTitle("acme/api failures", undefined, event?.summary ?? ""));
       expect(landed.id).toBe(failureThreads.find((t) => t.key === `sub:${r4}:${t5[i]?.id}`)?.id);
     }
     const second = t5[1];

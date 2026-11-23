@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { resolveDestination, type Destination, type DestinationInput } from "./destination.js";
+import { lineThreadTitle, resolveDestination, type Destination, type DestinationInput } from "./destination.js";
 
 interface Vector {
   name: string;
@@ -104,5 +104,36 @@ describe("new-mode keys across deliveries", () => {
     const one = at({ ...base, deliveryId: "del-1", conversationKey: "slack:C1:1712345678.000100" });
     const two = at({ ...base, deliveryId: "del-2", conversationKey: "slack:C1:1712349999.000200" });
     expect(one).not.toEqual(two);
+  });
+});
+
+describe("lineThreadTitle", () => {
+  it("names the line and the first line of the message, without Slack markup", () => {
+    expect(lineThreadTitle("IDX alerts", "\n  *Deploy failed* on `main`\nsecond line", "slack bot_message in C1")).toBe("IDX alerts · Deploy failed on main");
+  });
+
+  it("falls back to the event summary when the message has no text", () => {
+    expect(lineThreadTitle("IDX alerts", undefined, "slack bot_message in C1")).toBe("IDX alerts · slack bot_message in C1");
+    expect(lineThreadTitle("IDX alerts", "  \n ", "file shared")).toBe("IDX alerts · file shared");
+  });
+
+  it("is the line name alone when there is no text and no summary", () => {
+    expect(lineThreadTitle("IDX alerts", "", " ")).toBe("IDX alerts");
+  });
+
+  it("cuts a long title to 80 characters at a word boundary", () => {
+    const title = lineThreadTitle("IDX alerts", "word ".repeat(40), "s");
+    expect(title.length).toBeLessThanOrEqual(80);
+    expect(title.endsWith("word")).toBe(true);
+  });
+
+  it("titles a new-mode subscription thread from the message text", () => {
+    const destination = resolveDestination({
+      rule: { id: "rule-msg", kind: "subscription", name: "Deploy questions", policy: { mode: "new" } },
+      event: { deliveryId: "del-1", summary: "message in C1 by U1", text: "How do I deploy?", naturalSubject: null, conversational: true },
+      binding: null,
+      claim: null,
+    });
+    expect(destination).toMatchObject({ kind: "key", key: "sub:rule-msg:del-1", title: "Deploy questions · How do I deploy?" });
   });
 });

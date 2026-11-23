@@ -71,6 +71,9 @@ export const qk = {
   workspaceConversations: (workspace: string) => ["workspace-conversations", workspace] as const,
   threads: (id: string) => ["sessions", id, "threads"] as const,
   threadPages: (id: string, options?: object) => ["sessions", id, "threads", "pages", ...(options ? [options] : [])] as const,
+  /** A Presence line group's pages. Not "pages": rows that move between
+   * lists (archive, new activity) never land in a group's cache. */
+  lineThreadPages: (id: string, groupKey: string, sort: string) => ["sessions", id, "threads", "line-pages", groupKey, sort] as const,
   threadSearch: (id: string, query: string) => ["sessions", id, "threads", "search", query] as const,
   threadsArchived: (id: string) => ["sessions", id, "threads", "archived"] as const,
   messages: (id: string, threadId?: string) =>
@@ -167,7 +170,7 @@ export function useSidebarThreads(id: string, options: { sort: string; origin: s
   const query = useInfiniteQuery({
     queryKey: qk.threadPages(id, { sort, origin }),
     initialPageParam: undefined as string | undefined,
-    queryFn: ({ pageParam }) => api.listThreads(id, { sort, origin, limit: 10, cursor: pageParam }),
+    queryFn: ({ pageParam }) => api.listThreads(id, { sort, origin, limit: 10, cursor: pageParam, lineGroups: true }),
     getNextPageParam: page => page.nextCursor,
     enabled: !!id,
   });
@@ -183,6 +186,18 @@ export function useSidebarThreads(id: string, options: { sort: string; origin: s
     data: pages ? {
       ...pages[0], threads: [...new Map([...pages.flatMap(page => page.threads), ...(fixed.data?.threads.filter(thread => fixedIds.includes(thread.id) || thread.id === threadId) ?? [])].map(thread => [thread.id, thread])).values()],
     } : undefined };
+}
+
+/** One Presence line group's threads after the first page's preview, ten at
+ * a time. `after` is the group's `nextCursor`. */
+export function useLineGroupThreads(id: string, groupKey: string, options: { sort: string; after: string | undefined; enabled: boolean }) {
+  return useInfiniteQuery({
+    queryKey: qk.lineThreadPages(id, groupKey, options.sort),
+    initialPageParam: options.after,
+    queryFn: ({ pageParam }) => api.listThreads(id, { sort: options.sort, line: groupKey, limit: 10, cursor: pageParam }),
+    getNextPageParam: page => page.nextCursor,
+    enabled: !!id && options.enabled && options.after !== undefined,
+  });
 }
 
 export function mapThreadData(current: ListThreadsResponse | InfiniteData<ListThreadsResponse> | undefined, change: (thread: ThreadSummary) => ThreadSummary) {

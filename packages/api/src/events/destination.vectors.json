@@ -45,7 +45,7 @@
     "expected": { "kind": "target", "sessionId": "sess-inc", "threadId": "thread-inc", "reason": "claim_redirect" }
   },
   {
-    "name": "policy new on a subscription keys by the rule and the delivery, titled by the summary",
+    "name": "policy new on a subscription keys by the rule and the delivery, titled by the line and the summary",
     "input": {
       "rule": { "id": "rule-5", "kind": "subscription", "name": "CI failures", "policy": { "mode": "new" } },
       "event": {
@@ -60,7 +60,7 @@
     "expected": {
       "kind": "key",
       "key": "sub:rule-5:del-5",
-      "title": "check_run completed with status failure",
+      "title": "CI failures · check_run completed with status failure",
       "reason": "policy_new"
     }
   },
@@ -80,19 +80,19 @@
     "expected": {
       "kind": "key",
       "key": "sub:rule-6:del-6",
-      "title": "word word word word word word word word word word word word word word word word",
+      "title": "Long summaries · word word word word word word word word word word word word",
       "reason": "policy_new"
     }
   },
   {
-    "name": "policy new titles an empty summary Event",
+    "name": "policy new titles an empty summary with the line name",
     "input": {
       "rule": { "id": "rule-7", "kind": "subscription", "name": "Empty summaries", "policy": { "mode": "new" } },
       "event": { "deliveryId": "del-7", "summary": "", "naturalSubject": null, "conversational": false },
       "binding": null,
       "claim": null
     },
-    "expected": { "kind": "key", "key": "sub:rule-7:del-7", "title": "Event", "reason": "policy_new" }
+    "expected": { "kind": "key", "key": "sub:rule-7:del-7", "title": "Empty summaries", "reason": "policy_new" }
   },
   {
     "name": "policy new on a schedule keys by the rule and the fire time, titled by the name and the UTC date",
@@ -205,7 +205,7 @@
       "binding": null,
       "claim": null
     },
-    "expected": { "kind": "key", "key": "sub:rule-msg:slack:C1:1712345678.000100", "title": "How do I deploy?", "reason": "policy_new" }
+    "expected": { "kind": "key", "key": "sub:rule-msg:slack:C1:1712345678.000100", "title": "Deploy questions · How do I deploy?", "reason": "policy_new" }
   },
   {
     "name": "policy new keys a reply in the same Slack thread to the root's key",
@@ -215,7 +215,7 @@
       "binding": null,
       "claim": null
     },
-    "expected": { "kind": "key", "key": "sub:rule-msg:slack:C1:1712345678.000100", "title": "Same question for staging", "reason": "policy_new" }
+    "expected": { "kind": "key", "key": "sub:rule-msg:slack:C1:1712345678.000100", "title": "Deploy questions · Same question for staging", "reason": "policy_new" }
   },
   {
     "name": "a conversation binding still wins over a new policy with a conversation key",

@@ -1,4 +1,5 @@
 import { HOME_THREAD_KEY, HOME_THREAD_TITLE } from "../home/context.js";
+import type { AppDb } from "../lib/drizzle.js";
 import { secretRequestAnswerRefusal, secretRequestOf } from "../engine/secret-tools.js";
 import { scrubSessionInput } from "../services/secret-store/inbound-scrub.js";
 import { readAppPageHint, type AppPageHint } from "@valet/shared";
@@ -40,7 +41,7 @@ import { exportSeedBundle, planForkSeed, readBranchNote, readThreadEdit, walkTra
 import { isAgentCaller, type AuthVia, type RequestPrincipal } from "../lib/request-principal.js";
 import type { AppEnv } from "../env.js";
 import { ensureWorkflowSession, parseWorkflowSessionId } from "../workflows/engine-deps.js";
-import { agentSessions, assistants, assistantExecutions, legacyAssistantRuntimes, sessionThreads, users, workflowDefinitions } from "../schema/index.js";
+import { agentSessions, assistants, assistantExecutions, eventSubscriptions, legacyAssistantRuntimes, sessionThreads, users, workflowDefinitions, workflowSchedules } from "../schema/index.js";
 import { makeCommandContext } from "../engine/command-providers.js";
 import type {
   CreateThreadRequest,
@@ -52,6 +53,7 @@ import type {
   ListDecisionsResponse,
   ListMessagesResponse,
   ListThreadsResponse,
+  ThreadLineGroup,
   ThreadChannelActivity,
   ThreadContextResponse,
   ThreadDefaultsResponse,
@@ -639,6 +641,7 @@ export async function listThreads(c: Context<AppEnv>, sessionId: string) {
   let body: ListThreadsResponse;
   try { body = threadPage(summaries, new URL(c.req.url).searchParams); }
   catch (error) { return c.json({ error: error instanceof Error ? error.message : "Refresh the thread list." }, 400); }
+  if (body.lineGroups?.length) await nameLineGroups(db, body.lineGroups);
   // A thread without its own model or reasoning shows its session's defaults.
   const unpinned = [...new Set(body.threads.filter(t => !t.model || !t.reasoning).map(t => t.sessionId))];
   const defaults = new Map(await Promise.all(unpinned.map(async id => [id, await c.var.providers.engineStore.getSession(id)] as const)));
@@ -659,6 +662,18 @@ export async function listThreads(c: Context<AppEnv>, sessionId: string) {
     }
   }
   return c.json(body);
+}
+
+/** Names each Presence line group by its line. A deleted line reads "Deleted line". */
+async function nameLineGroups(db: AppDb, groups: ThreadLineGroup[]): Promise<void> {
+  const ids = (kind: ThreadLineGroup["kind"]) => groups.filter(g => g.kind === kind).map(g => g.ruleId);
+  const [subscriptionIds, scheduleIds] = [ids("subscription"), ids("schedule")];
+  const [subscriptionRows, scheduleRows] = await Promise.all([
+    subscriptionIds.length ? db.select({ id: eventSubscriptions.id, name: eventSubscriptions.name }).from(eventSubscriptions).where(inArray(eventSubscriptions.id, subscriptionIds)) : [],
+    scheduleIds.length ? db.select({ id: workflowSchedules.id, name: workflowSchedules.name }).from(workflowSchedules).where(inArray(workflowSchedules.id, scheduleIds)) : [],
+  ]);
+  const names = new Map<string, string>([...subscriptionRows.map(r => [`sub:${r.id}`, r.name] as const), ...scheduleRows.map(r => [`schedule:${r.id}`, r.name] as const)]);
+  for (const group of groups) group.name = names.get(group.key) || "Deleted line";
 }
 
 /** How much one thread has talked in its channel: a count and the newest message. */

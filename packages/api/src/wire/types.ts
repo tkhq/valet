@@ -1334,6 +1334,23 @@ export interface ListThreadsResponse {
   nextCursor?: string;
   defaultThreadId?: string;
   originCounts?: Record<"all" | "chat" | "auto" | "channel" | "other", number>;
+  /** With `groups=lines`, on the first page: one group per Presence line,
+   * newest activity first. Each group's newest threads are in `threads`. */
+  lineGroups?: ThreadLineGroup[];
+}
+
+/** The threads one Presence line opened in `new` mode, as one sidebar group. */
+export interface ThreadLineGroup {
+  /** `sub:<id>` or `schedule:<id>` (`threadLineGroupKey` in @valet/shared). */
+  key: string;
+  kind: "subscription" | "schedule";
+  ruleId: string;
+  /** The line's name. "Deleted line" when the line no longer exists. */
+  name: string;
+  threadCount: number;
+  /** Set when the group has more threads than the first page shipped:
+   * pass it as `cursor` with `line=<key>` to read the rest. */
+  nextCursor?: string;
 }
 
 export interface CreateThreadRequest {

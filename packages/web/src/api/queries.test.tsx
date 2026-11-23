@@ -173,7 +173,7 @@ describe("useSidebarThreads", () => {
     const wrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
     const { result, rerender } = renderHook(({ id }) => useSidebarThreads(id, { sort: "created", origin: "all", fixedIds: [] }), { wrapper, initialProps: { id: sessionId } });
     await waitFor(() => expect(result.current.data?.threads).toHaveLength(1));
-    expect(list).toHaveBeenNthCalledWith(1, sessionId, { sort: "created", origin: "all", limit: 10, cursor: undefined });
+    expect(list).toHaveBeenNthCalledWith(1, sessionId, { sort: "created", origin: "all", limit: 10, cursor: undefined, lineGroups: true });
     await act(() => result.current.fetchNextPage());
     await waitFor(() => expect(result.current.isFetchNextPageError).toBe(true));
     expect(result.current.data?.threads).toEqual([row]);

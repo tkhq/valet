@@ -41,6 +41,9 @@ export interface DestinationInput {
      * replies share it. Absent for an event with no channel origin. */
     conversationKey?: string;
     summary: string;
+    /** The message text as a person reads it (Slack: text, blocks, and
+     * attachments, with names for ids). Absent for an event with no text. */
+    text?: string;
     naturalSubject: { subject: string; label: string } | null;
     conversational: boolean;
   };
@@ -59,8 +62,8 @@ function ownDestination(rule: DestinationInput["rule"]): KeyDestination {
 
 /** The `new`-mode destination for a subscription: one key per channel
  * conversation, so a Slack thread's root and replies share one thread, and
- * one key per delivery for an event with no conversation. The first
- * delivery's summary titles the thread (`seedThreadTitle` keeps it). */
+ * one key per delivery for an event with no conversation. The line name and
+ * the first delivery's message title the thread (`seedThreadTitle` keeps it). */
 function newSubscriptionDestination(rule: DestinationInput["rule"], event: DestinationInput["event"]): Destination {
   if (event === undefined) {
     throw new Error("A new-mode destination for an event needs the event.");
@@ -68,7 +71,7 @@ function newSubscriptionDestination(rule: DestinationInput["rule"], event: Desti
   return {
     kind: "key",
     key: `sub:${rule.id}:${event.conversationKey ?? event.deliveryId}`,
-    title: summaryTitle(event.summary),
+    title: lineThreadTitle(rule.name, event.text, event.summary),
     reason: "policy_new",
   };
 }
@@ -147,6 +150,17 @@ export function summaryTitle(summary: string): string {
   const cut = trimmed.slice(0, 80);
   const lastSpace = cut.lastIndexOf(" ");
   return lastSpace > 0 ? cut.slice(0, lastSpace) : cut;
+}
+
+/**
+ * A new-mode thread title: the line name, then the first line of the message
+ * text without Slack emphasis markers. An event with no text uses its
+ * summary. At most 80 characters (`summaryTitle`).
+ */
+export function lineThreadTitle(name: string, text: string | undefined, summary: string): string {
+  const firstLine = (text ?? "").split("\n").map((line) => line.replace(/[*_~`]/g, "").replace(/\s+/g, " ").trim()).find((line) => line.length > 0);
+  const detail = firstLine ?? summary.trim();
+  return summaryTitle(detail.length > 0 ? `${name} · ${detail}` : name);
 }
 
 function isoDateUTC(ms: number): string {

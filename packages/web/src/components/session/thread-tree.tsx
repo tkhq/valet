@@ -2,7 +2,9 @@ import { useDebouncedValue } from "~/hooks/use-debounced-value";
 import { useWorkspaceViewers } from "~/api/active-viewers";
 import { RowFaces, ViewerNames } from "./viewer-faces";
 import { SpacesNav } from "./spaces-nav";
-import { CHROME_BUTTON, HOVER_CHROME, NESTED_ROW, SELECTED_ROW, SIDEBAR_LABEL, TOP_ROW } from "./sidebar-rows";
+import { CHROME_BUTTON, HOVER_CHROME, NESTED_ROW, PHONE_HIDDEN, SELECTED_ROW, SIDEBAR_LABEL, TOP_ROW } from "./sidebar-rows";
+import { FolderToggle, LineGroupsSection } from "./sidebar-folders";
+import { threadLineGroupKey } from "@valet/shared";
 import { useSidebarControls } from "~/components/layout/app-shell";
 import { useWorkspaceRuntimeInfo } from "~/api/workspace-runtime";
 import { useHomeConversation } from "~/api/home";
@@ -24,8 +26,6 @@ import {
   House,
   Slack,
   Zap,
-  Folder,
-  FolderOpen,
   PanelLeft,
   PanelLeftClose,
   Bell,
@@ -135,7 +135,6 @@ export function untitledThreadLabel(thread: ThreadSummary, isNewestCreated: bool
 const THREAD_DRAG_TYPE = "application/x-valet-thread";
 
 /** A list action a phone leaves out: the drawer is for opening threads. */
-const PHONE_HIDDEN = "max-md:hidden";
 /** Recents rows a wider screen shows before "Show more". */
 const RECENTS_LIMIT = 5;
 /** A sub-conversation row action: left out on a phone, shown on hover or focus on a wider screen (`group/child`). */
@@ -563,7 +562,23 @@ function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: st
   const { needsYou: needsYouThreads, rest: listed } = mobile
     ? splitNeedsYou(visible, (thread) => threadNeedsYou({ pendingGate: gatedThreadIds.has(thread.id), question: pendingAgentQuestion(thread) }))
     : { needsYou: [], rest: visible };
-  const recents = listed.filter((thread) => !projects.value.pinned.includes(thread.id) && (!projects.value.grouped || !projects.value.projects.some((project) => project.id === projects.value.assignments[thread.id])));
+  const placedByViewer = (thread: ThreadSummary) => projects.value.pinned.includes(thread.id) || (projects.value.grouped && projects.value.projects.some((project) => project.id === projects.value.assignments[thread.id]));
+  // A Presence line's threads sit in the line's folder. A pinned or project
+  // thread stays where the viewer put it, and a thread that needs approval
+  // stays in Recents.
+  const lineGroups = threadsQ.data?.lineGroups ?? [];
+  const lineGroupOf = (thread: ThreadSummary) => {
+    const key = threadLineGroupKey(thread.key);
+    return key !== undefined && lineGroups.some((group) => group.key === key) && !placedByViewer(thread) && !gatedThreadIds.has(thread.id) ? key : undefined;
+  };
+  const lineMembers = new Map<string, ThreadSummary[]>();
+  for (const thread of listed) {
+    const key = lineGroupOf(thread);
+    if (key) lineMembers.set(key, [...(lineMembers.get(key) ?? []), thread]);
+  }
+  const openRow = threads.find((thread) => thread.id === openThreadId);
+  const groupOfOpenThread = openRow ? lineGroupOf(openRow) : undefined;
+  const recents = listed.filter((thread) => !placedByViewer(thread) && lineGroupOf(thread) === undefined);
   // A wider screen shows the first few Recents, plus the open thread wherever
   // it falls. The phone drawer lists them all: it is for opening threads.
   const shownRecents = mobile || recentsExpanded ? recents : recents.filter((thread, index) => index < RECENTS_LIMIT || thread.id === openThreadId);
@@ -963,10 +978,9 @@ function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: st
             const members = listed.filter((thread) => !projects.value.pinned.includes(thread.id) && projects.value.assignments[thread.id] === project.id);
             return <section key={project.id} aria-label={`Project: ${project.name}`} {...dropHandlers(project.id)} className={cn("mb-0.5 rounded-md transition-colors", dropTarget === project.id && "bg-moss-wash-strong ring-1 ring-inset ring-moss")}>
               <div className={cn("group gap-0.5 pr-1 hover:bg-ink-wash", TOP_ROW)} onContextMenu={event => { event.preventDefault(); setProjectMenu(project.id); }}>
-              <button type="button" disabled={!projects.isReady} aria-expanded={!project.collapsed} onClick={() => projects.setCollapsed(!project.collapsed, project.id)} className="flex min-w-0 flex-1 items-center gap-2 self-stretch rounded-md pl-2 text-left focus-visible:bg-ink-wash focus-visible:outline-none">
-                {project.collapsed ? <Folder aria-hidden className="h-4 w-4 shrink-0 text-muted" /> : <FolderOpen aria-hidden className="h-4 w-4 shrink-0 text-muted" />}
-                <span className="truncate">{project.name}</span>{!mobile && members.some((thread) => gatedThreadIds.has(thread.id)) && <Bell aria-label="Needs approval" className="ml-auto h-3.5 w-3.5 shrink-0 text-amber-500" />}
-              </button>
+              <FolderToggle open={!project.collapsed} label={project.name} disabled={!projects.isReady} onToggle={() => projects.setCollapsed(!project.collapsed, project.id)}>
+                {!mobile && members.some((thread) => gatedThreadIds.has(thread.id)) && <Bell aria-label="Needs approval" className="ml-auto h-3.5 w-3.5 shrink-0 text-amber-500" />}
+              </FolderToggle>
                 <button type="button" aria-label={`New thread in ${project.name}`} title={`New thread in ${project.name}`} disabled={createThread.isPending || !projects.isReady || projects.isSaving}
                   onClick={() => void createAndNavigate(project.id)}
                   className={cn(CHROME_BUTTON, HOVER_CHROME)}>
@@ -983,6 +997,8 @@ function ThreadTreeInner({ sessionId, showChildren, workspace }: { sessionId: st
               {!project.collapsed && <div className="mt-0.5 space-y-0.5">{members.map(renderThread)}{members.length === 0 && <p className="py-1 pl-10 pr-4 text-xs text-muted max-md:hidden">Start a thread with + or move one here</p>}</div>}
             </section>;
           })}
+          <LineGroupsSection sessionId={sessionId} groups={lineGroups} members={lineMembers} sort={sortMode}
+            groupOfOpenThread={groupOfOpenThread} openThreadId={openThreadId} renderThread={renderThread} />
           <section aria-label="Recents" {...dropHandlers()} className={cn("min-h-16 space-y-0.5 rounded-lg transition-colors", dropTarget === "recents" && "bg-moss-wash-strong ring-1 ring-inset ring-moss")}><h2 className={SIDEBAR_LABEL}>Recents</h2>
           {shownRecents.map(renderThread)}
           {recentsCollapsible && <button type="button" aria-expanded={recentsExpanded} onClick={() => setRecentsExpanded((expanded) => !expanded)}
