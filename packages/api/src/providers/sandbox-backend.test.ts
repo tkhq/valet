@@ -8,7 +8,7 @@
  * temporary executable instead of contacting a Docker daemon.
  */
 import { describe, it, expect, vi } from "vitest";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as k8s from "@kubernetes/client-node";
@@ -181,7 +181,7 @@ describe("buildSandboxProvider", () => {
 });
 
 /** Stop at container creation and capture the real provider's Docker arguments. */
-async function dockerCreateArgs(env: NodeJS.ProcessEnv, resources?: SandboxResources): Promise<string[]> {
+async function dockerCreateArgs(env: NodeJS.ProcessEnv, resources?: SandboxResources, docker?: boolean): Promise<string[]> {
   const root = await mkdtemp(join(tmpdir(), "valet-api-docker-resources-"));
   const bin = join(root, "bin");
   const workspace = join(root, "workspace");
@@ -202,7 +202,7 @@ else if (args[0] === "run") {
   vi.stubEnv("PATH", bin);
   try {
     const provider = buildSandboxProvider({ ...env, VALET_DATA_DIR: join(root, "data") });
-    await expect(provider.create({ workspace, resources })).rejects.toThrow("fixture stopped before container creation");
+    await expect(provider.create({ workspace, resources, docker })).rejects.toThrow("fixture stopped before container creation");
     const args: unknown = JSON.parse(await readFile(argsFile, "utf8"));
     if (!Array.isArray(args) || !args.every((arg: unknown): arg is string => typeof arg === "string")) {
       throw new Error("The Docker fixture did not record string arguments.");
@@ -275,6 +275,24 @@ describe("Docker deployment resource configuration", () => {
       VALET_SANDBOX_CPU: "1",
     });
     expect(args[args.indexOf("--cpus") + 1]).toBe("1");
+  });
+
+  it("bind-mounts a per-sandbox directory under VALET_DOCKER_DATA_ROOT as the nested Docker data-root", async () => {
+    const dataRoot = await mkdtemp(join(tmpdir(), "valet-api-docker-data-"));
+    try {
+      const args = await dockerCreateArgs({ VALET_DOCKER_DATA_ROOT: ` ${dataRoot} ` }, undefined, true);
+      const mount = args[args.findIndex((arg) => arg.endsWith(":/home/dockerd/.local/share/docker")) ];
+      expect(mount).toMatch(new RegExp(`^${dataRoot}/dsb-[a-z0-9-]+:/home/dockerd/.local/share/docker$`));
+      expect((await stat(mount!.split(":")[0]!)).isDirectory()).toBe(true);
+      const plain = await dockerCreateArgs({ VALET_DOCKER_DATA_ROOT: dataRoot });
+      expect(plain.some((arg) => arg.includes("/home/dockerd/.local/share/docker"))).toBe(false);
+    } finally {
+      await rm(dataRoot, { recursive: true, force: true });
+    }
+  });
+
+  it.each(["", "relative/dir", "/srv/docker\n"])("rejects an invalid VALET_DOCKER_DATA_ROOT %j with corrective guidance", (root) => {
+    expect(() => buildSandboxProvider({ VALET_DOCKER_DATA_ROOT: root })).toThrow(/VALET_DOCKER_DATA_ROOT.*absolute host directory/s);
   });
 
   it("ignores Docker-only parent validation for Local and Kubernetes", () => {

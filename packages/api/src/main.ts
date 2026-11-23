@@ -52,6 +52,7 @@ import { initTelemetry } from "./observability/otel.js";
 import { initImageFallbackMetrics } from "./observability/image-fallback-metrics.js";
 import { initSandboxMetrics, reportError } from "@valet/engine";
 import { startProcessHealthSampler } from "./observability/process-health.js";
+import { resolveDiskAlertBytes, startDiskHealthMonitor } from "./observability/disk-health.js";
 import { Lifecycle, startBootListener } from "./lib/lifecycle.js";
 import { recordBootRestoreTimeout } from "./observability/security-metrics.js";
 import { ensureWorkflowSession } from "./workflows/engine-deps.js";
@@ -317,6 +318,9 @@ initSandboxMetrics();
 // Memory, heap, and event-loop samples for the process gauges and the
 // diagnostics.process_health tool. Stopped in close().
 const stopProcessHealthSampler = startProcessHealthSampler();
+// Free disk space for the data directory's filesystem, with an alert under
+// VALET_DISK_ALERT_FREE_GB. Stopped in close().
+const stopDiskHealthMonitor = startDiskHealthMonitor({ path: dataDir, alertBelowBytes: resolveDiskAlertBytes(process.env) });
 if (telemetry) console.log(`otel: exporting traces to ${telemetry.endpoint}`);
 
 // Booting → ready → draining (`lib/lifecycle.ts`). The boot listener holds
@@ -753,6 +757,7 @@ async function close(): Promise<void> {
   // from here on; the stops below end the claim loops and schedulers.
   const requestsDrained = lifecycle.beginDrain();
   stopProcessHealthSampler();
+  stopDiskHealthMonitor();
   // The WakeWatcher's stop flag goes up first: the awaited stops below can
   // take most of the hard-exit budget, and a pass must not start new rows
   // meanwhile (fix wave 4, concurrency M6). It is awaited below, before

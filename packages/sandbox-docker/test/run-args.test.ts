@@ -25,6 +25,13 @@ describe("buildDockerRunArgs (pure)", () => {
     expect(buildDockerRunArgs(baseOpts)).not.toContain("--cgroup-parent");
   });
 
+  it("bind-mounts the nested Docker data-root only for Docker-enabled sandboxes", () => {
+    const dir = "/srv/valet-docker-data/dsb-1";
+    expect(buildDockerRunArgs({ ...baseOpts, docker: true, dockerDataHostDir: dir })).toContain(`${dir}:/home/dockerd/.local/share/docker`);
+    expect(buildDockerRunArgs({ ...baseOpts, dockerDataHostDir: dir }).join(" ")).not.toContain("/home/dockerd/.local/share/docker");
+    expect(buildDockerRunArgs({ ...baseOpts, docker: true }).join(" ")).not.toContain("/home/dockerd/.local/share/docker");
+  });
+
   it("headless (profile omitted) publishes no ports — byte-identical pin", () => {
     const args = buildDockerRunArgs(baseOpts);
     expect(args).not.toContain("-p");

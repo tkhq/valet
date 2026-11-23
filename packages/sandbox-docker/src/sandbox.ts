@@ -23,7 +23,7 @@ import type {
 } from "@valet/engine";
 import { EXEC_ID_PATTERN, newExecId } from "@valet/engine/wakeups-ids";
 import { openDockerCommandChannel } from './command-channel.js';
-import { DockerInventory, dockerOwnerLabels, parseDockerInspection, validateDockerOwner, validateDockerBrowserOwner, type DockerContainerOwner, type DockerInventoryRecord } from "./inventory.js";
+import { DOCKER_DATA_ROOT, DockerInventory, dockerOwnerLabels, parseDockerInspection, validateDockerOwner, validateDockerBrowserOwner, type DockerContainerOwner, type DockerInventoryRecord } from "./inventory.js";
 import { buildBrowserCompanionArgs } from "./browser-companion.js";
 import { READ_RETAINED_BROWSER_AUDIT, parseRetainedBrowserAudit, type RetainedBrowserAudit } from "./browser-audit.js";
 import {
@@ -433,6 +433,10 @@ export interface BuildDockerRunArgsOpts {
    * seccomp/AppArmor/systempaths relaxations, CAP_SYS_ADMIN, CAP_NET_ADMIN,
    * /dev/fuse, /dev/net/tun, and VALET_SANDBOX_DOCKER=1 — never --privileged. */
   docker?: boolean;
+  /** Absolute host path bind-mounted as the nested Docker data-root. Used
+   * only with `docker`. When absent the data-root stays in the container
+   * filesystem. */
+  dockerDataHostDir?: string;
   runtimeStateDir?: string;
   browser?: { enabled: boolean; viewer?: boolean };
   browserSeccompProfile?: string;
@@ -500,6 +504,7 @@ export function buildDockerRunArgs(opts: BuildDockerRunArgsOpts): string[] {
     runArgs.push("--device", "/dev/fuse");
     runArgs.push("--device", "/dev/net/tun");
     runArgs.push("--env", "VALET_SANDBOX_DOCKER=1");
+    if (opts.dockerDataHostDir) runArgs.push(...bindMount(opts.dockerDataHostDir, DOCKER_DATA_ROOT));
   }
   if (opts.network !== "bridge") runArgs.push("--network", opts.network);
   // `host.docker.internal` is how a container reaches the host that runs the
@@ -1393,6 +1398,13 @@ export interface DockerSandboxProviderOptions {
   browserEnabled?: boolean;
   /** Stock browser-capable image for Docker-enabled session companions. */
   browserImage?: string;
+  /** Operator-provisioned host directory for nested Docker data. Each
+   * Docker-enabled sandbox gets `<dockerDataRoot>/<sandbox id>` as its
+   * nested data-root. A container filesystem is overlayfs, which cannot hold
+   * an overlay upper directory, so without this the nested daemon falls back
+   * to a slower driver. A size-limited filesystem here caps the disk that
+   * nested Docker can use. */
+  dockerDataRoot?: string;
 }
 export class DockerSandboxProvider implements SandboxProvider {
   readonly backend = "docker";
@@ -1404,8 +1416,10 @@ export class DockerSandboxProvider implements SandboxProvider {
   private readonly browserImage?: string;
   private readonly cgroupParent?: string;
   private readonly defaultResources?: SandboxResources;
+  private readonly dockerDataRoot?: string;
   constructor(options: DockerSandboxProviderOptions = {}) {
     this.cgroupParent = options.cgroupParent;
+    this.dockerDataRoot = options.dockerDataRoot === undefined ? undefined : resolve(options.dockerDataRoot);
     this.defaultResources = options.defaultResources;
     this.browserEnabled = options.browserEnabled === true;
     this.browserImage = options.browserImage;
@@ -1426,7 +1440,8 @@ export class DockerSandboxProvider implements SandboxProvider {
       if (value.runtimeStateDir !== expectedStateDir ||
           (value.workloadStateDir !== undefined && (value.workloadStateDir !== stateDir || !value.browser?.enabled)) ||
           (value.credsHostDir !== undefined && value.credsHostDir !== join(this.inventory.root, "creds", id)) ||
-          (value.scratchHostDir !== undefined && value.scratchHostDir !== join(this.inventory.root, "scratch", id)))
+          (value.scratchHostDir !== undefined && value.scratchHostDir !== join(this.inventory.root, "scratch", id)) ||
+          (value.dockerDataHostDir !== undefined && (this.dockerDataRoot === undefined || value.dockerDataHostDir !== join(this.dockerDataRoot, id))))
         throw new Error("Docker inventory state paths differ from their owner. Inspect the saved inventory before retrying.");
     }
     return value;
@@ -1595,7 +1610,7 @@ export class DockerSandboxProvider implements SandboxProvider {
     const workloadStateDir = browserUpgrade ? existing?.runtimeStateDir : existing?.workloadStateDir;
     const runtimeStateDir = browserUpgrade ? join(this.inventory.root, "browser-state", id) : existing?.runtimeStateDir ?? join(this.inventory.root, "state", id);
     if (!existing || browserUpgrade) await fs.mkdir(runtimeStateDir, { recursive: true, mode: 0o700 });
-    const value: DockerInventoryRecord = { version: 1, id, sessionId: opts.sessionId ?? id, providerId, containerName: `${CONTAINER_PREFIX}${id}`, workspace, runtimeStateDir, ...(workloadStateDir ? { workloadStateDir } : {}), image, docker: Boolean(opts.docker), state: "creating", ...(opts.browser ? { browser: opts.browser } : {}), ...(companion ? { browserCompanion: { containerName: `${CONTAINER_PREFIX}${id}-browser`, image: this.browserImage! } } : {}), ...(opts.credsFiles && Object.keys(opts.credsFiles).length ? { credsHostDir: join(this.inventory.root, "creds", id) } : {}), ...(resources.scratch ? { scratchHostDir: join(this.inventory.root, "scratch", id) } : {}) };
+    const value: DockerInventoryRecord = { version: 1, id, sessionId: opts.sessionId ?? id, providerId, containerName: `${CONTAINER_PREFIX}${id}`, workspace, runtimeStateDir, ...(workloadStateDir ? { workloadStateDir } : {}), image, docker: Boolean(opts.docker), state: "creating", ...(opts.browser ? { browser: opts.browser } : {}), ...(companion ? { browserCompanion: { containerName: `${CONTAINER_PREFIX}${id}-browser`, image: this.browserImage! } } : {}), ...(opts.credsFiles && Object.keys(opts.credsFiles).length ? { credsHostDir: join(this.inventory.root, "creds", id) } : {}), ...(resources.scratch ? { scratchHostDir: join(this.inventory.root, "scratch", id) } : {}), ...(opts.docker && this.dockerDataRoot ? { dockerDataHostDir: join(this.dockerDataRoot, id) } : {}) };
     if (existing) await this.inventory.write(value);
     else if (!await this.inventory.reserve(value)) return this.restore(id);
     if (value.credsHostDir && opts.credsFiles) await writeCredsFiles(value.credsHostDir, opts.credsFiles, { docker: Boolean(opts.docker || opts.browser?.enabled) });
@@ -1617,9 +1632,11 @@ export class DockerSandboxProvider implements SandboxProvider {
       // quota mechanism. Dev-only backend; tracked for the spec Deviations.
       console.warn("scratch is not size-limited on the docker backend.");
     }
+    // start-docker.sh gives the directory to the nested daemon's user.
+    if (value.dockerDataHostDir) await fs.mkdir(value.dockerDataHostDir, { recursive: true, mode: 0o700 });
     const uid = process.getuid?.() || 1501;
     const gid = process.getgid?.() || 1501;
-    const runArgs = buildDockerRunArgs({ containerName: value.containerName, image, workspaceHostPath: workspace, network: dockerOpts.network ?? "bridge", env: { ...(companion ? Object.fromEntries(Object.entries(dockerOpts.env ?? {}).filter(([key]) => !key.startsWith("VALET_BROWSER_"))) : dockerOpts.env), VALET_SESSION_ID: value.sessionId, ...(opts.browser?.enabled && !companion ? { VALET_BROWSER_UID: String(uid), VALET_BROWSER_GID: String(gid) } : {}) }, resources, cgroupParent: this.cgroupParent, profile: opts.profile, credsHostDir: value.credsHostDir, scratchHostDir: value.scratchHostDir, docker: opts.docker, runtimeStateDir: companion ? undefined : runtimeStateDir, browser: companion ? undefined : opts.browser, browserSeccompProfile: this.browserSeccompProfile, browserAppArmorProfile: this.browserAppArmorProfile, labels: dockerOwnerLabels(value) });
+    const runArgs = buildDockerRunArgs({ containerName: value.containerName, image, workspaceHostPath: workspace, network: dockerOpts.network ?? "bridge", env: { ...(companion ? Object.fromEntries(Object.entries(dockerOpts.env ?? {}).filter(([key]) => !key.startsWith("VALET_BROWSER_"))) : dockerOpts.env), VALET_SESSION_ID: value.sessionId, ...(opts.browser?.enabled && !companion ? { VALET_BROWSER_UID: String(uid), VALET_BROWSER_GID: String(gid) } : {}) }, resources, cgroupParent: this.cgroupParent, profile: opts.profile, credsHostDir: value.credsHostDir, scratchHostDir: value.scratchHostDir, dockerDataHostDir: value.dockerDataHostDir, docker: opts.docker, runtimeStateDir: companion ? undefined : runtimeStateDir, browser: companion ? undefined : opts.browser, browserSeccompProfile: this.browserSeccompProfile, browserAppArmorProfile: this.browserAppArmorProfile, labels: dockerOwnerLabels(value) });
     const started = await execProcess("docker", runArgs, {});
     if (started.exitCode !== 0) {
       // Keep the reservation and state: a competing creator or transport loss can leave a live owner.
@@ -1722,6 +1739,9 @@ export class DockerSandboxProvider implements SandboxProvider {
   async release(id: string): Promise<void> {
     const value = await this.saved(id); if (!value) return;
     await this.removeContainer(value);
+    // Nested images and build cache belong to the container, as they did when
+    // they lived in its filesystem.
+    if (value.dockerDataHostDir) await this.removeStateDir(value.dockerDataHostDir, [value.imageId, value.image, process.env.VALET_SANDBOX_IMAGE]);
     value.state = "released"; await this.inventory.write(value);
     this.sandboxes.delete(id);
   }
@@ -1738,6 +1758,36 @@ export class DockerSandboxProvider implements SandboxProvider {
     if (result.exitCode !== 0) throw new Error(`Cannot delete the working directory ${path}. Check the Docker daemon, then retry. ${result.stderr.trim()}`);
   }
 
+  /**
+   * Delete a private state directory. The browser preflight makes the
+   * mounted `/var/lib/valet` root-owned, so an api that runs as a non-root
+   * user cannot remove the entries in it. A one-off root container empties
+   * it first. Without this, destroy stopped after removing the container,
+   * kept the inventory record, and the next start failed with sandbox_gone.
+   */
+  private async removeStateDir(dir: string, images: Array<string | undefined>): Promise<void> {
+    try {
+      await fs.rm(dir, { recursive: true, force: true });
+      return;
+    } catch (err) {
+      const code = typeof err === "object" && err !== null && "code" in err ? err.code : undefined;
+      if (code !== "EACCES" && code !== "EPERM") throw err;
+    }
+    // Any local image with `find` will do. The sandbox's own image may be
+    // pruned by the time it is destroyed, so try the current one too.
+    let image: string | undefined;
+    for (const candidate of images) {
+      if (candidate && (await execProcess("docker", ["image", "inspect", "--format", "{{.Id}}", candidate], {})).exitCode === 0) {
+        image = candidate;
+        break;
+      }
+    }
+    if (!image) throw new Error(`Cannot delete the sandbox state directory ${dir}: none of its images is on this host. Set VALET_SANDBOX_IMAGE to a local image, then retry.`);
+    const result = await execProcess("docker", releaseWorkspaceArgs(dir, image, this.cgroupParent), { timeout: 300_000 });
+    if (result.exitCode !== 0) throw new Error(`Cannot delete the sandbox state directory ${dir}. Check the Docker daemon, then retry. ${result.stderr.trim()}`);
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+
   /** Final deletion. The host must export browser audit records before calling this method. */
   async destroy(id: string): Promise<void> {
     const value = await this.saved(id); if (!value) { this.sandboxes.delete(id); return; }
@@ -1746,6 +1796,7 @@ export class DockerSandboxProvider implements SandboxProvider {
     if (value.workloadStateDir) await fs.rm(value.workloadStateDir, { recursive: true, force: true });
     if (value.credsHostDir) await fs.rm(value.credsHostDir, { recursive: true, force: true });
     if (value.scratchHostDir) await fs.rm(value.scratchHostDir, { recursive: true, force: true });
+    if (value.dockerDataHostDir) await this.removeStateDir(value.dockerDataHostDir, [value.imageId, value.image, process.env.VALET_SANDBOX_IMAGE]);
     await this.inventory.remove(id); this.sandboxes.delete(id);
   }
 
