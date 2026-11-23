@@ -355,6 +355,8 @@ fuse-overlayfs state on a shared PVC has unclear crash semantics.
 
 ## Security posture
 
+Working-directory guards (2026-11-20). The Docker backend bind-mounts the session's working directory read-write, so its host path decides what a sandbox can reach. `POST /api/sessions` no longer stores a client-supplied path: it builds `<VALET_WORKSPACE_ROOT>/<userId>/<name>` from the requested path's last segment (default root `~/.valet/workspaces`) and refuses a directory that resolves outside the caller's own directory. `DockerSandboxProvider.create` mounts only a directory strictly inside one of Valet's working-directory roots, which the api passes: the client root, `~/.valet/{children,assistants,assistant-executions,workflows}`, and the data directory. It also refuses `/`, top-level directories, system trees (`/etc`, `/usr`, `/proc`, `/var/lib/docker`, and similar), and any directory that overlaps its private state or holds the api data directory (`host-workspace.ts`). `browser-preflight.sh` refuses a recursive chown of a `/workspace` that looks like a host root filesystem.
+
 `docker: true` relaxes, per opted-in sandbox only:
 
 - seccomp: unconfined (larger kernel syscall attack surface)

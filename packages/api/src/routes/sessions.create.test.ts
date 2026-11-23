@@ -50,6 +50,22 @@ describe("POST /api/sessions: profile", () => {
     api = undefined;
   });
 
+  it("builds the working directory under the caller's own root, whatever path the client sends", async () => {
+    api = await bootTestApi();
+    for (const requested of ["/", "/etc", "/tmp/valet/workspace/acme-api"]) {
+      const res = await fetch(`${api.baseUrl}/api/sessions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ workspace: requested }),
+      });
+      expect(res.status).toBe(201);
+      const created = (await res.json()) as CreateSessionResponse;
+      const [row] = await api.providers.db.select({ workspace: agentSessions.workspace }).from(agentSessions).where(eq(agentSessions.id, created.id));
+      const root = process.env.VALET_WORKSPACE_ROOT!;
+      expect(row?.workspace.startsWith(join(root, "local-user") + "/")).toBe(true);
+    }
+  });
+
   it("defaults profile to 'headless' when omitted", async () => {
     api = await bootTestApi();
     const workspace = await mkdtemp(join(tmpdir(), "valet-session-create-"));

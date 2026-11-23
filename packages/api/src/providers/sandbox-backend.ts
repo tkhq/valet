@@ -17,6 +17,7 @@
  * the ambient current-context (decision 2, binding) and never hardcode a
  * personal dev-cluster name.
  */
+import { clientWorkspaceRoot } from "../lib/workspace-roots.js";
 import * as k8s from "@kubernetes/client-node";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -611,8 +612,23 @@ export function buildSandboxProvider(
         ...(cpu !== undefined ? { cpu } : {}),
         ...(memory !== undefined ? { memory } : {}),
       };
+      const dataDir = env.VALET_DATA_DIR || join(homedir(), ".valet");
       return new DockerSandboxProvider({
-        inventoryRoot: join(env.VALET_DATA_DIR || join(homedir(), ".valet"), "docker-runtime"),
+        inventoryRoot: join(dataDir, "docker-runtime"),
+        // A working directory may sit under the data directory (session
+        // workspaces live there by default) but never holds it or its stores.
+        workspaceGuards: {
+          privatePaths: [join(dataDir, "pg"), join(dataDir, "blobs")],
+          dataRoots: [dataDir],
+          // Only Valet's own working-directory roots: client sessions
+          // (`lib/workspace-roots.ts`), children, assistants and their
+          // executions, workflow steps, and the data directory.
+          allowedRoots: [
+            clientWorkspaceRoot(env),
+            ...["children", "assistants", "assistant-executions", "workflows"].map((dir) => join(homedir(), ".valet", dir)),
+            dataDir,
+          ],
+        },
         browserEnabled: env.VALET_BROWSER_ENABLED === '1',
         browserImage: env.VALET_FULL_BASE_IMAGE ?? env.VALET_SANDBOX_IMAGE ?? DEFAULT_FULL_BASE_IMAGE,
         ...(env.VALET_BROWSER_SECCOMP_PROFILE ? { browserSeccompProfile: env.VALET_BROWSER_SECCOMP_PROFILE } : {}),

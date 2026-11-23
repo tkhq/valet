@@ -33,6 +33,12 @@ if [[ ${VALET_BROWSER_WORKSPACE_READONLY:-0} == 1 ]]; then
   fi
 else
   install -d -m 0755 -o dockerd -g dockerd /workspace
+  # A recursive chown of a host root mount re-owns the whole host. The
+  # provider refuses such a bind; this check stops the chown if one gets here.
+  if [[ -f /workspace/etc/passwd && -d /workspace/usr/bin && -d /workspace/proc ]]; then
+    echo 'The working directory looks like a host root filesystem. Recreate the sandbox with a separate working directory.' >&2
+    exit 78
+  fi
   # The workload owns the working directory. Private browser state uses another UID.
   chown -R -h dockerd:dockerd /workspace
 fi

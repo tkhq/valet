@@ -81,7 +81,7 @@ describe("buildSandboxProvider", () => {
     vi.stubEnv("PATH", "");
     try {
       const provider = buildSandboxProvider({ VALET_DATA_DIR: dataDir });
-      await expect(provider.create({ workspace: dataDir })).rejects.toThrow(/overlaps private Docker session state/);
+      await expect(provider.create({ workspace: dataDir })).rejects.toThrow(/overlaps private Valet or Docker session state/);
     } finally {
       vi.unstubAllEnvs();
       await rm(dataDir, { recursive: true, force: true });
@@ -184,10 +184,11 @@ describe("buildSandboxProvider", () => {
 async function dockerCreateArgs(env: NodeJS.ProcessEnv, resources?: SandboxResources): Promise<string[]> {
   const root = await mkdtemp(join(tmpdir(), "valet-api-docker-resources-"));
   const bin = join(root, "bin");
-  const workspace = join(root, "workspace");
+  // Under the data directory, one of Valet's working-directory roots, as a child session's would be.
+  const workspace = join(root, "data", "children", "fixture");
   const argsFile = join(root, "run-args.json");
   await mkdir(bin);
-  await mkdir(workspace);
+  await mkdir(workspace, { recursive: true });
   await writeFile(join(bin, "docker"), `#!${process.execPath}
 const fs = require("node:fs");
 const args = process.argv.slice(2);
