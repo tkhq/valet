@@ -29,12 +29,10 @@ import { and, eq, sql } from "drizzle-orm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { linkIdentity } from "../channels/identity-links.js";
 import { __resetSlackWebhookThrottle } from "../channels/slack-inbox.js";
-import { lineThreadTitle } from "../events/destination.js";
 import { findFollowedThread } from "../events/followed-threads.js";
 import {
   eventDeliveries,
   eventSubscriptions,
-  events,
   githubInstallations,
   linearInstallations,
   sessionThreads,
@@ -500,8 +498,8 @@ describe("api integration: delivery threads acceptance scenario", () => {
     for (const [i, delivery] of t5.entries()) {
       const landed = await landingOf(api, delivery);
       expect(landed.key).toBe(`sub:${r4}:${delivery.id}`);
-      const [event] = await p.db.select().from(events).where(eq(events.id, delivery.eventId));
-      expect(landed.title).toBe(lineThreadTitle("acme/api failures", undefined, event?.summary ?? ""));
+      // A line folder thread has no seeded title. Automatic naming titles it after the turn.
+      expect(landed.title).toBe("Test conversation");
       expect(landed.id).toBe(failureThreads.find((t) => t.key === `sub:${r4}:${t5[i]?.id}`)?.id);
     }
     const second = t5[1];

@@ -19,7 +19,12 @@ export type Destination =
      * (Part C step 4). A binding delivery never ends them. */
     suppressedWaiterIds?: string[];
   }
-  | { kind: "key"; key: string; title: string; reason: DestinationReason; note?: string }
+  | {
+    kind: "key"; key: string; reason: DestinationReason; note?: string;
+    /** The title a new thread starts with. Absent for a thread in a line's
+     * folder (`new` mode): automatic naming titles it after its first turn. */
+    title?: string;
+  }
   | { kind: "skip"; reason: `claimed by thread ${string}` };
 
 /** Why a destination resolved as it did (spec Part E's counter label). */
@@ -40,10 +45,6 @@ export interface DestinationInput {
      * key, such as `slack:C1:1712345678.000100`. A root message and its
      * replies share it. Absent for an event with no channel origin. */
     conversationKey?: string;
-    summary: string;
-    /** The message text as a person reads it (Slack: text, blocks, and
-     * attachments, with names for ids). Absent for an event with no text. */
-    text?: string;
     naturalSubject: { subject: string; label: string } | null;
     conversational: boolean;
   };
@@ -62,8 +63,8 @@ function ownDestination(rule: DestinationInput["rule"]): KeyDestination {
 
 /** The `new`-mode destination for a subscription: one key per channel
  * conversation, so a Slack thread's root and replies share one thread, and
- * one key per delivery for an event with no conversation. The line name and
- * the first delivery's message title the thread (`seedThreadTitle` keeps it). */
+ * one key per delivery for an event with no conversation. The thread shows in
+ * the line's folder, so it has no seeded title: automatic naming titles it. */
 function newSubscriptionDestination(rule: DestinationInput["rule"], event: DestinationInput["event"]): Destination {
   if (event === undefined) {
     throw new Error("A new-mode destination for an event needs the event.");
@@ -71,12 +72,12 @@ function newSubscriptionDestination(rule: DestinationInput["rule"], event: Desti
   return {
     kind: "key",
     key: `sub:${rule.id}:${event.conversationKey ?? event.deliveryId}`,
-    title: lineThreadTitle(rule.name, event.text, event.summary),
     reason: "policy_new",
   };
 }
 
-/** The `new`-mode destination for a schedule: one key per fire time. */
+/** The `new`-mode destination for a schedule: one key per fire time. Like a
+ * subscription's, the thread is in the line's folder and has no seeded title. */
 function newScheduleDestination(rule: DestinationInput["rule"], fireAt: number | undefined): Destination {
   if (fireAt === undefined) {
     throw new Error("A new-mode destination for a schedule needs fireAt.");
@@ -84,7 +85,6 @@ function newScheduleDestination(rule: DestinationInput["rule"], fireAt: number |
   return {
     kind: "key",
     key: `schedule:${rule.id}:${fireAt}`,
-    title: `${rule.name} · ${isoDateUTC(fireAt)}`,
     reason: "policy_new",
   };
 }
@@ -152,21 +152,6 @@ export function summaryTitle(summary: string): string {
   return lastSpace > 0 ? cut.slice(0, lastSpace) : cut;
 }
 
-/**
- * A new-mode thread title: the line name, then the first line of the message
- * text without Slack emphasis markers. An event with no text uses its
- * summary. At most 80 characters (`summaryTitle`).
- */
-export function lineThreadTitle(name: string, text: string | undefined, summary: string): string {
-  const firstLine = (text ?? "").split("\n").map((line) => line.replace(/[*_~`]/g, "").replace(/\s+/g, " ").trim()).find((line) => line.length > 0);
-  const detail = firstLine ?? summary.trim();
-  return summaryTitle(detail.length > 0 ? `${name} · ${detail}` : name);
-}
-
-function isoDateUTC(ms: number): string {
-  return new Date(ms).toISOString().slice(0, 10);
-}
-
 const DESTINATION_REASONS: readonly DestinationReason[] = [
   "policy_new", "policy_subject", "policy_own", "policy_existing",
   "conversation_follow", "conversation_pull_request", "claim_redirect",
@@ -205,9 +190,10 @@ export function readDestinationStamp(value: unknown): Destination | null {
     };
   }
   if (value.kind === "key") {
-    if (!("key" in value) || typeof value.key !== "string" || !("title" in value) || typeof value.title !== "string") return null;
+    if (!("key" in value) || typeof value.key !== "string") return null;
+    const title = "title" in value && typeof value.title === "string" ? value.title : undefined;
     const note = "note" in value && typeof value.note === "string" ? value.note : undefined;
-    return { kind: "key", key: value.key, title: value.title, reason: value.reason, ...(note !== undefined ? { note } : {}) };
+    return { kind: "key", key: value.key, reason: value.reason, ...(title !== undefined ? { title } : {}), ...(note !== undefined ? { note } : {}) };
   }
   return null;
 }

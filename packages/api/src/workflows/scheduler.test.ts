@@ -301,7 +301,7 @@ describe("WorkflowScheduler thread policy", () => {
     });
     await scheduler.tick();
     expect(destinations).toEqual([
-      { kind: "key", key: "schedule:sched-new:500", title: "Morning summary · 1970-01-01", reason: "policy_new" },
+      { kind: "key", key: "schedule:sched-new:500", reason: "policy_new" },
     ]);
   });
 
