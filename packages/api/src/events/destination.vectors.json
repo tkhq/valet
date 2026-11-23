@@ -3,7 +3,7 @@
     "name": "a conversation binding wins over a claim and the policy (follow)",
     "input": {
       "rule": { "id": "rule-1", "kind": "subscription", "name": "CI alerts", "policy": { "mode": "own" } },
-      "event": { "deliveryId": "del-1", "summary": "Build failed", "naturalSubject": null, "conversational": true },
+      "event": { "deliveryId": "del-1", "naturalSubject": null, "conversational": true },
       "binding": { "sessionId": "sess-bind", "threadId": "thread-bind", "via": "follow" },
       "claim": { "sessionId": "sess-claim", "threadId": "thread-claim", "waiterId": "wk-1" }
     },
@@ -13,7 +13,7 @@
     "name": "a conversation binding wins over a claim and the policy (pull request)",
     "input": {
       "rule": { "id": "rule-2", "kind": "subscription", "name": "PR reviews", "policy": { "mode": "new" } },
-      "event": { "deliveryId": "del-2", "summary": "Review requested", "naturalSubject": null, "conversational": true },
+      "event": { "deliveryId": "del-2", "naturalSubject": null, "conversational": true },
       "binding": { "sessionId": "sess-pr", "threadId": "thread-pr", "via": "pull_request" },
       "claim": { "sessionId": "sess-claim2", "threadId": "thread-claim2", "waiterId": "wk-2" }
     },
@@ -23,7 +23,7 @@
     "name": "a claim on an ambient event skips with the claiming thread's id",
     "input": {
       "rule": { "id": "rule-3", "kind": "subscription", "name": "Linear updates", "policy": { "mode": "own" } },
-      "event": { "deliveryId": "del-3", "summary": "Issue updated", "naturalSubject": null, "conversational": false },
+      "event": { "deliveryId": "del-3", "naturalSubject": null, "conversational": false },
       "binding": null,
       "claim": { "sessionId": "sess-tri", "threadId": "thread-tri", "waiterId": "wk-3" }
     },
@@ -35,7 +35,6 @@
       "rule": { "id": "rule-4", "kind": "subscription", "name": "Slack messages", "policy": { "mode": "subject" } },
       "event": {
         "deliveryId": "del-4",
-        "summary": "Status update",
         "naturalSubject": { "subject": "slack:T001/C900", "label": "#incidents" },
         "conversational": true
       },
@@ -45,12 +44,11 @@
     "expected": { "kind": "target", "sessionId": "sess-inc", "threadId": "thread-inc", "reason": "claim_redirect" }
   },
   {
-    "name": "policy new on a subscription keys by the rule and the delivery, titled by the line and the summary",
+    "name": "policy new on a subscription keys by the rule and the delivery, with no seeded title",
     "input": {
       "rule": { "id": "rule-5", "kind": "subscription", "name": "CI failures", "policy": { "mode": "new" } },
       "event": {
         "deliveryId": "del-5",
-        "summary": "check_run completed with status failure",
         "naturalSubject": null,
         "conversational": false
       },
@@ -60,42 +58,11 @@
     "expected": {
       "kind": "key",
       "key": "sub:rule-5:del-5",
-      "title": "CI failures · check_run completed with status failure",
       "reason": "policy_new"
     }
   },
   {
-    "name": "policy new trims a summary over 80 characters at a word boundary",
-    "input": {
-      "rule": { "id": "rule-6", "kind": "subscription", "name": "Long summaries", "policy": { "mode": "new" } },
-      "event": {
-        "deliveryId": "del-6",
-        "summary": "word word word word word word word word word word word word word word word word word word word word",
-        "naturalSubject": null,
-        "conversational": false
-      },
-      "binding": null,
-      "claim": null
-    },
-    "expected": {
-      "kind": "key",
-      "key": "sub:rule-6:del-6",
-      "title": "Long summaries · word word word word word word word word word word word word",
-      "reason": "policy_new"
-    }
-  },
-  {
-    "name": "policy new titles an empty summary with the line name",
-    "input": {
-      "rule": { "id": "rule-7", "kind": "subscription", "name": "Empty summaries", "policy": { "mode": "new" } },
-      "event": { "deliveryId": "del-7", "summary": "", "naturalSubject": null, "conversational": false },
-      "binding": null,
-      "claim": null
-    },
-    "expected": { "kind": "key", "key": "sub:rule-7:del-7", "title": "Empty summaries", "reason": "policy_new" }
-  },
-  {
-    "name": "policy new on a schedule keys by the rule and the fire time, titled by the name and the UTC date",
+    "name": "policy new on a schedule keys by the rule and the fire time, with no seeded title",
     "input": {
       "rule": { "id": "sched-1", "kind": "schedule", "name": "Morning summary", "policy": { "mode": "new" } },
       "binding": null,
@@ -105,7 +72,6 @@
     "expected": {
       "kind": "key",
       "key": "schedule:sched-1:1792161000000",
-      "title": "Morning summary · 2026-10-16",
       "reason": "policy_new"
     }
   },
@@ -115,7 +81,6 @@
       "rule": { "id": "rule-9", "kind": "subscription", "name": "PR reviews grouped", "policy": { "mode": "subject" } },
       "event": {
         "deliveryId": "del-9",
-        "summary": "Review submitted",
         "naturalSubject": { "subject": "github:acme/api#12", "label": "acme/api#12" },
         "conversational": false
       },
@@ -128,7 +93,7 @@
     "name": "policy subject with no natural subject falls back to own and notes it",
     "input": {
       "rule": { "id": "rule-10", "kind": "subscription", "name": "Channel watch", "policy": { "mode": "subject" } },
-      "event": { "deliveryId": "del-10", "summary": "Team joined", "naturalSubject": null, "conversational": false },
+      "event": { "deliveryId": "del-10", "naturalSubject": null, "conversational": false },
       "binding": null,
       "claim": null
     },
@@ -144,7 +109,7 @@
     "name": "policy own on a subscription keys by the rule, titled by the rule name",
     "input": {
       "rule": { "id": "rule-11", "kind": "subscription", "name": "ENG triage", "policy": { "mode": "own" } },
-      "event": { "deliveryId": "del-11", "summary": "Issue updated", "naturalSubject": null, "conversational": false },
+      "event": { "deliveryId": "del-11", "naturalSubject": null, "conversational": false },
       "binding": null,
       "claim": null
     },
@@ -168,7 +133,7 @@
         "name": "Platform CI",
         "policy": { "mode": "existing", "sessionId": "sess-fixed", "threadId": "thread-fixed" }
       },
-      "event": { "deliveryId": "del-13", "summary": "check_run failed", "naturalSubject": null, "conversational": false },
+      "event": { "deliveryId": "del-13", "naturalSubject": null, "conversational": false },
       "binding": null,
       "claim": null
     },
@@ -201,27 +166,27 @@
     "name": "policy new on a channel conversation keys by the rule and the conversation: the root message",
     "input": {
       "rule": { "id": "rule-msg", "kind": "subscription", "name": "Deploy questions", "policy": { "mode": "new" } },
-      "event": { "deliveryId": "del-root", "conversationKey": "slack:C1:1712345678.000100", "summary": "How do I deploy?", "naturalSubject": null, "conversational": true },
+      "event": { "deliveryId": "del-root", "conversationKey": "slack:C1:1712345678.000100", "naturalSubject": null, "conversational": true },
       "binding": null,
       "claim": null
     },
-    "expected": { "kind": "key", "key": "sub:rule-msg:slack:C1:1712345678.000100", "title": "Deploy questions · How do I deploy?", "reason": "policy_new" }
+    "expected": { "kind": "key", "key": "sub:rule-msg:slack:C1:1712345678.000100", "reason": "policy_new" }
   },
   {
     "name": "policy new keys a reply in the same Slack thread to the root's key",
     "input": {
       "rule": { "id": "rule-msg", "kind": "subscription", "name": "Deploy questions", "policy": { "mode": "new" } },
-      "event": { "deliveryId": "del-reply", "conversationKey": "slack:C1:1712345678.000100", "summary": "Same question for staging", "naturalSubject": null, "conversational": true },
+      "event": { "deliveryId": "del-reply", "conversationKey": "slack:C1:1712345678.000100", "naturalSubject": null, "conversational": true },
       "binding": null,
       "claim": null
     },
-    "expected": { "kind": "key", "key": "sub:rule-msg:slack:C1:1712345678.000100", "title": "Deploy questions · Same question for staging", "reason": "policy_new" }
+    "expected": { "kind": "key", "key": "sub:rule-msg:slack:C1:1712345678.000100", "reason": "policy_new" }
   },
   {
     "name": "a conversation binding still wins over a new policy with a conversation key",
     "input": {
       "rule": { "id": "rule-msg", "kind": "subscription", "name": "Deploy questions", "policy": { "mode": "new" } },
-      "event": { "deliveryId": "del-bound", "conversationKey": "slack:C1:1712345678.000100", "summary": "Follow-up", "naturalSubject": null, "conversational": true },
+      "event": { "deliveryId": "del-bound", "conversationKey": "slack:C1:1712345678.000100", "naturalSubject": null, "conversational": true },
       "binding": { "sessionId": "sess-f", "threadId": "thread-f", "via": "follow" },
       "claim": null
     },

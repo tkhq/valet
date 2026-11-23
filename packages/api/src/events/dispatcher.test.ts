@@ -470,7 +470,7 @@ describe("EventDispatcher", () => {
     expect(deliver).toHaveBeenCalledTimes(2);
     for (const { subscriptionId, deliveryId } of posts) {
       const call = deliver.mock.calls.find(([args]) => args.dispatchId === eventDeliveryDispatchId(deliveryId));
-      expect(call?.[0].destination).toEqual({ kind: "key", key: `sub:${subscriptionId}:${deliveryId}`, title: "test sub · message in C1 by B1", reason: "policy_new" });
+      expect(call?.[0].destination).toEqual({ kind: "key", key: `sub:${subscriptionId}:${deliveryId}`, reason: "policy_new" });
       // No reply origin: the agent posts through its own tools, never by an automatic reply.
       expect(call?.[0].signal.origin).toBeUndefined();
     }
@@ -1128,7 +1128,7 @@ describe("EventDispatcher", () => {
       const { deliver, deliveryId } = await dispatchMention();
       expect(deliver).toHaveBeenCalledOnce();
       expect(deliver.mock.calls[0]![0].destination).toEqual({
-        kind: "key", key: expect.stringMatching(/:slack:C1:1\.2$/), title: "test sub · <@U-BOT> status?", reason: "policy_new",
+        kind: "key", key: expect.stringMatching(/:slack:C1:1\.2$/), reason: "policy_new",
       });
       expect(await findFollowedThread(tdb.appDb, followKey)).toMatchObject({ sessionId: LANDED.sessionId, threadId: LANDED.threadId });
       expect(recordDestination.mock.calls).toEqual([["policy_new"]]);
@@ -1552,7 +1552,7 @@ describe("EventDispatcher", () => {
       await dispatcher.pollOnce();
       expect((await getDelivery(deliveryId)).status).toBe("delivered");
       const keys = deliver.mock.calls.map(([args]) => args.destination);
-      const expected = { kind: "key", key: `sub:${subscriptionId}:${deliveryId}`, title: "test sub · Issue #7 opened: broken build", reason: "policy_new" };
+      const expected = { kind: "key", key: `sub:${subscriptionId}:${deliveryId}`, reason: "policy_new" };
       expect(keys).toEqual([expected, expected]);
     });
 
@@ -1658,8 +1658,8 @@ describe("EventDispatcher", () => {
       }).pollOnce();
       const keyOf = (deliveryId: string) => deliver.mock.calls.find(([args]) => args.dispatchId === eventDeliveryDispatchId(deliveryId))?.[0].destination;
       const shared = { kind: "key", key: `sub:${root.subscriptionId}:slack:C1:1.2`, reason: "policy_new" };
-      expect(keyOf(root.deliveryId)).toMatchObject({ ...shared, title: "test sub · text 1.2" });
-      for (const reply of replies) expect(keyOf(reply.deliveryId)).toMatchObject(shared);
+      expect(keyOf(root.deliveryId)).toEqual(shared);
+      for (const reply of replies) expect(keyOf(reply.deliveryId)).toEqual(shared);
       expect(keyOf(other.deliveryId)).toMatchObject({ kind: "key", key: `sub:${root.subscriptionId}:slack:C1:2.0` });
     });
 
