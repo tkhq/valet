@@ -9,8 +9,9 @@ name: Release CLI
 # bun-compile.md and the spec Deviations.
 #
 # Platforms: macOS arm64 (native runner) + macOS x64 (cross-compiled), Linux
-# x64 (native runner) + Linux arm64 (cross-compiled from the x64 runner —
-# the embedded assets are platform-agnostic). Windows = WSL (run the
+# x64 (native runner) + Linux arm64 (cross-compiled from the x64 runner).
+# Each binary embeds the sharp native packages for its own target. The
+# cross-compiled binaries are smoke-tested on native runners. Windows = WSL (run the
 # linux-x64 binary).
 #
 # macOS Gatekeeper: compile-binary.mjs re-signs the binaries ad-hoc and
@@ -66,7 +67,7 @@ jobs:
             # GitHub retired the macos-14 image. Its jobs are cancelled before
             # any step runs, and publish is then skipped.
             # darwin-x64 (Intel Macs) is cross-compiled from the arm64
-            # runner; only the native arm64 binary is smoke-tested.
+            # runner and smoke-tested by the smoke-cross job below.
             targets: bun-darwin-arm64 bun-darwin-x64
             smoke: valet-darwin-arm64
           - runner: ubuntu-latest
@@ -139,11 +140,12 @@ jobs:
       - name: Build web SPA
         run: pnpm --filter @valet/web build
 
-      - name: Build server bundle + asset archive
+      - name: Build server bundle + staged assets
+        env:
+          VALET_SHARP_STAGE: all
         run: |
           pnpm --filter @valet/api run build:assets
           pnpm --filter @valet/api run build:bundle
-          pnpm --filter @valet/api run build:tar
 
       - name: Compile native binaries
         run: |
@@ -156,26 +158,7 @@ jobs:
       # Smoke only the binary that matches this runner's platform (a cross-built
       # binary can't run here). Boot it fully self-contained and hit health.
       - name: Smoke test (native target)
-        run: |
-          set -euo pipefail
-          BIN="packages/api/dist/${{ matrix.smoke }}"
-          DATA_DIR="$(mktemp -d)"
-          PORT=8799
-          VALET_LOCAL_AUTH=1 ANTHROPIC_API_KEY=sk-ant-ci-placeholder \
-            "$BIN" serve --port "$PORT" --data-dir "$DATA_DIR" --sandbox local &
-          SERVE_PID=$!
-          trap 'kill "$SERVE_PID" 2>/dev/null || true' EXIT
-          for i in $(seq 1 60); do
-            if curl -fsS "http://localhost:$PORT/api/health" | grep -q '"ok":true'; then
-              echo "binary booted self-contained and served /api/health"
-              # SPA served from the embedded (extracted) web dir, not a 404.
-              curl -fsS "http://localhost:$PORT/" | grep -q '<div id="root"' && echo "web SPA served"
-              exit 0
-            fi
-            sleep 1
-          done
-          echo "binary did not become healthy within 60s" >&2
-          exit 1
+        run: scripts/smoke-binary.sh "packages/api/dist/${{ matrix.smoke }}"
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -184,9 +167,42 @@ jobs:
           path: packages/api/dist/valet-*-*
           if-no-files-found: error
 
-  # Publish only after both platform builds and native smoke tests succeed.
-  publish:
+  # Cross-compiled binaries cannot run on the runner that built them. Run each
+  # one on a native runner of its own platform before anything is published.
+  smoke-cross:
     needs: binaries
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04-arm
+            artifact: valet-binaries-ubuntu-latest
+            bin: valet-linux-arm64
+          - runner: macos-15-intel
+            artifact: valet-binaries-macos-15
+            bin: valet-darwin-x64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag || github.sha }}
+          sparse-checkout: scripts
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: /tmp/valet-bin
+
+      - name: Smoke test (cross-compiled target)
+        run: |
+          chmod +x "/tmp/valet-bin/${{ matrix.bin }}"
+          scripts/smoke-binary.sh "/tmp/valet-bin/${{ matrix.bin }}"
+
+  # Publish only after both platform builds and all smoke tests succeed.
+  publish:
+    needs: [binaries, smoke-cross]
     runs-on: ubuntu-latest
     # Hold one lock from the remote-head check through the asset upload.
     # Queue all waiting jobs so a late older build cannot replace a pending tip.

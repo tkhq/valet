@@ -63,8 +63,12 @@ fi
 chmod +x "${tmp}/valet"
 
 # Sanity-check before installing: the binary must at least run --version.
-if ! version="$("${tmp}/valet" --version 2>/dev/null)"; then
+if ! version="$("${tmp}/valet" --version 2>"${tmp}/version.err")"; then
   echo "error: downloaded binary failed to execute on this machine." >&2
+  if [ -s "${tmp}/version.err" ]; then
+    echo "       The binary reported:" >&2
+    sed 's/^/         /' "${tmp}/version.err" >&2
+  fi
   exit 1
 fi
 
