@@ -51,7 +51,7 @@ You run the login. The person approves it in a browser.
 
    If the person has not chosen Allow yet, the command waits for them, for up to 10 minutes from step 1.
 
-The browser can be on any computer, so this also works over SSH. The CLI receives a CLI token directly from Valet, not an API key. It signs out after 30 days without use. The person can disconnect it in Settings > Agent access. It cannot approve requests or change policies.
+The browser can be on any computer, so this also works over SSH. The CLI receives a CLI token directly from Valet, not an API key. It signs out after 30 days without use. The person can disconnect it in Settings > Access. It cannot approve requests or change policies.
 
 When the command prints `logged in`, run `valet threads list`. It must exit with code 0. If it exits with code 5, repeat this step. If `VALET_INSTANCE` is set in the environment, it overrides the login: unset it, or set it to `valet`.
 
@@ -67,7 +67,7 @@ MCP gives you the Valet tools directly. The CLI also works without MCP. Run the 
 
 Each command adds the `valet` server for every project. No file goes into the repository, and no secret is written. For another agent, run `valet mcp setup --print` and add the printed entry where the agent reads MCP servers. If the agent cannot run OAuth, tell the person, and continue with the CLI only.
 
-In the browser, the person checks the app name and chooses Allow. They can disconnect the app later in Settings > Agent access.
+In the browser, the person checks the app name and chooses Allow. They can disconnect the app later in Settings > Access.
 
 You can use the MCP tools only after the agent restarts. Continue with the CLI until then.
 

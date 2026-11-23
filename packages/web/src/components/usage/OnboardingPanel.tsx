@@ -357,7 +357,7 @@ function KeyDisplay({ apiKey, settingsQuery, onCreateAnother, team = false, tool
           </Button>
         </div>
         {/* The panel renders under the API keys section of the same page:
-            `/settings/api-keys`, or a team's API keys and proxy tab. */}
+            `/settings/access`, or a team's Access tab. */}
         <p className="text-xs text-muted">
           You can revoke keys anytime in the API keys section on this {team ? "tab" : "page"}.
         </p>
@@ -523,7 +523,7 @@ function ProxyOnboardingFlow({ settingsQuery, showGatewayStatus = true, team = f
               <p>
                 {settingsQuery.data?.mode === "passthrough" && "This gateway runs in pass-through mode. "}
                 To create your own key, open{" "}
-                <Link to="/settings/api-keys" className="underline">Personal → API keys and proxy</Link>.
+                <Link to="/settings/access" className="underline">Personal → Access</Link>.
                 {settingsQuery.data?.mode === "passthrough"
                   ? " That page makes a personal proxy key, and you must also supply your own provider key with it."
                   : " That page makes a personal proxy key."}
@@ -563,14 +563,14 @@ function ProxyOnboardingFlow({ settingsQuery, showGatewayStatus = true, team = f
   const automatic = !team && settingsQuery.data?.mode === "centralized" && automaticTool !== undefined;
   return <div className="min-w-0 max-w-full space-y-6">
     <div>
-      <h2 className="text-base font-medium text-ink mb-2">Connect your coding tool</h2>
+      <h3 className="text-sm font-medium text-ink mb-2">Send model requests through Valet</h3>
       <p className="text-sm text-muted mb-4">Choose the tool you use. Valet records model requests sent through its proxy.</p>
       <div role="radiogroup" aria-label="Coding tool" className="grid min-w-0 grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
         {CODING_TOOLS.map((option) => <RadioCard key={option.id} title={option.title} description={option.description}
           ariaLabel={option.title} selected={tool === option.id} onSelect={() => setTool(option.id)} className="min-w-0" />)}
       </div>
     </div>
-    {automatic && settingsQuery.data?.enabled === false && <Callout tone="warning">The gateway is off. Enable it above or ask an organization admin before sending model requests.</Callout>}
+    {automatic && settingsQuery.data?.enabled === false && <Callout tone="warning">The gateway is off. Turn it on in Proxy below, or ask an organization admin, before you send model requests.</Callout>}
     {automatic && automaticTool && <AutomaticSetup tool={automaticTool} />}
     {team && <Callout>Automatic setup creates personal keys only. Use a shared team key below to attribute traffic to this team.</Callout>}
     {!team && settingsQuery.data?.mode === "passthrough" && <Callout>

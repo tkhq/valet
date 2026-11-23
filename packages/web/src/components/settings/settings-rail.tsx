@@ -1,8 +1,7 @@
-import { Link, useRouterState } from "@tanstack/react-router";
+import { Link, useRouter, useRouterState } from "@tanstack/react-router";
 import {
   Bell,
   Blocks,
-  Bot,
   Building2,
   ChevronDown,
   Cpu,
@@ -18,10 +17,11 @@ import {
   BarChart3,
 } from "lucide-react";
 import { useOrg, useTeams } from "~/api/settings";
-import { Button, DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger, type AppPath } from "~/components/primitives";
+import { BACK_LINK_CLASS, Button, DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger, type AppPath } from "~/components/primitives";
 import { eligibleTeams } from "~/components/session/assistant-rail";
 import { useResponsiveOverlay } from "~/hooks/use-responsive-overlay";
 import { cn } from "~/lib/cn";
+import { lastAppPath } from "~/lib/last-app-path";
 
 /**
  * The settings shell's left rail (settings-redesign spec, decision 2). It
@@ -29,13 +29,16 @@ import { cn } from "~/lib/cn";
  * workspace switcher:
  *
  * - **Account**: you.
- * - **Personal**: the personal scope's integrations, usage, keys, proxy,
- *   secrets, agent access, policies, and model comparison.
+ * - **Personal**: the personal scope's integrations, access (connected
+ *   agents, coding-tool setup, API keys, proxy), secrets, policies, usage,
+ *   and model comparison.
  * - **Your teams**: one item per team you belong to, each opening its own
  *   `/settings/teams/$teamId` pages.
  * - **Organization**: shown once `useOrg()` resolves with the gate on (never
  *   flashes). An admin sees four grouped sections, each a tab bar over its
- *   existing routes (`ORG_SECTIONS`). A plain member sees Teams and 1Password.
+ *   existing routes (`ORG_SECTIONS`). A plain member sees Teams only: the
+ *   1Password page holds nothing a member can act on, and their own token
+ *   is on Integrations.
  *
  * Active state is computed from the pathname (via `cn`'s `twMerge`) rather
  * than TanStack's `activeProps`, which only concatenates class strings.
@@ -44,9 +47,6 @@ import { cn } from "~/lib/cn";
 /** One source of truth for the Teams path — the rail and the
  * `/settings/organization` route guard must never disagree on it. */
 export const ORG_TEAMS_PATH = "/settings/organization/teams";
-
-/** Same rule for 1Password, which every org member may open. */
-export const ORG_ONEPASSWORD_PATH = "/settings/organization/onepassword";
 
 export interface OrgRoute {
   to: AppPath;
@@ -71,6 +71,7 @@ export const ORG_SECTIONS: ReadonlyArray<{ label: string; icon: LucideIcon; rout
     routes: [
       { to: "/settings/organization/models", label: "Models" },
       { to: "/settings/organization/proxy", label: "Proxy" },
+      { to: "/settings/organization/usage", label: "Usage" },
     ],
   },
   {
@@ -82,7 +83,7 @@ export const ORG_SECTIONS: ReadonlyArray<{ label: string; icon: LucideIcon; rout
       { to: "/settings/organization/github", label: "GitHub" },
       { to: "/settings/organization/slack", label: "Slack" },
       { to: "/settings/organization/linear", label: "Linear" },
-      { to: ORG_ONEPASSWORD_PATH, label: "1Password" },
+      { to: "/settings/organization/onepassword", label: "1Password" },
       { to: "/settings/organization/library", label: "Library" },
     ],
   },
@@ -91,6 +92,7 @@ export const ORG_SECTIONS: ReadonlyArray<{ label: string; icon: LucideIcon; rout
     icon: ShieldCheck,
     routes: [
       { to: "/settings/organization/policies", label: "Policies" },
+      { to: "/settings/organization/secrets", label: "Secrets" },
       { to: "/settings/organization/sandbox-images", label: "Sandbox settings" },
       { to: "/settings/organization/action-log", label: "Action log" },
       { to: "/settings/organization/audit-log", label: "Audit log" },
@@ -155,11 +157,10 @@ const ACCOUNT_ITEMS: RailItem[] = [
 
 const PERSONAL_ITEMS: RailItem[] = [
   { to: "/settings/integrations", label: "Integrations", icon: Plug, active: exact("/settings/integrations") },
-  { to: "/settings/usage", label: "Usage", icon: BarChart3, active: exact("/settings/usage") },
-  { to: "/settings/api-keys", label: "API keys and proxy", icon: KeyRound, active: exact("/settings/api-keys") },
+  { to: "/settings/access", label: "Access", icon: KeyRound, active: exact("/settings/access") },
   { to: "/settings/secrets", label: "Secrets", icon: LockKeyhole, active: exact("/settings/secrets") },
-  { to: "/settings/agent-access", label: "Agent access", icon: Bot, active: exact("/settings/agent-access") },
   { to: "/settings/policies", label: "Policies", icon: Shield, active: exact("/settings/policies") },
+  { to: "/settings/usage", label: "Usage", icon: BarChart3, active: exact("/settings/usage") },
   // Read-only and backed by the member-visible models list, so every
   // member sees it in both org and single-user mode.
   { to: "/settings/model-comparison", label: "Model comparison", icon: BarChart3, active: exact("/settings/model-comparison") },
@@ -183,7 +184,6 @@ const MCP_SERVERS_ITEM: RailItem = {
 
 const MEMBER_ORG_ITEMS: RailItem[] = [
   { to: ORG_TEAMS_PATH, label: "Teams", icon: Users, active: (p) => onRoute(p, ORG_TEAMS_PATH) },
-  { to: ORG_ONEPASSWORD_PATH, label: "1Password", icon: KeyRound, active: exact(ORG_ONEPASSWORD_PATH) },
 ];
 
 const ADMIN_ORG_ITEMS: RailItem[] = ORG_SECTIONS.map((section) => ({
@@ -216,11 +216,18 @@ export function SettingsRail() {
     active: (p) => onRoute(p, `/settings/teams/${team.id}`),
   }));
 
+  // An org admin opens a team they are not on from Organization · Teams,
+  // so that item stays active on the team's pages.
+  const onOtherTeam = /^\/settings\/teams\/[^/]+/.test(normalizeSettingsPath(pathname)) && !teamItems.some((item) => item.active(pathname));
+  const orgItems = (orgAdmin ? ADMIN_ORG_ITEMS : MEMBER_ORG_ITEMS).map((item, index) =>
+    index === 0 && onOtherTeam ? { ...item, active: () => true } : item,
+  );
+
   const groups: RailGroupSpec[] = [
     { label: "Account", items: ACCOUNT_ITEMS },
     { label: "Personal", items: personalItems },
     ...(teamItems.length > 0 ? [{ label: "Your teams", items: teamItems }] : []),
-    ...(organizationsOn ? [{ label: "Organization", items: orgAdmin ? ADMIN_ORG_ITEMS : MEMBER_ORG_ITEMS }] : []),
+    ...(organizationsOn ? [{ label: "Organization", items: orgItems }] : []),
   ];
   const currentGroup = groups.find((group) => group.items.some((item) => item.active(pathname)));
   const current = currentGroup?.items.find((item) => item.active(pathname));
@@ -260,6 +267,29 @@ export function SettingsRail() {
         {groups.map((group) => <RailGroup key={group.label} {...group} pathname={pathname} />)}
       </div>
     </nav>
+  );
+}
+
+/** "← Back to app" above the Settings title: the last app page
+ * (`lastAppPath`), or Home after a reload into Settings. It is a plain
+ * anchor with the real href, so a modified click opens a new tab; a plain
+ * click navigates in place. The href is a stored path with search, which
+ * the typed `BackLink` does not take. */
+export function BackToApp() {
+  const router = useRouter();
+  const href = lastAppPath();
+  return (
+    <a
+      href={href}
+      onClick={(event) => {
+        if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+        event.preventDefault();
+        router.history.push(href);
+      }}
+      className={BACK_LINK_CLASS}
+    >
+      ← Back to app
+    </a>
   );
 }
 

@@ -11,6 +11,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PinnedWorkspaceScope, useWorkspaceScope } from "~/lib/workspace-scope";
 
 let pathname = "/settings/teams/t1";
+let orgRole: "admin" | "member" = "member";
 
 function ScopeProbe({ label }: { label: string }) {
   const { teamId } = useWorkspaceScope();
@@ -37,7 +38,7 @@ vi.mock("@tanstack/react-router", () => ({
   Outlet: () => <TabWithDraft />,
 }));
 vi.mock("~/api/settings", () => ({
-  useOrg: () => ({ data: { callerRole: "member", features: { organizations: true } }, isLoading: false, error: null }),
+  useOrg: () => ({ data: { callerRole: orgRole, features: { organizations: true } }, isLoading: false, error: null }),
   useTeams: () => ({
     data: {
       teams: [
@@ -51,13 +52,20 @@ vi.mock("~/api/settings", () => ({
   }),
 }));
 vi.mock("~/components/settings/api-keys-section", () => ({ ApiKeysSection: () => <ScopeProbe label="keys" /> }));
-vi.mock("~/components/settings/proxy-section", () => ({ SettingsProxyPage: () => <ScopeProbe label="proxy" /> }));
+vi.mock("~/components/settings/proxy-section", () => ({
+  SettingsProxyPage: ({ children }: { children?: ReactNode }) => <><ScopeProbe label="proxy" />{children}</>,
+}));
+vi.mock("~/components/settings/agent-access-section", () => ({
+  AgentAccessSection: () => <ScopeProbe label="agents" />,
+  AgentSetupCard: () => <ScopeProbe label="agent setup" />,
+}));
 
 import { TeamSettingsShell } from "./settings.teams.$teamId";
-import { PersonalAccessPage } from "./settings.api-keys";
+import { PersonalAccessPage } from "./settings.access";
 
 beforeEach(() => {
   pathname = "/settings/teams/t1";
+  orgRole = "member";
 });
 
 describe("team settings pages", () => {
@@ -83,14 +91,14 @@ describe("team settings pages", () => {
   it("marks the tab that matches the path", () => {
     pathname = "/settings/teams/t1/access";
     render(<TeamSettingsShell teamId="t1" />);
-    expect(screen.getByRole("link", { name: "API keys and proxy" }).getAttribute("aria-current")).toBe("page");
+    expect(screen.getByRole("link", { name: "Access" }).getAttribute("aria-current")).toBe("page");
   });
 
-  it("holds the team's Integrations and Usage beside its other settings", () => {
+  it("lists the team's tabs in order: General, Integrations, Secrets, Access, Policies, Usage", () => {
     pathname = "/settings/teams/t1/integrations";
     render(<TeamSettingsShell teamId="t1" />);
     expect(screen.getAllByRole("link").map((link) => link.textContent).filter((label) => label !== "Open team threads"))
-      .toEqual(["General", "Integrations", "Usage", "API keys and proxy", "Policies"]);
+      .toEqual(["General", "Integrations", "Secrets", "Access", "Policies", "Usage"]);
     expect(screen.getByRole("link", { name: "Integrations" }).getAttribute("aria-current")).toBe("page");
     expect(screen.getByRole("link", { name: "General" }).getAttribute("aria-current")).toBeNull();
   });
@@ -100,6 +108,20 @@ describe("team settings pages", () => {
     expect(screen.getByText(/not a member of this team/)).toBeTruthy();
     expect(screen.queryByText(/^tab:/)).toBeNull();
   });
+
+  it("opens any team in the org for an org admin, as team Policies does", () => {
+    orgRole = "admin";
+    render(<TeamSettingsShell teamId="t9" />);
+    expect(screen.getByRole("heading", { name: "other" })).toBeTruthy();
+    expect(screen.getByText("tab: t9")).toBeTruthy();
+    expect(screen.queryByText(/not a member of this team/)).toBeNull();
+  });
+
+  it("still refuses an org admin a team the org does not have", () => {
+    orgRole = "admin";
+    render(<TeamSettingsShell teamId="missing" />);
+    expect(screen.getByText(/not a member of this team/)).toBeTruthy();
+  });
 });
 
 describe("personal pages", () => {
@@ -107,5 +129,6 @@ describe("personal pages", () => {
     render(<PinnedWorkspaceScope teamId="t1"><PersonalAccessPage /></PinnedWorkspaceScope>);
     expect(screen.getByText("keys: personal")).toBeTruthy();
     expect(screen.getByText("proxy: personal")).toBeTruthy();
+    expect(screen.getByText("agents: personal")).toBeTruthy();
   });
 });

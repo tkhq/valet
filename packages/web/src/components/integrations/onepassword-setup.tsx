@@ -300,34 +300,3 @@ function OnePasswordTokenControls({ scope, connected, label, removeNote }: OnePa
     </>
   );
 }
-
-/**
- * A token row the reader may not change: the same labelled row, with the
- * status where the controls are and a line naming who can change it.
- * Read-only rather than hidden — a reader who cannot find the row cannot
- * tell a missing token from a page that is not showing it.
- */
-export function OnePasswordTokenStatus({
-  connected,
-  label,
-  hint,
-  note,
-}: {
-  connected: boolean;
-  label: string;
-  hint: string;
-  note: string;
-}) {
-  return (
-    <FieldRow label={label} hint={hint}>
-      <div className="space-y-1" role="group" aria-label={label}>
-        {connected ? (
-          <Badge variant="success">Connected</Badge>
-        ) : (
-          <p className="text-sm text-ink">Not connected</p>
-        )}
-        <p className="text-xs text-muted">{note}</p>
-      </div>
-    </FieldRow>
-  );
-}

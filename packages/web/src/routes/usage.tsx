@@ -4,10 +4,11 @@
  * Shows total spend for the selected window across ALL use cases (engine
  * sessions, orchestrator, workflows, proxy). Token-type breakdown (input /
  * output / cache-read / cache-write) and cache-hit-rate stat visible in the
- * header and By-model table. Org admins can switch to org scope; the byUser
- * table appears in org scope. A team workspace (nav switcher) pins the scope
- * to that team and hides the personal-only surfaces (me/org toggle, proxy
- * request log, key setup). All four use-case rows are expandable via
+ * header and By-model table. The page shows one scope: the pinned workspace
+ * (`/settings/usage` for yours, a team's Usage tab for a team), or the
+ * organization (`/settings/organization/usage`, admins only, where the byUser
+ * table appears). Only the personal scope shows the proxy request log and
+ * key setup. All four use-case rows are expandable via
  * /api/usage/items (symmetric drill-down). CSV export button respects the
  * current window and scope.
  *
@@ -22,13 +23,12 @@ import { SessionOutcomes } from "~/components/usage/SessionOutcomes";
 import { ToolUsage } from "~/components/usage/ToolUsage";
 import { useEffect, useRef, useState } from "react";
 import { Link, Navigate, createFileRoute, useSearch } from "@tanstack/react-router";
-import { spaceSettingsHref } from "~/lib/space-settings";
+import { spaceSettingsTarget } from "~/lib/space-settings";
 import { textParam } from "~/lib/search-params";
 import { useWorkspaceScope } from "~/lib/workspace-scope";
 import { Users } from "lucide-react";
 import { useUsageBreakdown, useUsageItems, useUsageOutcomes, useUsageToolEfficiency } from "~/api/usage";
 import { useProxyRequests, useProxySettings } from "~/api/proxy-usage";
-import { useOrg } from "~/api/settings";
 import { SpendChart } from "~/components/usage/SpendChart";
 import { RequestLog } from "~/components/usage/RequestLog";
 import { useActiveWorkspace } from "~/components/workspace-clause";
@@ -51,7 +51,8 @@ export const Route = createFileRoute("/usage")({
 function UsageRedirect() {
   const scope = useWorkspaceScope();
   const workspace = textParam(useSearch({ strict: false }), "workspace") ?? scope.key;
-  return <Navigate to="/settings/usage" href={spaceSettingsHref(workspace, "usage")} replace />;
+  const target = spaceSettingsTarget(workspace, "usage");
+  return <Navigate to={target.to} params={target.params} replace />;
 }
 
 const WINDOWS = ["24h", "7d", "30d"] as const;
@@ -285,7 +286,8 @@ function UseCaseRow({
   );
 }
 
-export function UsagePage() {
+/** `org` shows the organization's spend; otherwise the pinned workspace's. */
+export function UsagePage({ org = false }: { org?: boolean }) {
   const [view, setView] = useState<(typeof VIEWS)[number]["id"]>("overview");
   const [period, setPeriod] = useState<UsagePeriodSelection>({ kind: "lookback", window: "7d" });
   const [month, setMonth] = useState("");
@@ -295,30 +297,23 @@ export function UsagePage() {
   const [exporting, setExporting] = useState(false);
   const [exportGranularity, setExportGranularity] = useState<UsageExportGranularity>("day");
   const exportLinkRef = useRef<HTMLAnchorElement>(null);
-  const [personalScope, setPersonalScope] = useState<"me" | "org">("me");
   // Keep only cursor history, not every loaded row. Each page remains bounded
   // by the server's explicit page size.
   const [pageCursors, setPageCursors] = useState<(string | undefined)[]>([undefined]);
   const cursor = pageCursors[pageCursors.length - 1];
 
-  const orgQ = useOrg();
-  const isOrgAdmin =
-    orgQ.data?.features.organizations === true &&
-    orgQ.data?.callerRole === "admin";
-
-  // A team workspace pins the scope to that team; the me/org toggle only
-  // exists in the personal workspace. The toggle's state survives a visit to
-  // a team workspace, so switching back restores the view you had.
+  // A pinned team scope shows that team; the personal scope shows only the
+  // viewer's own spend. The organization view is its own page.
   //
   // The switcher's stored key can name a team the caller has left until the
   // team list loads; useActiveWorkspace resolves to undefined in that window.
   // Firing a team query on the raw key would 404 and flash an error in place
   // of the totals — hold the queries until the workspace can be named.
   const ws = useActiveWorkspace();
-  const scopeKnown = ws !== undefined;
-  const personalWorkspace = ws?.kind === "personal";
-  const teamId = ws?.kind === "team" ? ws.team.id : undefined;
-  const scope: UsageScopeName = teamId !== undefined ? "team" : personalScope;
+  const scopeKnown = org || ws !== undefined;
+  const personalWorkspace = !org && ws?.kind === "personal";
+  const teamId = !org && ws?.kind === "team" ? ws.team.id : undefined;
+  const scope: UsageScopeName = org ? "org" : teamId !== undefined ? "team" : "me";
   const todayUtc = new Date().toISOString().slice(0, 10);
   const currentMonthUtc = todayUtc.slice(0, 7);
 
@@ -408,7 +403,9 @@ export function UsagePage() {
         title="Usage"
         description={scope === "team"
           ? "Spend across all Valet use cases for this team."
-          : "Spend across all Valet use cases for your account."}
+          : scope === "org"
+            ? "Spend across all Valet use cases for every member of the organization."
+            : "Spend across all Valet use cases for your account."}
         actions={scopeKnown ? (
           <div className="flex flex-wrap items-center gap-2">
             <label>
@@ -457,7 +454,7 @@ export function UsagePage() {
         </div>
       )}
 
-      {/* Window selector + scope toggle. The CSV export is a page action in the header. */}
+      {/* Window selector. The CSV export is a page action in the header. */}
       <div className="flex items-center gap-2 flex-wrap">
         <FilterChips<string>
           label="Period"
@@ -517,15 +514,6 @@ export function UsagePage() {
         >
           Apply dates
         </Button>
-        {personalWorkspace && isOrgAdmin && (
-          <FilterChips
-            label="Whose usage"
-            className="sm:ml-auto"
-            value={personalScope}
-            onChange={setPersonalScope}
-            options={[{ value: "me", label: "My usage" }, { value: "org", label: "Organization" }]}
-          />
-        )}
       </div>
       {exportError !== undefined && (
         <p className="text-sm text-danger-600">{usageErrorText(exportError)}</p>
@@ -665,9 +653,7 @@ export function UsagePage() {
 
           {/* By use case — all four rows expandable. Keyed by the WORKSPACE
               so a workspace switch remounts the rows: an expanded drill
-              list must not carry over into a different workspace's view.
-              The me/org toggle deliberately does not remount — an admin
-              comparing scopes keeps their expanded rows. */}
+              list must not carry over into a different workspace's view. */}
           <div>
             <h2 className="text-sm font-medium text-ink mb-3">By use case</h2>
             <div
@@ -921,7 +907,7 @@ export function UsagePage() {
       )}
 
       {view === "activity" && !personalWorkspace && scopeKnown && (
-        <p className="rounded border border-line p-4 text-sm text-muted">The request log contains personal proxy traffic. Switch to Personal to view it. Team spend is available in Overview and Breakdown.</p>
+        <p className="rounded border border-line p-4 text-sm text-muted">The request log shows only your personal proxy traffic. To see it, open Personal → Usage. Spend for this scope is in Overview and Breakdown.</p>
       )}
 
       {/* Key setup callout */}
@@ -929,10 +915,10 @@ export function UsagePage() {
       <div className="rounded border border-line bg-paper px-4 py-3 text-sm text-muted">
         Generate a key and set up your tools in{" "}
         <Link
-          to="/settings/api-keys"
+          to="/settings/access"
           className="text-moss underline-offset-2 hover:underline"
         >
-          Personal → API keys and proxy
+          Personal → Access
         </Link>
         .
       </div>

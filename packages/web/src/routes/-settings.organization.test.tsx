@@ -43,21 +43,24 @@ const revokeInviteMutate = vi.fn();
  * without mounting a router. */
 function RouterLinkStub({
   to,
+  params,
   search,
   children,
   className,
 }: {
   to: string;
+  params?: Record<string, string>;
   search?: Record<string, string | undefined>;
   children: ReactNode;
   className?: string;
 }) {
-  const params = Object.entries(search ?? {}).filter(
+  const query = Object.entries(search ?? {}).filter(
     (entry): entry is [string, string] => entry[1] !== undefined,
   );
-  const qs = params.length > 0 ? `?${new URLSearchParams(params).toString()}` : "";
+  const qs = query.length > 0 ? `?${new URLSearchParams(query).toString()}` : "";
+  const path = to.replace(/\$(\w+)/g, (_, name: string) => params?.[name] ?? "");
   return (
-    <a href={`${to}${qs}`} className={className}>
+    <a href={`${path}${qs}`} className={className}>
       {children}
     </a>
   );
@@ -135,8 +138,13 @@ let invitesData: {
   }>;
 } = { invites: [] };
 
+/** The org Teams route's `?teamId=`. */
+let routeSearch: { teamId?: string } = {};
 vi.mock("@tanstack/react-router", () => ({
-  createFileRoute: () => (config: object) => ({ ...config, useSearch: () => ({}) }),
+  createFileRoute: () => (config: object) => ({ ...config, useSearch: () => routeSearch }),
+  Navigate: ({ to, params, replace }: { to: string; params?: Record<string, string>; replace?: boolean }) => (
+    <p>{`navigate ${to.replace(/\$(\w+)/g, (_, name: string) => params?.[name] ?? "")}${replace ? " (replace)" : ""}`}</p>
+  ),
   useNavigate: () => navigateMock,
   // The Library page keeps its filters and both cursor stacks in the search
   // params, so it reads them even on its first page.
@@ -518,16 +526,19 @@ describe("OrganizationTeamsPage", () => {
     expect(screen.getByText("A team with that name already exists.")).toBeTruthy();
   });
 
-  it("expanding a team and adding a member fires the add-member mutation", async () => {
-    const user = userEvent.setup();
+  it("links each team row to its settings page, with no inline editor", () => {
     render(<OrganizationTeamsPage />);
-    fireEvent.click(screen.getByRole("button", { name: "Expand Platform" }));
-    await user.click(screen.getByRole("button", { name: "Add member" }));
-    await user.click(await screen.findByText("Grace"));
-    expect(addTeamMemberMutate).toHaveBeenCalledWith({
-      teamId: "team_1",
-      body: { userId: "u2", role: "member" },
-    });
+    expect(screen.getByRole("link", { name: /Platform/ }).getAttribute("href")).toBe("/settings/teams/team_1");
+    expect(screen.queryByRole("button", { name: "Expand Platform" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Add member" })).toBeNull();
+  });
+
+  it("opens the team's settings page for a saved ?teamId= link", () => {
+    routeSearch = { teamId: "team_1" };
+    render(<OrganizationTeamsPage />);
+    expect(screen.getByText("navigate /settings/teams/team_1 (replace)")).toBeTruthy();
+    expect(screen.queryByLabelText("New team name")).toBeNull();
+    routeSearch = {};
   });
 
   it("deleting a team via the overflow menu confirms, then fires the delete mutation", async () => {
@@ -559,30 +570,21 @@ describe("OrganizationTeamsPage", () => {
       );
     });
 
-    it("keeps the admin controls on a team the caller administers", async () => {
+    it("keeps Delete on a team the caller administers", async () => {
       // `callerRole: "admin"` on the team, not the org — the creator's role.
       const user = userEvent.setup();
       render(<OrganizationTeamsPage />);
-      expect(screen.getByRole("button", { name: "Platform actions" })).toBeTruthy();
-      fireEvent.click(screen.getByRole("button", { name: "Expand Platform" }));
-      await user.click(screen.getByRole("button", { name: "Add member" }));
-      await user.click(await screen.findByText("Grace"));
-      expect(addTeamMemberMutate).toHaveBeenCalledWith({
-        teamId: "team_1",
-        body: { userId: "u2", role: "member" },
-      });
+      await user.click(screen.getByRole("button", { name: "Platform actions" }));
+      expect(await screen.findByRole("menuitem", { name: "Delete team" })).toBeTruthy();
     });
 
-    it("offers a deletion request but no direct mutation controls to a member", async () => {
+    it("gives a member only the link: deletion requests start on the team page", () => {
       teamsData = {
         teams: [{ ...teamsData.teams[0], callerRole: "member" }],
       };
       render(<OrganizationTeamsPage />);
-      const user = userEvent.setup();
-      await user.click(screen.getByRole("button", { name: "Platform actions" }));
-      expect(screen.queryByRole("menuitem", { name: "Delete team" })).toBeNull();
-      await user.click(screen.getByRole("menuitem", { name: "Request deletion" }));
-      expect(screen.getByRole("region", { name: "Deletion requests" }).getAttribute("data-can-manage")).toBe("false");
+      expect(screen.getByRole("link", { name: /Platform/ }).getAttribute("href")).toBe("/settings/teams/team_1");
+      expect(screen.queryByRole("button", { name: "Platform actions" })).toBeNull();
       expect(screen.queryByRole("button", { name: "Add member" })).toBeNull();
     });
   });
@@ -600,14 +602,13 @@ describe("OrganizationTeamsPage", () => {
       defaultModel: null,
     };
 
-    it("keeps manual controls and shows provenance", () => {
+    it("shows provenance and keeps Delete in the row", () => {
       teamsData = { teams: [mirrored] };
       render(<OrganizationTeamsPage />);
 
       expect(screen.getByText("Identity provider")).toBeTruthy();
       expect(screen.getByRole("button", { name: "platform actions" })).toBeTruthy();
-      fireEvent.click(screen.getByRole("button", { name: "Expand platform" }));
-      expect(screen.getByRole("button", { name: "Add member" })).toBeTruthy();
+      expect(screen.getByRole("link", { name: /platform/ }).getAttribute("href")).toBe("/settings/teams/team_2");
     });
 
     it("shows eligible suggestions and joins only after an explicit action", () => {

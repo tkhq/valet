@@ -3,15 +3,15 @@ export interface AppPageHint { pathname: string; workspace: string }
 
 const pages = new Set([
   "/chat", "/workflows", "/events", "/integrations", "/skills", "/library", "/settings",
-  ...["profile", "preferences", "notifications", "integrations", "usage", "api-keys", "secrets", "agent-access", "policies", "model-comparison", "models", "mcp-servers", "connected-accounts"].map(page => `/settings/${page}`),
-  ...["", "/members", "/teams", "/models", "/proxy", "/plugins", "/mcp-servers", "/github", "/slack", "/linear", "/onepassword", "/library", "/policies", "/sandbox-images", "/action-log", "/audit-log"].map(page => `/settings/organization${page}`),
+  ...["profile", "preferences", "notifications", "integrations", "usage", "access", "secrets", "policies", "model-comparison", "models", "mcp-servers", "connected-accounts"].map(page => `/settings/${page}`),
+  ...["", "/members", "/teams", "/models", "/proxy", "/usage", "/plugins", "/mcp-servers", "/github", "/slack", "/linear", "/onepassword", "/library", "/policies", "/secrets", "/sandbox-images", "/action-log", "/audit-log"].map(page => `/settings/organization${page}`),
 ]);
 
 export function readAppPageHint(value: unknown): AppPageHint | undefined {
   if (!value || typeof value !== "object" || !("pathname" in value) || !("workspace" in value)) return undefined;
   const { pathname, workspace } = value;
   if (typeof pathname !== "string" || pathname.length > 200 || typeof workspace !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(workspace)) return undefined;
-  if (!pages.has(pathname) && !/^\/settings\/teams\/[A-Za-z0-9_-]{1,128}(?:\/(?:integrations|usage|access|policies))?$/.test(pathname)) return undefined;
+  if (!pages.has(pathname) && !/^\/settings\/teams\/[A-Za-z0-9_-]{1,128}(?:\/(?:integrations|secrets|access|policies|usage))?$/.test(pathname)) return undefined;
   return { pathname, workspace };
 }
 

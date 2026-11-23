@@ -21,7 +21,10 @@ vi.mock("@tanstack/react-router", () => ({
     );
   },
   useRouterState: () => pathname,
+  useRouter: () => ({ history: { push: historyPush } }),
 }));
+
+const historyPush = vi.fn();
 
 let pathname = "/settings/profile";
 let orgData: { callerRole: "admin" | "member"; features: { organizations: boolean }; plugins: Array<{ name: string; enabledForCaller: boolean }>; loadedPlugins?: string[] } | undefined;
@@ -33,7 +36,8 @@ vi.mock("~/api/settings", () => ({
 }));
 
 import { PinnedWorkspaceScope } from "~/lib/workspace-scope";
-import { ORG_SECTIONS, SettingsRail, orgSectionFor } from "./settings-rail";
+import { BackToApp, ORG_SECTIONS, SettingsRail, orgSectionFor } from "./settings-rail";
+import { rememberAppPath } from "~/lib/last-app-path";
 
 beforeEach(() => {
   linkProps.length = 0;
@@ -55,6 +59,16 @@ function groupLabels(): string[] {
 }
 
 describe("SettingsRail", () => {
+  it("links back to the last app page, not to a settings page", async () => {
+    rememberAppPath("/chat", "/chat?thread=abc");
+    rememberAppPath("/settings/access", "/settings/access");
+    render(<BackToApp />);
+    const back = screen.getByRole("link", { name: "← Back to app" });
+    expect(back.getAttribute("href")).toBe("/chat?thread=abc");
+    await userEvent.click(back);
+    expect(historyPush).toHaveBeenCalledWith("/chat?thread=abc");
+  });
+
   it("lists every scope, with teams by name", () => {
     render(<SettingsRail />);
     expect(groupLabels()).toEqual(["Account", "Personal", "Your teams", "Organization"]);
@@ -92,16 +106,18 @@ describe("SettingsRail", () => {
     expect(snapshot()).toEqual(onPersonal);
     // Personal pages stay personal, and the team keeps its own item.
     const personalGroup = within(rail()).getByRole("group", { name: "Personal" });
-    expect(within(personalGroup).getByRole("link", { name: "API keys and proxy" }).getAttribute("href")).toBe("/settings/api-keys");
+    expect(within(personalGroup).getByRole("link", { name: "Access" }).getAttribute("href")).toBe("/settings/access");
     expect(within(rail()).getByRole("group", { name: "Your teams" })).toBeTruthy();
   });
 
-  it("keeps API keys, Agent access, Policies and Model comparison under Personal", () => {
+  it("lists the Personal pages in rail order, with one Access page", () => {
     render(<SettingsRail />);
     const personal = within(rail()).getByRole("group", { name: "Personal" });
-    for (const label of ["API keys and proxy", "Agent access", "Policies", "Model comparison"]) {
-      expect(within(personal).getByRole("link", { name: label })).toBeTruthy();
-    }
+    expect(within(personal).getAllByRole("link").map((a) => a.textContent)).toEqual([
+      "Integrations", "Access", "Secrets", "Policies", "Usage", "Model comparison",
+    ]);
+    expect(within(personal).queryByRole("link", { name: "API keys and proxy" })).toBeNull();
+    expect(within(personal).queryByRole("link", { name: "Agent access" })).toBeNull();
     expect(within(personal).getByRole("link", { name: "Model comparison" }).getAttribute("href")).toBe("/settings/model-comparison");
   });
 
@@ -113,9 +129,16 @@ describe("SettingsRail", () => {
     expect(within(personal).queryByRole("link", { name: "Models" })).toBeNull();
   });
 
-  it("lists Models and Proxy in the Models and usage section", () => {
+  it("lists Models, Proxy, and the organization's Usage in the Models and usage section", () => {
     const section = ORG_SECTIONS.find((s) => s.label === "Models and usage");
-    expect(section?.routes.map((r) => r.label)).toEqual(["Models", "Proxy"]);
+    expect(section?.routes.map((r) => r.label)).toEqual(["Models", "Proxy", "Usage"]);
+    expect(section?.routes.at(-1)?.to).toBe("/settings/organization/usage");
+  });
+
+  it("lists the organization's Secrets and Sandbox settings under Security and audit", () => {
+    const section = ORG_SECTIONS.find((s) => s.label === "Security and audit");
+    expect(section?.routes.map((r) => r.label)).toEqual(["Policies", "Secrets", "Sandbox settings", "Action log", "Audit log"]);
+    expect(orgSectionFor("/settings/organization/secrets")?.label).toBe("Security and audit");
   });
 
   it("marks a team active on any of its tabs", () => {
@@ -136,11 +159,28 @@ describe("SettingsRail", () => {
     expect(within(org).getByRole("link", { name: "General" }).getAttribute("aria-current")).toBeNull();
   });
 
-  it("shows a member only Teams and 1Password under Organization", () => {
+  it("shows a member only Teams under Organization", () => {
     orgData = { callerRole: "member", features: { organizations: true }, plugins: [] };
     render(<SettingsRail />);
     const org = within(rail()).getByRole("group", { name: "Organization" });
-    expect(within(org).getAllByRole("link").map((a) => a.textContent)).toEqual(["Teams", "1Password"]);
+    expect(within(org).getAllByRole("link").map((a) => a.textContent)).toEqual(["Teams"]);
+  });
+
+  it.each([
+    ["an org admin", "admin" as const, ["General", "Models and usage", "Apps and plugins", "Security and audit"]],
+    ["a plain member on a team", "member" as const, ["Teams"]],
+  ])("gives %s the full rail for their role", (_who, role, orgItems) => {
+    orgData = { callerRole: role, features: { organizations: true }, plugins: [] };
+    teams = [{ id: "t1", name: "team-tvc", callerRole: "member" }, { id: "t3", name: "not-mine", callerRole: null }];
+    render(<SettingsRail />);
+    const items = (group: string) =>
+      within(within(rail()).getByRole("group", { name: group })).getAllByRole("link").map((a) => a.textContent);
+    expect(groupLabels()).toEqual(["Account", "Personal", "Your teams", "Organization"]);
+    expect(items("Account")).toEqual(["Profile", "Preferences", "Notifications"]);
+    expect(items("Personal")).toEqual(["Integrations", "Access", "Secrets", "Policies", "Usage", "Model comparison"]);
+    // Your teams lists memberships only, even for an admin who may open more.
+    expect(items("Your teams")).toEqual(["team-tvc"]);
+    expect(items("Organization")).toEqual(orgItems);
   });
 
   it("hides Organization and Your teams before the org query resolves", () => {

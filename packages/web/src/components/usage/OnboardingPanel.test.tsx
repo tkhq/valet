@@ -38,7 +38,7 @@ beforeEach(() => {
 describe("coding tool setup", () => {
   it("leads with browser-approved Claude setup without making a manual key", () => {
     mount();
-    expect(screen.getByRole("heading", { name: "Connect your coding tool" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Send model requests through Valet" })).toBeTruthy();
     expect(screen.getByText(/valet proxy setup claude-code/).textContent).toContain(`valet login ${window.location.origin}`);
     expect(screen.getByText(/cli\/install.sh/).textContent).toContain(`${window.location.origin}/cli/install.sh`);
     expect(screen.queryByText(/valet proxy setup codex/)).toBeNull();

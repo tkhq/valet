@@ -54,7 +54,6 @@ export function TeamIntegrations({ teamId, notice }: { teamId: string; notice?: 
                 <ErrorRow>Could not load member names. Member IDs are shown instead. Reload the page to try again.</ErrorRow>
               )}
               <TeamCredentials
-                cards
                 team={team}
                 orgMembers={directoryQ.error ? [] : directoryQ.data?.users ?? []}
                 canMutate={canMutate}

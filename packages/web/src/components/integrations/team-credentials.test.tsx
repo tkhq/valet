@@ -42,7 +42,7 @@ const cred = (over: Partial<CredentialSummary> = {}): CredentialSummary => ({
 
 function renderRows(canMutate: boolean) {
   render(
-    <TeamCredentials cards team={team} orgMembers={[member]} canMutate={canMutate} />,
+    <TeamCredentials team={team} orgMembers={[member]} canMutate={canMutate} />,
   );
 }
 

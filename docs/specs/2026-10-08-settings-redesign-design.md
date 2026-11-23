@@ -42,27 +42,30 @@ on these pages, not the switcher's.
 | Group | Items | Scope |
 |---|---|---|
 | Account | Profile, Preferences, Notifications | you |
-| Personal | Integrations, Usage, API keys and proxy, Secrets, Agent access, Policies, Model comparison | your personal workspace |
+| Personal | Integrations, Access, Secrets, Policies, Usage, Model comparison | your personal workspace |
 | Your teams | one item per team you belong to | that team |
 | Organization | General, Models and usage, Apps and plugins, Security and audit | the organization (admins) |
 
 - **Preferences** joins Appearance and Thread defaults on one page.
-- **API keys and proxy** joins the two pages for the personal workspace.
+- **Access** joins API keys, proxy, and agent access for the personal
+  workspace (2026-11-17).
 - **A team** opens `/settings/teams/$teamId`, a page with tabs: General (the
-  team panel: members, defaults, Slack home channel, connections), API keys and
-  proxy, and Policies. A draft on one team's tab does not carry to another
-  team's page.
+  team panel: name, members, defaults, Slack home channel, deletion
+  requests), Integrations, Secrets, Access, Policies, and Usage
+  (2026-11-17). A draft on one team's tab does not carry to another team's
+  page.
   Deleting the team, or removing yourself from it, on this page opens Profile.
 - **Organization** keeps every existing route. The rail shows four items, and
   each item's page shows a tab bar over the routes it groups:
   - General: General, Members, Teams
-  - Models and usage: Models, Proxy
+  - Models and usage: Models, Proxy, Usage (2026-11-17)
   - Apps and plugins: Plugins, MCP servers, GitHub, Slack, Linear,
     1Password, Library
-  - Security and audit: Policies, Sandbox settings, Action log
+  - Security and audit: Policies, Secrets, Sandbox settings, Action log,
+    Audit log (Secrets added 2026-11-17)
 
-  A plain member still sees only Teams and 1Password, as two rail items, and
-  no tab bar.
+  A plain member sees only Teams, as a rail item, and no tab bar
+  (1Password left the member rail on 2026-11-17).
 - While organizations are off, Personal also lists Models
   (`/settings/models`). For an org admin it also lists MCP servers
   (`/settings/mcp-servers`), because `GET /api/org/mcp-servers` refuses a
@@ -87,6 +90,62 @@ uses the danger button. Organization Security kill switches show service
 display names. The Secrets empty state names `VALET_SECRET_STORE` only to an
 admin.
 
+**Restructure (2026-11-17).** The rail has one page per thing, and each
+scope holds only its own items.
+
+- **Access.** Personal Agent access and API keys and proxy are one page,
+  Access (`/settings/access`), the same name as the team tab. Its sections
+  are, in order: Connected agents (MCP apps and Valet CLI sign-ins), Set up
+  a coding tool, API keys, and Proxy. Set up a coding tool is the one setup
+  entry point. It has two parts because they do different things: Connect
+  Valet tools (the `agent-setup.md` prompt, which signs in the CLI and
+  connects MCP) and Send model requests through Valet (the proxy flow with
+  the tool picker). A team's Access tab has the same order without
+  Connected agents and the MCP prompt. `/settings/api-keys` and
+  `/settings/agent-access` are deleted without redirects: no link outside
+  web Settings opens them. CLI, consent page, and API copy say "Settings >
+  Access".
+- **Usage.** Personal Usage (`/settings/usage`) shows only the viewer's
+  spend and has no "My usage / Organization" toggle. The organization's
+  spend, with the By member table, is the Usage tab under Models and usage
+  (`/settings/organization/usage`). The organization route guard admits
+  only an org admin there. Both views keep the period controls and the CSV
+  download, which names its scope. The team Usage tab does not change.
+- **Secrets.** Each scope keeps its secrets on its own page, and the scope
+  tab bar is gone: personal on `/settings/secrets`, a team's on its
+  Secrets tab, and the organization's on Security and audit · Secrets.
+  The three share one list and form (`SecretsSection`) with a scope
+  target. The API decides who may change each scope (`canWrite`).
+- **Team pages.** A team's members and org admins open
+  `/settings/teams/$teamId`, the same rule team Policies uses. Each row in
+  Organization · Teams is a link to that page. The list has no inline
+  editor: create stays at the top of the list, Delete stays in an
+  administrator's row menu, and Request deletion moves to the team page,
+  where its form lives. `?teamId=` on the Teams page opens the team page,
+  so saved review notifications still land. Review notifications and
+  workflow deletion answers now link `/settings/teams/$teamId`. Team
+  General uses `Section` cards with `FieldRow`, the same anatomy as the
+  other settings pages. The usage API answers a team's spend to its
+  members only, so an org admin who is not on a team sees a pointer to
+  Organization Usage on that tab.
+- **Organization rail.** Security and audit holds Policies, Secrets,
+  Sandbox settings, Action log, and Audit log. The member-only 1Password
+  rail item is gone, and the organization guard no longer admits a member
+  to `/settings/organization/onepassword`: the page held only a read-only
+  status of the organization token, and a member's own token is on
+  Integrations.
+- **Entry points.** The gear opens Account (Profile). A space's Settings
+  row in the sidebar opens that space's settings: Personal Integrations,
+  or the team's page. One function, `spaceSettingsTarget`
+  (`lib/space-settings.ts`), holds that rule for the sidebar row and for
+  the `/usage` and `/integrations` redirects.
+- **Back to app.** Settings has no app sidebar, so a "← Back to app" link
+  sits above the Settings title, in the `PageHeader` back slot with the
+  `BackLink` style other pages use. It opens the last app page the person saw, with its
+  search and hash (`lib/last-app-path.ts`). The root layout records that
+  page on each navigation outside Settings. The value lives in memory, so
+  after a reload into Settings the link opens Home.
+
 ### 3. Visual language
 
 Settings matches the thread UI:
@@ -106,7 +165,7 @@ Settings matches the thread UI:
   already there, and your 1Password token becomes a row.
 - Each space has one settings home (2026-11-04, Linear's team settings). A
   team's Integrations and Usage are tabs on `/settings/teams/$teamId`, beside
-  General, API keys and proxy, and Policies. Your own are
+  General, Access, and Policies. Your own are
   `/settings/integrations` and `/settings/usage` under Personal. The
   sidebar's Settings row under each space is one link to that home, and Skills
   and Memory are ordinary space rows. The team General tab no longer repeats
@@ -293,13 +352,15 @@ Restart replay publishes the same completion event after it saves the result.
   with the switcher.
 - `-settings.routes.test.tsx` (real router, real layout and scope provider):
   Preferences with both parts; personal Policies pinned while
-  the switcher holds a team; a team's API keys and proxy and Policies tabs;
+  the switcher holds a team; personal Access with its four sections in order;
+  a team's Access and Policies tabs;
   the Organization tabs for an admin but not a member; and, while
   organizations are off, MCP servers outside the organization route guard
   for an admin and the ask-an-admin notice for a member.
 - `-settings.team.test.tsx`: the team page pins its team, marks its tab,
-  refuses a team the caller is not on, and drops a draft when another of the
-  caller's teams opens; the personal API keys and proxy page pins personal
+  refuses a team the caller is not on unless the caller is an org admin, and
+  drops a draft when another of the
+  caller's teams opens; the personal Access page pins personal
   scope.
 - `-settings.navigation.test.tsx`: rail links leave Organization Teams, and
   primary links leave Settings.

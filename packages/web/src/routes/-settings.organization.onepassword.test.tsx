@@ -24,13 +24,11 @@ describe("OrganizationOnePasswordPage", () => {
     expect(screen.getByText("onepassword-panel")).toBeTruthy();
   });
 
-  // The panel's own non-admin branch renders the member's personal token
-  // row, and `GET /api/onepassword/settings` answers any member. With the
-  // page behind the admin guard that branch was unreachable, so a member
-  // could neither connect nor revoke their own token.
-  it("is reachable by a plain member", () => {
-    expect(isMemberVisiblePath("/settings/organization/onepassword")).toBe(true);
-    expect(isMemberVisiblePath("/settings/organization/onepassword/")).toBe(true);
-    expect(isMemberVisiblePath("/settings/organization/members")).toBe(false);
+  // A member's own token is on Integrations, and the org token is an
+  // admin's to set, so the page holds nothing a member can act on.
+  it("is for org admins only", () => {
+    expect(isMemberVisiblePath("/settings/organization/onepassword")).toBe(false);
+    expect(isMemberVisiblePath("/settings/organization/onepassword/")).toBe(false);
+    expect(isMemberVisiblePath("/settings/organization/teams")).toBe(true);
   });
 });
