@@ -29,6 +29,8 @@
  *   (the write commits; the response carries the warning).
  * - Two workflow targets pointing at DIFFERENT workflows never collide —
  *   running two distinct workflows off one event is intentional fan-out.
+ * - Two plugin targets pointing at DIFFERENT handlers never collide either:
+ *   code review and dependency review on one repository are separate jobs.
  * - A workflow target never blocks an assistant target (or the reverse);
  *   the pair is at most a warning. Blocking is reserved for rules that would
  *   race the same kind of consumer.
@@ -47,6 +49,9 @@ const SLACK_MENTION_KEY = "slack.app_mention";
 export interface CollisionTarget {
   kind: string;
   workflowId?: string;
+  /** Plugin targets: the plugin and its handler. */
+  plugin?: string;
+  handler?: string;
   follow?: boolean;
   assistant?: "user" | "team" | "org";
 }
@@ -262,6 +267,8 @@ function severity(
 ): "blocking" | "overlapping" | null {
   if (cand.kind === "workflow" && exist.kind === "workflow") {
     if (cand.workflowId !== exist.workflowId) return null;
+  } else if (cand.kind === "plugin" && exist.kind === "plugin") {
+    if (cand.plugin !== exist.plugin || cand.handler !== exist.handler) return null;
   } else if (isAssistantKind(cand.kind) !== isAssistantKind(exist.kind)) {
     // Either spelling of the assistant kind is one kind (`target-names.ts`).
     return "overlapping";

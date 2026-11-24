@@ -25,7 +25,10 @@ Create a line with target `{ kind: "plugin", plugin: "pr-review", handler:
 }
 ```
 
-Send it as `POST /api/event-subscriptions`. The Code review page lists only
+Send it as `POST /api/event-subscriptions`. It does not collide with the
+repository's code review line: two plugin lines aimed at different handlers
+are fan-out, as two lines aimed at different workflows are
+(`packages/api/src/events/collisions.ts`). The Code review page lists only
 `review-pull-request` lines. A dependency line does not show there.
 
 Settings (`target.config`):
