@@ -351,3 +351,9 @@ The handler also measures its own reviews, with no eval run.
 per repository, build, and live or shadow line. Rates count merged pull
 requests only. The Code
 review page shows each row as "Review outcomes" with the address rate.
+
+## Dependency review
+
+The `review-dependencies` handler of the same plugin checks the packages a
+pull request adds or upgrades, on its own line, with its own summary review.
+See `2026-11-20-code-review-dependencies-design.md`.

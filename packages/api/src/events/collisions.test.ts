@@ -29,7 +29,7 @@ interface TestSub {
   name: string;
   eventKeys: string[];
   filters: SubscriptionFilter[];
-  target: { kind: string; workflowId?: string; assistantId?: string };
+  target: { kind: string; workflowId?: string; assistantId?: string; plugin?: string; handler?: string };
 }
 
 function sub(over: Partial<TestSub> = {}): TestSub {
@@ -309,6 +309,19 @@ describe("computeCollisions — target policy", () => {
     );
     expect(report.blocking).toHaveLength(0);
     expect(report.overlapping).toHaveLength(0);
+  });
+
+  it("allows identical coverage aimed at two DIFFERENT handlers of one plugin (code review and dependency review)", () => {
+    const plugin = (handler: string) => ({ kind: "plugin", plugin: "pr-review", handler });
+    const report = computeCollisions(
+      candidate({ target: plugin("review-dependencies") }),
+      [sub({ target: plugin("review-pull-request") })],
+      CATALOG,
+    );
+    expect(report.blocking).toHaveLength(0);
+    expect(report.overlapping).toHaveLength(0);
+    // The same handler twice still blocks.
+    expect(computeCollisions(candidate({ target: plugin("review-pull-request") }), [sub({ target: plugin("review-pull-request") })], CATALOG).blocking).toHaveLength(1);
   });
 
   it("blocks identical coverage aimed at the SAME workflow", () => {
