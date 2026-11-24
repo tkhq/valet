@@ -79,7 +79,8 @@ request cannot run code through them.
    first. A failed read gives no facts for that package.
 6. Make findings (below), each with a stable key
    `<ecosystem>:<name>@<version>:<kind>[:<advisory id>]`.
-7. For each new advisory finding, ask one reachability child (below).
+7. Ask one reachability child about each new advisory, and about the open
+   ones when the push changed code (below).
 8. Post or edit the summary, and post new inline comments.
 
 ## Findings
@@ -122,8 +123,12 @@ advisories do), and the advisory text inside `<advisory-text>`. It answers
 No child starts when `reachability` is off, when no advisory is new, or when
 the pull request comes from a fork whose author has no write access. The
 summary says why reachability was not checked. A child that fails or cannot
-start loses the reachability note only, never the advisories. A later push
-does not judge an open advisory again: its pointer keeps the verdict.
+start loses the reachability note only, never the advisories. The pointer
+keeps the verdict. A later push that changes code outside the dependency
+files (or a force-push) judges the open advisories again in the same child: a
+new call can reach an advisory, and a removed call can stop reaching it. When
+a verdict changes, the handler rewrites the finding's comment and severity. A
+push that changes only dependency files judges only the new advisories.
 
 ## What it posts
 

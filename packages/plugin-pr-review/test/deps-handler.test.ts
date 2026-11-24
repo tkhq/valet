@@ -73,6 +73,8 @@ class Fake {
   /** npm version documents by `name@version`. */
   npmVersions: Record<string, Record<string, unknown>> = {};
   npmCreated: Record<string, string> = {};
+  /** Files compare(<earlier head>, head) lists: what a later push changed. */
+  pushFiles: string[] = ["package.json"];
   private nextId = 100;
 
   fetch: typeof fetch = async (input, init) => {
@@ -136,7 +138,10 @@ class Fake {
       });
     }
     if (method === "GET" && path === "/pulls/7/files") return ok(url.searchParams.get("page") === "1" ? this.changed.map((f) => ({ additions: 1, deletions: 0, ...f })) : []);
-    if (method === "GET" && path.startsWith("/compare/")) return ok({ status: "ahead", merge_base_commit: { sha: BASE }, files: [] });
+    if (method === "GET" && path.startsWith("/compare/")) {
+      const from = path.slice("/compare/".length).split("...")[0];
+      return ok({ status: "ahead", merge_base_commit: { sha: BASE }, files: from === BASE ? [] : this.pushFiles.map((filename) => ({ filename })) });
+    }
     if (method === "GET" && path.startsWith("/contents/")) {
       const file = decodeURIComponent(path.slice("/contents/".length));
       const text = url.searchParams.get("ref") === BASE ? this.baseFiles[file] : this.headFiles[file];
@@ -205,7 +210,7 @@ class FakeStore implements ScopedPluginStore {
 
 class FakeThreads implements PluginThreads {
   spawned: PluginChildRequest[] = [];
-  constructor(private answer: (req: PluginChildRequest) => SubmissionResult["output"] | undefined) {}
+  constructor(public answer: (req: PluginChildRequest) => SubmissionResult["output"] | undefined) {}
   async ensure(key: string): Promise<PluginThreadRef> {
     return { sessionId: "s1", threadId: "t1", key: `plugin:pr-review:${key}` };
   }
@@ -383,6 +388,36 @@ describe("review-dependencies handler", () => {
     expect(gh.summary()).toContain("### Resolved (1)");
     expect(gh.summary()).toContain("No open findings.");
     expect(store.state()?.findings[0]).toMatchObject({ status: "resolved", resolvedIn: "3".repeat(40) });
+  });
+
+  it("judges an open advisory again when a push changes code, and rewrites its comment when the verdict changes", async () => {
+    const { gh, store, threads, run } = setup(reachable("no"));
+    gh.dependencies({}, { lodash: "4.17.20" });
+    gh.vulns["lodash@4.17.20"] = [LODASH_ADVISORY];
+    await run("e1");
+    expect(gh.comments[0].body).toContain("Medium · dependency advisory");
+    const commentId = gh.comments[0].id;
+
+    // A push that changes only dependency files does not judge it again.
+    gh.head = H2;
+    gh.pushFiles = ["package.json"];
+    await run("e2");
+    expect(threads.spawned).toHaveLength(1);
+
+    // A push that adds a call to the affected function does.
+    threads.answer = reachable("yes");
+    gh.head = "3".repeat(40);
+    gh.pushFiles = ["src/index.ts"];
+    gh.writes = [];
+    await run("e3");
+    expect(threads.spawned).toHaveLength(2);
+    expect(threads.spawned[1].prompt).toContain("### a1: GHSA-35jh-r3h4-6jhm");
+    expect(gh.comments).toHaveLength(1);
+    expect(gh.comments[0].body).toContain("High · dependency advisory");
+    expect(gh.comments[0].body).toContain("**Reachable.**");
+    expect(gh.writes).toContain(`PATCH /pulls/comments/${commentId}`);
+    expect(gh.summary()).toContain("- **High** `package.json:");
+    expect(store.state()?.findings[0]).toMatchObject({ severity: "high", reach: { reachable: "yes" }, status: "open" });
   });
 
   it("never posts again a finding a person dismissed by resolving its thread", async () => {

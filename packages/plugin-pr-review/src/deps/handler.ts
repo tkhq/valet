@@ -201,10 +201,15 @@ async function reviewDependencies(event: PluginEvent, ctx: PluginEventContext, o
   const fresh = candidates.filter((f) => !pointers.has(f.key) || pointers.get(f.key)?.status === "resolved");
   const dropped = [...pointers.values()].filter((p) => p.status === "open" && !dismissedNow.has(p.id) && !current.has(p.key));
 
-  // 4. Reachability: one child for the new advisories, in a sandbox at the head. Not for an untrusted fork.
+  // 4. Reachability: one child, in a sandbox at the head, for the new advisories. It also judges the open
+  // ones again when the push changed code outside the dependency files: a new call can reach an advisory,
+  // and a removed call can stop reaching it. No child for an untrusted fork.
+  let keptOpen = [...pointers.values()].filter((p) => p.status === "open" && !dismissedNow.has(p.id) && current.has(p.key));
+  const codeChanged = prior?.lastReviewedHead !== undefined && keptOpen.some((p) => p.kind === "advisory") && (await changedCodeSince(gh, prior.lastReviewedHead, head));
+  const again = codeChanged ? keptOpen.filter((p) => p.kind === "advisory").flatMap((p) => current.get(p.key) ?? []) : [];
   const reach = new Map<string, ReachabilityVerdict>();
   let reachabilityNote: string | undefined;
-  const toJudge = fresh.filter((f) => f.kind === "advisory");
+  const toJudge = [...fresh.filter((f) => f.kind === "advisory"), ...again];
   if (toJudge.length > 0) {
     if (!settings.reachability) reachabilityNote = "Reachability was not checked: it is off for this line.";
     else if (await untrustedFork(gh, pr)) reachabilityNote = "Reachability was not checked: the pull request comes from a fork whose author has no write access to this repository.";
@@ -216,9 +221,20 @@ async function reviewDependencies(event: PluginEvent, ctx: PluginEventContext, o
         const f = judged[Number(v.ref.replace(/^a/, "")) - 1];
         if (f) reach.set(f.key, v);
       });
-      if (toJudge.length > judged.length) reachabilityNote = `Reachability was checked for the first ${judged.length} new advisories only.`;
+      if (toJudge.length > judged.length) reachabilityNote = `Reachability was checked for the first ${judged.length} advisories only.`;
     }
   }
+  // An open advisory whose verdict changed gets its new severity and text; its comment is edited after the save.
+  const rejudged: { pointer: DependencyPointer; finding: DependencyFinding }[] = [];
+  keptOpen = keptOpen.map((p) => {
+    const v = reach.get(p.key);
+    const f = current.get(p.key);
+    if (!v || !f || v.reachable === p.reach?.reachable) return p;
+    const shown = withReachability(f, v);
+    const next: DependencyPointer = { ...p, severity: shown.severity, reach: { reachable: v.reachable, evidence: v.evidence.slice(0, 300), reason: v.reason.slice(0, 300) } };
+    rejudged.push({ pointer: next, finding: shown });
+    return next;
+  });
 
   // 5. Severity after reachability, then the minimum-severity filter.
   const minRank = SEVERITY_ORDER.indexOf(settings.minSeverity);
@@ -246,7 +262,6 @@ async function reviewDependencies(event: PluginEvent, ctx: PluginEventContext, o
   let outsideNew = toPost.filter((p) => !inline.includes(p));
 
   // 7. Post: one summary review, edited in place, plus one review of inline comments per push.
-  const keptOpen = [...pointers.values()].filter((p) => p.status === "open" && !dismissedNow.has(p.id) && current.has(p.key));
   const summaryOf = (): string => {
     const open: PostedDependencyFinding[] = [
       ...keptOpen.map((p) => ({ id: p.id, key: p.key, kind: p.kind, severity: p.severity, title: p.title, ...(p.path ? { path: p.path } : {}), ...(p.line ? { line: p.line } : {}) })),
@@ -314,6 +329,7 @@ async function reviewDependencies(event: PluginEvent, ctx: PluginEventContext, o
   // 8. Save the new findings before editing old comments, so a retry does not post them twice.
   const byKey = new Map((prior?.findings ?? []).map((p) => [p.key, p]));
   for (const p of byKey.values()) if (dismissedNow.has(p.id)) byKey.set(p.key, { ...p, status: "dismissed" });
+  for (const p of keptOpen) byKey.set(p.key, p);
   for (const p of [...inline, ...outsideNew]) {
     const at = anchorOf(p.finding);
     const loc = at ?? p.finding.locations[0];
@@ -328,10 +344,16 @@ async function reviewDependencies(event: PluginEvent, ctx: PluginEventContext, o
   const base: DependencyPullState = { version: 1, reviewId, findings: [...byKey.values()], nextId, ...(prior?.lastReviewedHead ? { lastReviewedHead: prior.lastReviewedHead } : {}) };
   await save(base);
 
-  // 9. Mark findings whose package version the pull request no longer adds.
-  if (dropped.some((p) => p.commentId !== undefined)) {
+  // 9. Mark findings whose package version the pull request no longer adds, and rewrite the ones judged again.
+  if (dropped.some((p) => p.commentId !== undefined) || rejudged.some((r) => r.pointer.commentId !== undefined)) {
     const comments = new Map((await gh.reviewComments()).map((c) => [c.id, c]));
     const threads = await gh.reviewThreads();
+    for (const { pointer, finding } of rejudged) {
+      ctx.signal.throwIfAborted();
+      const comment = pointer.commentId !== undefined ? comments.get(pointer.commentId) : undefined;
+      const body = renderDependencyComment(pointer.id, finding);
+      if (comment && pointer.commentId !== undefined && comment.body !== body) await gh.updateComment(pointer.commentId, body);
+    }
     for (const p of dropped) {
       ctx.signal.throwIfAborted();
       if (p.commentId === undefined) continue;
@@ -345,7 +367,18 @@ async function reviewDependencies(event: PluginEvent, ctx: PluginEventContext, o
   }
   for (const p of dropped) byKey.set(p.key, { ...p, status: "resolved", resolvedIn: head });
   await save({ ...base, findings: [...byKey.values()], lastReviewedHead: head });
-  log(slug, `checked ${head.slice(0, 7)}: ${changes.length} package change(s), ${checked.length} version(s) looked up, ${toPost.length} new finding(s) (${inline.length} inline), ${keptOpen.length} still open, ${dropped.length} resolved, ${hidden} hidden`);
+  log(slug, `checked ${head.slice(0, 7)}: ${changes.length} package change(s), ${checked.length} version(s) looked up, ${toPost.length} new finding(s) (${inline.length} inline), ${keptOpen.length} still open (${rejudged.length} judged differently), ${dropped.length} resolved, ${hidden} hidden`);
+}
+
+/**
+ * Whether code outside the dependency files changed between two heads. A
+ * force-push, or a comparison GitHub cannot make or lists in full, counts as changed.
+ */
+async function changedCodeSince(gh: GitHubClient, from: string, head: string): Promise<boolean> {
+  const comparison = await gh.compare(from, head);
+  if (!comparison || comparison.status !== "ahead") return true;
+  const files = comparison.files ?? [];
+  return files.length >= 300 || files.some((f) => dependencyFile(f.filename) === undefined);
 }
 
 /**
