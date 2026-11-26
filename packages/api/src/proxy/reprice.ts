@@ -33,7 +33,11 @@ export async function repriceProxyCalls(
           }
         } catch { /* An unreadable request cannot supply a pricing fallback. */ }
       }
-      const cost = model ? priceUsage("openai", model, row) : null;
+      // Historical rows (before parseUsage normalized OpenAI input) carry both
+      // cache classes inside input_tokens. Subtract them before pricing.
+      const cost = model
+        ? priceUsage("openai", model, { ...row, input: Math.max(0, row.input - row.cacheRead - row.cacheWrite) })
+        : null;
       if (cost === null || row.cost === null) { result.skipped++; continue; }
       if (Math.abs(cost - row.cost) < 1e-12) continue;
       if (opts.apply) {

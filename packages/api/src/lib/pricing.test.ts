@@ -5,9 +5,15 @@ const usage = { input: 1000, output: 500, cacheRead: 0, cacheWrite: 0, total: 15
 
 describe("priceUsage", () => {
   it("charges cached OpenAI input only at the cache rate", () => {
+    // parseUsage persists uncached input; cacheRead is priced at its own rate.
     expect(priceUsage("openai", "gpt-5", {
-      input: 1_000_000, output: 1000, cacheRead: 900_000, cacheWrite: 0, total: 1_001_000,
+      input: 100_000, output: 1000, cacheRead: 900_000, cacheWrite: 0, total: 1_001_000,
     })).toBeCloseTo(0.2475, 8);
+  });
+  it("prices OpenAI cache writes at their own rate, not the input rate", () => {
+    expect(priceUsage("openai", "gpt-5.6-sol", {
+      input: 10_000, output: 1000, cacheRead: 60_000, cacheWrite: 30_000, total: 101_000,
+    })).toBeCloseTo(0.234, 8);
   });
   it("keeps Anthropic cache tokens separate from input", () => {
     expect(priceUsage("anthropic", "claude-sonnet-4-5", {
